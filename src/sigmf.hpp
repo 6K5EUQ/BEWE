@@ -1,11 +1,11 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// SigMF (Signal Metadata Format) IO for BE_WE IQ recordings.
+// SigMF (Signal Metadata Format) IO for BEWE IQ recordings.
 //
 //   data : <stem>.sigmf-data = raw interleaved int16 I,Q little-endian
 //          (SigMF datatype "ci16_le"). Header-less; samples start at byte 0.
 //   meta : <stem>.sigmf-meta = JSON {global, captures, annotations}.
-//          BE_WE-specific fields live under the "bewe:" namespace.
+//          BEWE-specific fields live under the "bewe:" namespace.
 //
 // Replaces the legacy pair:
 //   <name>.wav  (RIFF/WAVE stereo int16 + custom "bewe" chunk)

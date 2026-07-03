@@ -15,7 +15,7 @@ extern char** environ;
 static std::string self_exe_path(){
     char buf[4096];
     ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf)-1);
-    if(n <= 0) return "BE_WE";
+    if(n <= 0) return "BEWE";
     buf[n] = '\0';
     return std::string(buf);
 }

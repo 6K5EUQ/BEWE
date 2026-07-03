@@ -62,7 +62,7 @@ static void parse_args(int argc, char** argv){
             g_session_args.station_lon = (float)std::atof(a + std::strlen("--station-lon="));
         } else if(std::strcmp(a, "--help") == 0 || std::strcmp(a, "-h") == 0){
             fprintf(stderr,
-                "BE_WE options:\n"
+                "BEWE options:\n"
                 "  --sdr bladerf|rtlsdr|pluto   force a specific SDR backend\n"
                 "  --session-mode=host|join     internal: child-process boot mode\n"
                 "  --station-id=<id>            internal: Central room id (JOIN)\n"

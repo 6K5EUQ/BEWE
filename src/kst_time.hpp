@@ -1,6 +1,6 @@
 #pragma once
 // KST (Korea Standard Time, UTC+9) helpers — force KST regardless of system TZ.
-// All timestamp displays and filenames in BE_WE use KST via these helpers.
+// All timestamp displays and filenames in BEWE use KST via these helpers.
 //
 // Internal storage continues to use time_t / unix epoch (UTC seconds);
 // these helpers only shift for display/filename rendering and for

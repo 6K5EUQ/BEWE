@@ -151,7 +151,7 @@ bool extract_start_utc(const std::string& day, const std::string& time_str, int6
     tm.tm_min  = mm;
     tm.tm_sec  = ss;
 
-    // BE_WE는 KST(UTC+9) 강제 — 태그 없는 신규 파일은 KST로 해석.
+    // BEWE는 KST(UTC+9) 강제 — 태그 없는 신규 파일은 KST로 해석.
     // 기존 "(UTC+N)" / "(UTC-N)" 태그가 있으면 그 값 사용 (호환).
     int utc_off_h = 9;
     auto p = time_str.find("UTC");
