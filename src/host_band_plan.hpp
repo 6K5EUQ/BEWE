@@ -1,5 +1,5 @@
 #pragma once
-// Host-owned band plan store. Each HOST machine owns ~/BE_WE/band_plan.json.
+// Host-owned band plan store. Each HOST machine owns ~/BEWE/band_plan.json.
 // On HOST start: load_from_file() + rebuild_cache().
 // On JOIN connect (Central CONN_OPEN): broadcast g_cached_pkt to that conn (or all).
 // On JOIN/HOST edit: apply_*() → save_to_file() → rebuild_cache() → broadcast.
@@ -18,7 +18,7 @@ extern std::mutex                g_mtx;
 extern std::vector<PktBandEntry> g_segments;     // master in-memory copy
 extern std::vector<uint8_t>      g_cached_pkt;   // BEWE-framed BAND_PLAN_SYNC
 
-std::string file_path();           // ~/BE_WE/band_plan.json
+std::string file_path();           // ~/BEWE/band_plan.json
 void load_from_file();             // populate g_segments; missing → empty
 void save_to_file();               // write g_segments → disk (same JSON shape Central used)
 void rebuild_cache();              // g_segments → g_cached_pkt

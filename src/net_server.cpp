@@ -676,7 +676,7 @@ void NetServer::broadcast_module_pipe(const void* payload, uint32_t len){
 }
 
 // ── Broadcast band plan (HOST → all JOINs, LAN + relay) ──────────────────
-// Host owns ~/BE_WE/band_plan.json. Whenever state changes, host calls this.
+// Host owns ~/BEWE/band_plan.json. Whenever state changes, host calls this.
 // LAN-direct JOINs receive via per-client enqueue; relay-side JOINs receive
 // via on_relay_broadcast (Central fans out to N joins).
 void NetServer::broadcast_band_plan(const PktBandPlan& bp){

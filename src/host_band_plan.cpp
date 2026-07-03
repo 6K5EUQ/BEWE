@@ -119,7 +119,7 @@ void save_to_file(){
     }
     out += "\n  ]\n}\n";
 
-    // ensure ~/BE_WE exists
+    // ensure ~/BEWE exists
     std::string dir = BEWEPaths::data_dir();
     mkdir(dir.c_str(), 0755);
 

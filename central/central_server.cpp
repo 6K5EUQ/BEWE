@@ -68,8 +68,8 @@ static const char* db_subdir_for(const char* fn){
 
 static std::string db_base_dir(){
     const char* home = getenv("HOME");
-    return home ? std::string(home) + "/BE_WE/DataBase"
-                : std::string("/tmp/BE_WE/DataBase");
+    return home ? std::string(home) + "/BEWE/DataBase"
+                : std::string("/tmp/BEWE/DataBase");
 }
 
 // mkdirs DataBase/{iq,audio,hist}/ if absent
@@ -171,7 +171,7 @@ bool CentralServer::start(int port){
     // 스케줄 영속화 파일 경로 결정 및 로드
     {
         const char* home = getenv("HOME");
-        std::string base = home ? std::string(home)+"/BE_WE/DataBase" : "/tmp/BE_WE/DataBase";
+        std::string base = home ? std::string(home)+"/BEWE/DataBase" : "/tmp/BEWE/DataBase";
         mkdir(base.c_str(), 0755);
         db_ensure_dirs();
         db_migrate_flat_to_subdirs();
@@ -1606,7 +1606,7 @@ void CentralServer::build_and_broadcast_op_list(std::shared_ptr<HostRoom> room){
 
 // ── DB_LIST broadcast ─────────────────────────────────────────────────────
 void CentralServer::broadcast_db_list(std::shared_ptr<HostRoom> room){
-    // ~/BE_WE/DataBase/{iq,audio,hist}/ 모두 스캔
+    // ~/BEWE/DataBase/{iq,audio,hist}/ 모두 스캔
     std::string db_base = db_base_dir();
 
     std::vector<std::pair<time_t, DbFileEntry>> with_mtime;
@@ -1701,11 +1701,11 @@ void CentralServer::broadcast_db_list(std::shared_ptr<HostRoom> room){
 
 // ── CHANNEL_SYNC audio_mask 재작성 + broadcast ───────────────────────────
 // ── Module control plane ────────────────────────────────────────────────
-// 일 단위 저장 (Central 집계본): ~/BE_WE/modules/<mod>/<mod>_YYYYMMDD.dat
+// 일 단위 저장 (Central 집계본): ~/BEWE/modules/<mod>/<mod>_YYYYMMDD.dat
 // 레코드 = u32 len + (MpData + 모듈 payload)
 static std::string module_store_today(const char* mod){
     const char* home = getenv("HOME");
-    std::string dir = std::string(home?home:".") + "/BE_WE/modules/" + mod;
+    std::string dir = std::string(home?home:".") + "/BEWE/modules/" + mod;
     std::string p;
     for(char c : dir){ p += c; if(c=='/' && p.size()>1) mkdir(p.c_str(), 0755); }
     mkdir(dir.c_str(), 0755);
@@ -1716,10 +1716,10 @@ static std::string module_store_today(const char* mod){
     return dir + f;
 }
 
-// 아카이브 저장: ~/BE_WE/modules/<mod>/archive/<YYYYMMDD>/<기지>.jsonl (기지별·날짜별)
+// 아카이브 저장: ~/BEWE/modules/<mod>/archive/<YYYYMMDD>/<기지>.jsonl (기지별·날짜별)
 static std::string module_archive_dir(const char* mod, const char* date8){
     const char* home = getenv("HOME");
-    std::string dir = std::string(home?home:".") + "/BE_WE/modules/" + mod + "/archive";
+    std::string dir = std::string(home?home:".") + "/BEWE/modules/" + mod + "/archive";
     std::string p;
     for(char c : dir){ p += c; if(c=='/' && p.size()>1) mkdir(p.c_str(), 0755); }
     mkdir(dir.c_str(), 0755);
@@ -1966,7 +1966,7 @@ void CentralServer::handle_join_module_pipe(std::shared_ptr<JoinEntry> je,
     if(h->kind == BEWE_MK_HLIST_REQ){
         // 아카이브 보유 날짜 목록: archive/ 하위 YYYYMMDD 디렉토리 스캔 (최신순, 최대 64)
         const char* home = getenv("HOME");
-        std::string base = std::string(home?home:".") + "/BE_WE/modules/" + mod + "/archive";
+        std::string base = std::string(home?home:".") + "/BEWE/modules/" + mod + "/archive";
         std::vector<MpHistDate> list;
         DIR* dp = opendir(base.c_str());
         if(dp){
@@ -2009,7 +2009,7 @@ void CentralServer::handle_join_module_pipe(std::shared_ptr<JoinEntry> je,
         std::string body;
         if(valid_date8(date8)){
             const char* home = getenv("HOME");
-            std::string ddir = std::string(home?home:".") + "/BE_WE/modules/" + mod + "/archive/" + date8;
+            std::string ddir = std::string(home?home:".") + "/BEWE/modules/" + mod + "/archive/" + date8;
             DIR* d2 = opendir(ddir.c_str());
             if(d2){
                 struct dirent* fe;
@@ -2862,7 +2862,7 @@ void CentralServer::load_schedules_from_json(){
            total_loaded, sched_by_station_.size());
 }
 
-// (Band plan persistence: removed. Each HOST owns ~/BE_WE/band_plan.json.
+// (Band plan persistence: removed. Each HOST owns ~/BEWE/band_plan.json.
 //  Central just relays BAND_PLAN_SYNC and BAND_ADD/UPDATE/REMOVE.)
 
 // ── Signal Library / Emitter DB ────────────────────────────────────────

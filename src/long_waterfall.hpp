@@ -4,7 +4,7 @@
 //
 // Worker thread polls FFTViewer::fft_data + total_ffts, max-hold compresses
 // capture rows down to ~5 row/sec, quantizes float dB to uint8 (db_min..db_max
-// → 0..255), appends to .bewewf file under ~/BE_WE/recordings/long_waterfall/.
+// → 0..255), appends to .bewewf file under ~/BEWE/recordings/long_waterfall/.
 //
 // File format (62B header rounded to 64, then raw rows):
 //   "BWWF"(4) ver(2) fft_size(4) sample_rate(8) center_freq(8)
@@ -72,7 +72,7 @@ void mark_dirty();
 // Currently-open file path (empty if worker idle / not recording). Thread-safe snapshot.
 std::string current_file_path();
 
-// Scan ~/BE_WE/recordings/long_waterfall/ → fill PktLwfList from on-disk headers.
+// Scan ~/BEWE/recordings/long_waterfall/ → fill PktLwfList from on-disk headers.
 // Skips files that are not valid .bewewf (header missing / wrong magic).
 void scan_dir_into_list(::PktLwfList& out);
 

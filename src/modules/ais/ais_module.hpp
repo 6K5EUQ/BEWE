@@ -30,7 +30,7 @@ void host_fpcap(uint32_t mmsi, const float* series, int n);
 
 // 공통 (ais_module.cpp)
 void append_log(const AisRecord& m);
-void store_append(const AisRecord& m);          // ~/BE_WE/modules/ais/ais_YYYYMMDD.jsonl
+void store_append(const AisRecord& m);          // ~/BEWE/modules/ais/ais_YYYYMMDD.jsonl
 bool store_read_today(std::string& out);
 void store_parse_jsonl(const char* data, size_t n, std::vector<AisRecord>& out);
 

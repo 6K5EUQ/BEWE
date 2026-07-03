@@ -28,7 +28,7 @@ void host_emit(FFTViewer& v, WifiRecord m);
 
 // 공통 (wifi_module.cpp)
 void append_log(const WifiRecord& m);
-void store_append(const WifiRecord& m);          // ~/BE_WE/modules/wifi/wifi_YYYYMMDD.jsonl
+void store_append(const WifiRecord& m);          // ~/BEWE/modules/wifi/wifi_YYYYMMDD.jsonl
 bool store_read_today(std::string& out);
 void store_parse_jsonl(const char* data, size_t n, std::vector<WifiRecord>& out);
 

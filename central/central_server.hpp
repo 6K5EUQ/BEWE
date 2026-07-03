@@ -419,7 +419,7 @@ private:
                                  uint16_t off, uint16_t lim);
 
     // ── Scheduled recording persistence ─────────────────────────────────
-    // ~/BE_WE/DataBase/schedules.json 에 station_id 별 SCHED_SYNC 스냅샷 저장
+    // ~/BEWE/DataBase/schedules.json 에 station_id 별 SCHED_SYNC 스냅샷 저장
     std::mutex              sched_json_mtx_;
     std::string             schedules_json_path_;
     // station_id → cached SCHED_SYNC payload (BEWE 헤더 포함)
@@ -442,7 +442,7 @@ private:
                                HostRoom* skip_host_room = nullptr);
 
     // ── Mission File Archive (Phase 1, v3.8.0) ──────────────────────────────
-    // Archive root: ~/BE_WE/DataBase/missions/  (Central 머신의 $HOME/BE_WE/...)
+    // Archive root: ~/BEWE/DataBase/missions/  (Central 머신의 $HOME/BEWE/...)
     std::string archive_root() const;
     std::string archive_dir(const char* station, uint16_t year,
                             const char* code, uint8_t subdir) const;

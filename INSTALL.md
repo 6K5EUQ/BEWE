@@ -84,21 +84,21 @@ re-plug the receiver.
 ### 4.1 Operator workstation (full GUI)
 
 ```bash
-git clone https://github.com/6K5EUQ/BE_WE.git
-cd BE_WE && mkdir build && cd build
+git clone https://github.com/6K5EUQ/BEWE.git
+cd BEWE && mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
 make -j$(nproc)
-./BE_WE
+./BEWE
 ```
 
 ### 4.2 Headless collection node (CLI host)
 
 ```bash
-git clone https://github.com/6K5EUQ/BE_WE.git
-cd BE_WE && mkdir build_cli && cd build_cli
+git clone https://github.com/6K5EUQ/BEWE.git
+cd BEWE && mkdir build_cli && cd build_cli
 cmake -DCLI=ON -DCMAKE_BUILD_TYPE=Release ..
 make -j$(nproc)
-./BE_WE
+./BEWE
 ```
 
 The CLI binary runs without a display server. Interactive prompts at startup
@@ -128,7 +128,7 @@ group provisions per site policy).
 
 ### Storage layout
 
-The Central Server creates the following on first run under `~/BE_WE/DataBase/`:
+The Central Server creates the following on first run under `~/BEWE/DataBase/`:
 
 | Directory | Purpose |
 |---|---|
@@ -157,16 +157,16 @@ sudo apt install -y build-essential cmake pkg-config \
   libmpg123-dev libvolk-dev libpng-dev
 
 # 2. Build
-cd ~ && git clone https://github.com/6K5EUQ/BE_WE.git
-cd BE_WE && mkdir build_cli && cd build_cli
+cd ~ && git clone https://github.com/6K5EUQ/BEWE.git
+cd BEWE && mkdir build_cli && cd build_cli
 cmake -DCLI=ON -DCMAKE_BUILD_TYPE=Release ..
 make -j4
 
 # 3. System tuning
-sudo bash ~/BE_WE/setup_pi_performance.sh && sudo reboot
+sudo bash ~/BEWE/setup_pi_performance.sh && sudo reboot
 
 # 4. Start
-cd ~/BE_WE/build_cli && ./BE_WE
+cd ~/BEWE/build_cli && ./BEWE
 ```
 
 The tuning script locks the CPU governor to `performance`, disables WiFi power
@@ -180,7 +180,7 @@ away from the Pi's heat envelope.
 
 After installation, confirm the following:
 
-1. `./BE_WE` (or CLI variant) starts without `llvmpipe` warning on the
+1. `./BEWE` (or CLI variant) starts without `llvmpipe` warning on the
    operator workstation. Software rendering will produce a usable but slow
    waterfall.
 2. The configured receiver enumerates at startup (look for

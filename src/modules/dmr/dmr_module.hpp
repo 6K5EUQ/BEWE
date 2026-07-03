@@ -28,7 +28,7 @@ void host_emit(FFTViewer& v, DmrRecord m);
 
 // 공통 (dmr_module.cpp)
 void append_log(const DmrRecord& m);
-void store_append(const DmrRecord& m);          // ~/BE_WE/modules/dmr/dmr_YYYYMMDD.jsonl
+void store_append(const DmrRecord& m);          // ~/BEWE/modules/dmr/dmr_YYYYMMDD.jsonl
 bool store_read_today(std::string& out);
 void store_parse_jsonl(const char* data, size_t n, std::vector<DmrRecord>& out);
 

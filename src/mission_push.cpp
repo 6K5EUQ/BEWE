@@ -64,7 +64,7 @@ const char* subdir_name(uint8_t s){
     }
 }
 
-// path = ~/BE_WE/recordings/missions/<station>/<YYYY>/<code>/<sub>/<filename>
+// path = ~/BEWE/recordings/missions/<station>/<YYYY>/<code>/<sub>/<filename>
 // 위 형식이면 station/year/code/filename 파싱 후 true. 아니면 false.
 bool parse_mission_path(const std::string& full, uint8_t subdir,
                         int& year_out, std::string& code_out, std::string& fname_out){

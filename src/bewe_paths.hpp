@@ -6,8 +6,8 @@
 #include <limits.h>
 
 // ── BEWE 런타임 경로 ─────────────────────────────────────────────────────
-// assets : 실행 파일 옆 (AppImage 내부 or 설치 경로)
-// data   : $HOME/BE_WE/ (녹음, 임시파일, DataBase)
+// assets : 실행 파일 옆 (설치 경로)
+// data   : $HOME/BEWE/ (녹음, 임시파일, DataBase)
 //
 // 폴더 구조:
 //   recordings/
@@ -29,13 +29,8 @@ static inline std::string exe_dir(){
     return (pos==std::string::npos)?".":p.substr(0,pos);
 }
 
-// AppImage: APPDIR env 설정됨 → assets는 $APPDIR/usr/share/BE_WE/assets
-// 일반 실행: exe 옆 assets/ → 없으면 ../assets → 없으면 ~/BE_WE/assets 순으로 탐색
+// 실행: exe 옆 assets/ → 없으면 ../assets → 없으면 ~/BEWE/assets 순으로 탐색
 static inline std::string assets_dir(){
-    const char* appdir=getenv("APPDIR");
-    if(appdir){
-        return std::string(appdir)+"/usr/share/BE_WE/assets";
-    }
     std::string candidates[]={
         exe_dir()+"/assets",
         exe_dir()+"/../assets",
@@ -47,14 +42,14 @@ static inline std::string assets_dir(){
             return p;
     }
     const char* home=getenv("HOME");
-    if(home) return std::string(home)+"/BE_WE/assets";
+    if(home) return std::string(home)+"/BEWE/assets";
     return exe_dir()+"/assets";
 }
 
-// 사용자 데이터: $HOME/BE_WE/
+// 사용자 데이터: $HOME/BEWE/
 static inline std::string data_dir(){
     const char* home=getenv("HOME");
-    return (home?std::string(home):std::string("/tmp"))+"/BE_WE";
+    return (home?std::string(home):std::string("/tmp"))+"/BEWE";
 }
 
 static inline std::string recordings_dir(){
@@ -72,7 +67,7 @@ static inline std::string private_iq_dir()    { return private_dir()+"/iq"; }
 static inline std::string private_audio_dir() { return private_dir()+"/audio"; }
 
 // ── Database (Central Server 로컬 저장) ──────────────────────────────────
-// Central server의 ./BE_WE/DataBase/{operator}/ 에 저장
+// Central server의 ./BEWE/DataBase/{operator}/ 에 저장
 // 클라이언트 측에서도 로컬 DB 캐시로 사용
 static inline std::string database_dir(){
     return data_dir()+"/DataBase";
@@ -110,7 +105,7 @@ static inline std::string db_downloads_sub(const char* sub){
 }
 
 // ── Central archive (Central server 머신 측: station-keyed mission archive) ──
-// $HOME/BE_WE/DataBase/missions/<station>/<year>/<code>/{iq,audio,hist}/
+// $HOME/BEWE/DataBase/missions/<station>/<year>/<code>/{iq,audio,hist}/
 static inline std::string central_missions_root(){ return database_dir()+"/missions"; }
 static inline std::string central_mission_station_dir(const std::string& station){
     return central_missions_root()+"/"+station;

@@ -8,7 +8,7 @@ provisioning, see [`INSTALL.md`](INSTALL.md).
 
 ## 1. First-Time Login
 
-1. Launch the workstation client (`./BE_WE`).
+1. Launch the workstation client (`./BEWE`).
 2. Provide operator ID and password.
 3. Select operator tier (`Ctrl+1` / `Ctrl+2` / `Ctrl+3`). Tier governs the set
    of commands the operator is permitted to issue to a remote HOST (re-tune,
@@ -238,7 +238,7 @@ If the disk fills before the auto-purge cycle (for example, after extended
 high-bandwidth collection), purge older missions manually:
 
 ```bash
-rm -rf ~/BE_WE/recordings/missions/<station>/<year>/A*
+rm -rf ~/BEWE/recordings/missions/<station>/<year>/A*
 ```
 
 This affects only the local copy; the Central archive is unaffected.

@@ -36,7 +36,7 @@ void host_emit(FFTViewer& v, AcarsMsg m);    // 워커 → 스탬프 + 호스트
 void append_log(const AcarsMsg& m);
 void msg_to_wire(const AcarsMsg& m, WireMsg& w);
 void wire_to_msg(const WireMsg& w, AcarsMsg& m);
-// 호스트 일 단위 아카이브: ~/BE_WE/modules/acars/acars_YYYYMMDD.jsonl (KST)
+// 호스트 일 단위 아카이브: ~/BEWE/modules/acars/acars_YYYYMMDD.jsonl (KST)
 void store_append(const AcarsMsg& m);
 bool store_read_today(std::string& out);
 void store_parse_jsonl(const char* data, size_t n, std::vector<AcarsMsg>& out);

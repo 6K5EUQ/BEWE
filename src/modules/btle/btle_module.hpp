@@ -28,7 +28,7 @@ void host_emit(FFTViewer& v, BtleRecord m);
 
 // 공통 (btle_module.cpp)
 void append_log(const BtleRecord& m);
-void store_append(const BtleRecord& m);          // ~/BE_WE/modules/btle/btle_YYYYMMDD.jsonl
+void store_append(const BtleRecord& m);          // ~/BEWE/modules/btle/btle_YYYYMMDD.jsonl
 bool store_read_today(std::string& out);
 void store_parse_jsonl(const char* data, size_t n, std::vector<BtleRecord>& out);
 

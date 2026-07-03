@@ -23,7 +23,7 @@ void start(FFTViewer* v, CentralClient* cli);
 void stop();
 
 // 완료된 파일을 push queue 후미에 추가. subdir = MFS_IQ/MFS_AUDIO/MFS_HIST.
-// path는 ~/BE_WE/recordings/missions/<year>/<code>/<subdir>/<filename> 형식이어야 함.
+// path는 ~/BEWE/recordings/missions/<year>/<code>/<subdir>/<filename> 형식이어야 함.
 // 잘못된 path면 silent drop.
 void enqueue(const std::string& path, uint8_t subdir);
 

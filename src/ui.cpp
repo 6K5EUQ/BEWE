@@ -7871,7 +7871,7 @@ void run_streaming_viewer(){
             // ── 중앙: CPU온도  HH:MM:SS  SDR온도 ─────────────────────────
             {
                 // CPU 온도 (2초마다 백그라운드 갱신)
-                // sysfs hwmon 방식: sensors 불필요, AppImage 호환
+                // sysfs hwmon 방식: sensors 불필요
                 static char  cpu_temp_str[16]  = "";
                 static float cpu_temp_timer    = 1.f;
                 static std::atomic<bool> cpu_fetching{false};
@@ -8416,7 +8416,7 @@ void run_streaming_viewer(){
 
             // ── Save DB (Central Server) ──────────────────────────────
             if(ImGui::Selectable("  Save DB")){
-                // DB 저장: Central server의 ~/BE_WE/DataBase/ 에 저장
+                // DB 저장: Central server의 ~/BEWE/DataBase/ 에 저장
                 // JOIN → HOST(relay) → Central, HOST → Central(relay)
                 std::string op_name = login_get_id();
                 std::string fp_cap = file_ctx.filepath;

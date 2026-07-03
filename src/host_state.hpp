@@ -2,7 +2,7 @@
 // ── HOST 상태 영속화 (재시작 시 직전 상태 그대로 복원) ─────────────────────
 // 기지(headless cli_host)가 SIGINT 등으로 꺼졌다 켜져도 사용자 입장에서
 // "잠깐 깜빡인" 것처럼 보이도록 center freq / sample rate / gain / 채널 필터를
-// $HOME/BE_WE/host_state_<station>.json 에 저장하고 부팅 시 복원한다.
+// $HOME/BEWE/host_state_<station>.json 에 저장하고 부팅 시 복원한다.
 //   - 저장: 변경 시마다 (메인 루프에서 fingerprint 비교 → 바뀌면 write)
 //   - 복원: cf/sr/gain 은 initialize 단계, 채널은 net_srv 기동 후
 // Central 은 stateless relay 라 상태 보관 불가 — 각 HOST 로컬에만 저장.
@@ -15,7 +15,7 @@ class FFTViewer;
 
 namespace HostState {
 
-// $HOME/BE_WE/host_state_<station>.json
+// $HOME/BEWE/host_state_<station>.json
 std::string file_path(const std::string& station);
 
 struct ChanSnap {

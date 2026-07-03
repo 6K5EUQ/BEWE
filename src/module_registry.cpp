@@ -223,7 +223,7 @@ static void host_arch_push_check(){
         char d[9]; snprintf(d,sizeof(d),"%04d%02d%02d",tv.tm_year+1900,tv.tm_mon+1,tv.tm_mday);
         for(auto& m : reg()){
             if(!m.target_modes) continue;
-            std::string path = base + "/BE_WE/modules/" + m.id + "/" + m.id + "_" + d + ".jsonl";
+            std::string path = base + "/BEWE/modules/" + m.id + "/" + m.id + "_" + d + ".jsonl";
             FILE* f=fopen(path.c_str(),"rb"); if(!f) continue; fclose(f);
             FILE* mk=fopen((path+".pushed").c_str(),"rb"); if(mk){ fclose(mk); continue; }
             g_arch_pushing=true;
@@ -391,7 +391,7 @@ static long host_today_count(const char* id, int ch){
                       std::chrono::system_clock::now().time_since_epoch()).count();
     struct tm tmv{}; KST::to_tm((time_t)(now/1000), tmv);
     char d[9]; snprintf(d,sizeof(d),"%04d%02d%02d",tmv.tm_year+1900,tmv.tm_mon+1,tmv.tm_mday);
-    std::string path = base + "/BE_WE/modules/" + id + "/" + id + "_" + d + ".jsonl";
+    std::string path = base + "/BEWE/modules/" + id + "/" + id + "_" + d + ".jsonl";
     FILE* f = fopen(path.c_str(),"rb"); if(!f) return 0;
     long cnt=0; char line[1024];
     while(fgets(line,sizeof(line),f)){
@@ -417,7 +417,7 @@ static long host_today_count_cached(const char* id, int ch){
                         std::chrono::system_clock::now().time_since_epoch()).count();
         struct tm tmv{}; KST::to_tm((time_t)s, tmv);
         char d[9]; snprintf(d,sizeof(d),"%04d%02d%02d",tmv.tm_year+1900,tmv.tm_mon+1,tmv.tm_mday);
-        std::string path = base + "/BE_WE/modules/" + id + "/" + id + "_" + d + ".jsonl";
+        std::string path = base + "/BEWE/modules/" + id + "/" + id + "_" + d + ".jsonl";
         FILE* f = fopen(path.c_str(),"rb");
         if(f){ char line[1024];
             while(fgets(line,sizeof(line),f)){

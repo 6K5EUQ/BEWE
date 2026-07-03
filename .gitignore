@@ -56,7 +56,7 @@ Makefile
 !CMakeLists.txt
 
 # Compiled binaries
-BE_WE
+BEWE
 bewe_central
 *.o
 *.a

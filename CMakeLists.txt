@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(BE_WE)
+project(BEWE)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -38,7 +38,7 @@ pkg_check_modules(AD9361 REQUIRED libad9361)
 
 if(CLI)
     # ── CLI build (no OpenGL/GLFW/ImGui) ──────────────────────────────────
-    add_executable(BE_WE
+    add_executable(BEWE
         src/main.cpp
         src/cli_host.cpp
         src/host_state.cpp
@@ -72,9 +72,9 @@ if(CLI)
         src/session_spawn.cpp
     )
 
-    target_compile_definitions(BE_WE PRIVATE BEWE_HEADLESS=1)
+    target_compile_definitions(BEWE PRIVATE BEWE_HEADLESS=1)
 
-    target_include_directories(BE_WE PRIVATE
+    target_include_directories(BEWE PRIVATE
         src
         ${CMAKE_SOURCE_DIR}/libs/mbelib
         ${BLADERF_INCLUDE_DIRS}
@@ -88,7 +88,7 @@ if(CLI)
         ${AD9361_INCLUDE_DIRS}
     )
 
-    target_link_libraries(BE_WE PRIVATE
+    target_link_libraries(BEWE PRIVATE
         ${BLADERF_LIBRARIES}
         ${FFTW_LIBRARIES}
         ${ALSA_LIBRARIES}
@@ -103,7 +103,7 @@ if(CLI)
         m
     )
 
-    target_compile_options(BE_WE PRIVATE -O3 -march=native)
+    target_compile_options(BEWE PRIVATE -O3 -march=native)
 
 else()
     # ── GUI build (original, unchanged) ───────────────────────────────────
@@ -122,7 +122,7 @@ else()
         ${IMGUI_BACKENDS_PATH}/imgui_impl_opengl3.cpp
     )
 
-    add_executable(BE_WE
+    add_executable(BEWE
         src/main.cpp
         src/fft_viewer.cpp
         src/bladerf_io.cpp
@@ -165,7 +165,7 @@ else()
         ${IMGUI_SOURCES}
     )
 
-    target_include_directories(BE_WE PRIVATE
+    target_include_directories(BEWE PRIVATE
         src
         ${CMAKE_SOURCE_DIR}/libs/mbelib
         ${BLADERF_INCLUDE_DIRS}
@@ -181,7 +181,7 @@ else()
         ${IMGUI_BACKENDS_PATH}
     )
 
-    target_link_libraries(BE_WE PRIVATE
+    target_link_libraries(BEWE PRIVATE
         ${BLADERF_LIBRARIES}
         ${FFTW_LIBRARIES}
         ${ALSA_LIBRARIES}
@@ -199,6 +199,6 @@ else()
         m
     )
 
-    target_compile_options(BE_WE PRIVATE -O3 -march=native)
+    target_compile_options(BEWE PRIVATE -O3 -march=native)
 
 endif()

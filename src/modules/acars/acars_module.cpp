@@ -118,7 +118,7 @@ static void station_disp(const char* sid, char* out, size_t cap){
 static std::string store_dir(){
     const char* home = getenv("HOME");
     std::string base = home ? std::string(home) : std::string(".");
-    return base + "/BE_WE/modules/acars";
+    return base + "/BEWE/modules/acars";
 }
 static void mkdirs(const std::string& path){
     std::string p;

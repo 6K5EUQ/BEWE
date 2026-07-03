@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Install BEWE as a desktop application (icon theme + .desktop launcher) so it shows
 # up in the GNOME app grid / dock like a normal installed app (Chrome-style).
-# Idempotent, per-user, no sudo. Run once per PC:  ~/BE_WE/packaging/install-app.sh
+# Idempotent, per-user, no sudo. Run once per PC:  ~/BEWE/packaging/install-app.sh
 set -e
 REPO="$(cd "$(dirname "$0")/.." && pwd)"          # repo root (packaging/ -> ..)
 ICON_SRC="$REPO/assets/icon_round.png"
-EXEC="$REPO/build/BE_WE"
+EXEC="$REPO/build/BEWE"
 [ -f "$ICON_SRC" ] || { echo "ERROR: $ICON_SRC 없음 (먼저 빌드/pull)"; exit 1; }
 
 # 1) themed icon (여러 크기 — 독/그리드에서 선명하게)

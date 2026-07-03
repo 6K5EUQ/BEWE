@@ -1179,7 +1179,7 @@ void run_cli_host(){
                     bewe_log_push(0, "[Central] restored %d scheduled entries\n", (int)v.sched_entries.size());
                 });
 
-                // ── Host-owned band plan (~/BE_WE/band_plan.json) ────────
+                // ── Host-owned band plan (~/BEWE/band_plan.json) ────────
                 // Load from disk on host start, mirror into v.band_segments,
                 // accept JOIN/HOST edits, persist + rebroadcast.
                 HostBandPlan::load_from_file();
@@ -1221,7 +1221,7 @@ void run_cli_host(){
                     if(HostBandPlan::apply_remove(r)) rebroadcast_band_plan();
                 };
 
-                // ── Host-owned band categories (~/BE_WE/band_categories.json) ─
+                // ── Host-owned band categories (~/BEWE/band_categories.json) ─
                 HostBandCategories::load_from_file();
                 HostBandCategories::rebuild_cache();
                 auto rebroadcast_band_cat = [&v](){

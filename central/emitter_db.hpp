@@ -61,7 +61,7 @@ struct Emitter {
 
 class EmitterDb {
 public:
-    // base_dir = ~/BE_WE/DataBase. _emitters/, _sightings/ 자동 생성.
+    // base_dir = ~/BEWE/DataBase. _emitters/, _sightings/ 자동 생성.
     bool load(const std::string& base_dir);
 
     struct MatchResult {

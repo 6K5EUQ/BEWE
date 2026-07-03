@@ -1,5 +1,5 @@
 // Mission File Archive (Phase 1, v3.8.0)
-// Layout: ~/BE_WE/DataBase/missions/<station>/<year>/<code>/{iq,audio,hist}/
+// Layout: ~/BEWE/DataBase/missions/<station>/<year>/<code>/{iq,audio,hist}/
 // HOST PUSH (IQ/audio):
 //   PUSH_META(transfer_id, mode, total, info)  ->  archive_dir/filename + .info
 //   PUSH_DATA(offset, chunk) xN
@@ -78,8 +78,8 @@ const char* subdir_name(uint8_t s){
 
 std::string CentralServer::archive_root() const {
     const char* home = getenv("HOME");
-    std::string base = home ? std::string(home) + "/BE_WE/DataBase"
-                            : std::string("/tmp/BE_WE/DataBase");
+    std::string base = home ? std::string(home) + "/BEWE/DataBase"
+                            : std::string("/tmp/BEWE/DataBase");
     return base + "/missions";
 }
 

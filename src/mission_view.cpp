@@ -1410,8 +1410,8 @@ static void draw_local_list(FFTViewer& v, NetClient* cli){
     g_active_tab_kind  = SelKind::LOCAL;
     g_active_tab_scope = -1;
     // 미션별 LOCAL: 두 위치를 합쳐 표시.
-    //   (a) ~/BE_WE/downloads/<station>/<year>/<code>/{iq,audio,hist}/   ← 다운로드 캐시
-    //   (b) ~/BE_WE/recordings/missions/<year>/<code>/{iq,audio,hist}/   ← 머신 로컬 녹음
+    //   (a) ~/BEWE/downloads/<station>/<year>/<code>/{iq,audio,hist}/   ← 다운로드 캐시
+    //   (b) ~/BEWE/recordings/missions/<year>/<code>/{iq,audio,hist}/   ← 머신 로컬 녹음
     //       (JOIN 의 선택영역/Demod 녹음, HOST 의 push 전 임시 파일)
     // 미션 선택 여부: 선택됐으면 그 미션 파일, 미선택(IDLE)이면 비-미션 로컬 녹음.
     bool mission_mode = (g_sel_year != 0 && !g_sel_code.empty() && g_cf_req_station[0] != 0);

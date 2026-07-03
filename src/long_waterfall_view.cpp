@@ -6,7 +6,7 @@
 // File click = select. Right-click = context menu (Info / Delete).
 //
 // Source files:
-//   - HOST 자기 파일: ~/BE_WE/recordings/long_waterfall/*.bewewf  (worker가 직접 기록)
+//   - HOST 자기 파일: ~/BEWE/recordings/long_waterfall/*.bewewf  (worker가 직접 기록)
 //   - JOIN 다운로드: 같은 디렉토리에 host에서 받은 파일을 같은 이름으로 저장
 
 #include "long_waterfall.hpp"

@@ -28,7 +28,7 @@ void host_emit(FFTViewer& v, AdsbRecord m);
 
 // 공통 (adsb_module.cpp)
 void append_log(const AdsbRecord& m);
-void store_append(const AdsbRecord& m);          // ~/BE_WE/modules/adsb/adsb_YYYYMMDD.jsonl
+void store_append(const AdsbRecord& m);          // ~/BEWE/modules/adsb/adsb_YYYYMMDD.jsonl
 bool store_read_today(std::string& out);
 void store_parse_jsonl(const char* data, size_t n, std::vector<AdsbRecord>& out);
 

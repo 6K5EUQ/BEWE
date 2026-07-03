@@ -193,7 +193,7 @@ struct ServerCallbacks {
     // ── Module pipe: JOIN→HOST MODULE_PIPE 수신 (payload = PktModulePipe+data) ──
     std::function<void(const uint8_t* payload, uint32_t len)> on_module_pipe;
 
-    // ── Band plan (host owns ~/BE_WE/band_plan.json) ─────────────────────
+    // ── Band plan (host owns ~/BEWE/band_plan.json) ─────────────────────
     // JOIN/HOST 어느쪽이든 보낸 ADD/UPDATE/REMOVE 가 도달하면 호출.
     // 핸들러는 HostBandPlan::apply_*() 후 save+rebuild+broadcast 한다.
     std::function<void(const PktBandEntry&)>  on_band_add;

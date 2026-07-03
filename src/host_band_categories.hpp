@@ -1,5 +1,5 @@
 #pragma once
-// Host-owned band category list. Each HOST owns ~/BE_WE/band_categories.json.
+// Host-owned band category list. Each HOST owns ~/BEWE/band_categories.json.
 // 11 builtins (id 0..10) seeded if file missing. User can add (id 11..255),
 // rename, recolor, delete (used-by entries strung to id=10 Other).
 //
@@ -17,7 +17,7 @@ extern std::mutex                    g_mtx;
 extern std::vector<PktBandCategory>  g_cats;        // master in-memory copy
 extern std::vector<uint8_t>          g_cached_pkt;  // BEWE-framed BAND_CAT_SYNC
 
-std::string file_path();           // ~/BE_WE/band_categories.json
+std::string file_path();           // ~/BEWE/band_categories.json
 void load_from_file();             // missing → seed 11 builtins + save
 void save_to_file();
 void rebuild_cache();
