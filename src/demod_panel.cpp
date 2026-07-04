@@ -35,6 +35,26 @@ static void cell_ctr(const char* s){
     if(tw<av) ImGui::SetCursorPosX(ImGui::GetCursorPosX()+(av-tw)*0.5f);
     ImGui::TextUnformatted(s);
 }
+// 방금 그린 InputText/Float 위에 중앙정렬 표시값을 덮어그림 (편집 중엔 원본 그대로).
+// ImGui 인풋은 내부 텍스트 좌측정렬만 지원 → 비편집 시 FrameBg 로 덮고 중앙 텍스트.
+static void overlay_ctr_input(const char* disp, ImU32 txt_col){
+    if(ImGui::IsItemActive()) return;                       // 편집 중 = 원본 노출
+    ImVec2 a=ImGui::GetItemRectMin(), b=ImGui::GetItemRectMax();
+    ImDrawList* dl=ImGui::GetWindowDrawList();
+    dl->AddRectFilled(a, b, ImGui::GetColorU32(ImGuiCol_FrameBg));
+    ImVec2 ts=ImGui::CalcTextSize(disp);
+    dl->AddText(ImVec2((a.x+b.x-ts.x)*0.5f, (a.y+b.y-ts.y)*0.5f), txt_col, disp);
+}
+// 방금 그린 BeginCombo 프리뷰 텍스트 영역(우측 화살표 제외)에 중앙정렬 라벨을 덮어그림.
+static void overlay_ctr_combo(const char* disp, ImU32 txt_col){
+    ImVec2 a=ImGui::GetItemRectMin(), b=ImGui::GetItemRectMax();
+    float arrow=ImGui::GetFrameHeight();                    // 우측 드롭다운 화살표 폭 = 정사각
+    ImVec2 pa=a, pb(b.x-arrow, b.y);                        // 프리뷰(텍스트) 영역
+    ImDrawList* dl=ImGui::GetWindowDrawList();
+    dl->AddRectFilled(pa, pb, ImGui::GetColorU32(ImGuiCol_FrameBg));
+    ImVec2 ts=ImGui::CalcTextSize(disp);
+    dl->AddText(ImVec2((pa.x+pb.x-ts.x)*0.5f, (pa.y+pb.y-ts.y)*0.5f), txt_col, disp);
+}
 // 천단위 콤마 (1234567 → "1,234,567")
 static void fmt_commas(long n, char* out, size_t cap){
     char t[24]; int len=snprintf(t,sizeof(t),"%ld", n<0?0:n);
@@ -115,7 +135,7 @@ static void draw_targets(FFTViewer& v){
         ImGui::TableSetupColumn("##sp",         ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
         const char* hn[10]={"CH","Center (MHz)","BW (kHz)","Mode","Channel","State","Data","Run Time","Decode",""};
-        const bool  hc[10]={true,true,true,true,true,true,true,true,false,false};
+        const bool  hc[10]={true,true,true,true,true,true,true,true,true,false};
         for(int c=0;c<10;c++){ ImGui::TableSetColumnIndex(c); if(hc[c]) cell_ctr(hn[c]); else ImGui::TextUnformatted(hn[c]); }
 
         if(rows.empty()){
@@ -228,18 +248,22 @@ static void draw_targets(FFTViewer& v){
             ImGui::TableSetColumnIndex(1);
             { float cfv=cf; ImGui::SetNextItemWidth(-1);
               ImGui::InputFloat("##cf",&cfv,0,0,"%.4f");
+              char db[24]; snprintf(db,sizeof(db),"%.4f",cf); overlay_ctr_input(db, ImGui::GetColorU32(ImGuiCol_Text));
               if(ImGui::IsItemDeactivatedAfterEdit() && cfv>0.f){
                   float hh=bw*0.5f; bewe_mod_edit_ch(v, r.station.c_str(), r.ch, r.mode, cfv-hh, cfv+hh); } }
             // ── BW(kHz) 편집 → lo/hi 갱신(Center 유지) ──
             ImGui::TableSetColumnIndex(2);
             { float bwk=bw*1000.f; ImGui::SetNextItemWidth(-1);
               ImGui::InputFloat("##bw",&bwk,0,0,"%.1f");
+              char db[24]; snprintf(db,sizeof(db),"%.1f",bw*1000.f); overlay_ctr_input(db, ImGui::GetColorU32(ImGuiCol_Text));
               if(ImGui::IsItemDeactivatedAfterEdit() && bwk>0.f){
                   float nb=bwk/1000.f; bewe_mod_edit_ch(v, r.station.c_str(), r.ch, r.mode, cf-nb*0.5f, cf+nb*0.5f); } }
             // ── Mode 편집 ──
             ImGui::TableSetColumnIndex(3);
             { int cm=r.mode<3?r.mode:0; ImGui::SetNextItemWidth(-1);
-              if(ImGui::BeginCombo("##md", mode_name((uint8_t)cm))){
+              bool mo=ImGui::BeginCombo("##md", mode_name((uint8_t)cm));
+              overlay_ctr_combo(mode_name((uint8_t)cm), ImGui::GetColorU32(ImGuiCol_Text));
+              if(mo){
                   for(int k=0;k<3;k++){ bool s=(k==cm);
                       if(ImGui::Selectable(mode_name((uint8_t)k),s) && !s)
                           bewe_mod_edit_ch(v, r.station.c_str(), r.ch, k, r.lo, r.hi); }
@@ -287,6 +311,7 @@ static void draw_targets(FFTViewer& v){
             ImVec4 lblc = r.running>=0 ? ImVec4(0.45f,0.95f,0.55f,1.f) : ImVec4(0.80f,0.80f,0.85f,1.f);
             ImGui::PushStyleColor(ImGuiCol_Text, lblc);
             bool open = ImGui::BeginCombo("##dec", cur);
+            overlay_ctr_combo(cur, ImGui::GetColorU32(lblc));   // 라벨 중앙정렬 (색 유지)
             ImGui::PopStyleColor();   // Text — 버튼 라벨만 색, 팝업 항목은 기본색
             if(open){
                 // 항목 간격 + 상/하단 여백 (None 위·마지막 아래 답답함 완화)
@@ -382,7 +407,7 @@ void demod_draw_panel(FFTViewer& v, bool just_opened){
     if(ImGui::BeginTabBar("##demod_tabs", ImGuiTabBarFlags_Reorderable)){
 
         // ── Modules 탭 (런처): 좌측 모듈 목록 + 우측 타깃 테이블 ──
-        if(ImGui::BeginTabItem("Main", nullptr, sel_flag("Main"))){
+        if(ImGui::BeginTabItem("MAIN", nullptr, sel_flag("MAIN"))){
             for(size_t i=0;i<mods.size();i++) was_active[i]=false;
             auto shown=[&](int i){ return i>=0 && i<(int)mods.size() &&
                 (mods[i].planned || mods[i].target_modes || mods[i].draw_content); };
