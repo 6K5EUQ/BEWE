@@ -2234,7 +2234,7 @@ void run_streaming_viewer(){
                     push("System", "TLE update started ...", false);
                     sat_view_update_tle();
                     push("System", "TLE update done.", false);
-                } else if(s == "/main" || s == "/chassis 1 reset" || s == "/chassis 2 reset"){
+                } else if(s == "/chassis 1 reset" || s == "/chassis 2 reset"){
                     push("System", "Not available here.", true);
                 } else {
                     char errmsg[280];
@@ -2367,8 +2367,10 @@ void run_streaming_viewer(){
     bool g_arch_cache_dirty = false;  // arch_info_cache / arch_info_tip_cache 무효화 (전 구간 가시성 필요)
 
     // ── Globe-based station discovery ─────────────────────────────────────
+    // 자식 세션(JOIN/HOST spawn)은 지구본 화면에 진입하지 않으므로 earth 텍스처
+    // 로드(수 초)를 통째로 스킵 — /main 제거로 자식이 지구본에 올 경로 없음.
     GlobeRenderer globe;
-    bool globe_ok = globe.init();
+    bool globe_ok = g_session_args.mode_set ? false : globe.init();
     if(globe_ok) sat_view_init();
 
     // Relay 클라이언트: Relay 주소가 설정돼 있으면 인터넷 스테이션 폴링
@@ -8791,12 +8793,6 @@ void run_streaming_viewer(){
                         do_logout = true;
                         // glfwSetWindowShouldClose 없이 do_logout만으로 inner while 탈출
                         // outer do-while은 !do_main_menu이므로 탈출 > if(do_logout) execv
-
-                    } else if(chat_str == "/main"){
-                        // SDR 종료 > main(지구본)으로 (로그인 세션 유지)
-                        do_main_menu = true;
-                        // inner while의 !do_main_menu 조건으로 탈출
-                        // outer do-while이 do_main_menu=true로 재진입 > 지구본부터
 
                     } else if(chat_str == "/chassis 1 reset"){
                         bewe_log_push(0, "[CMD:%s] /chassis 1 reset\n", login_get_id());
