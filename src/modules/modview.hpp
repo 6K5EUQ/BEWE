@@ -100,7 +100,8 @@ inline void header_bar(FFTViewer& v, const char* id, char* filter, size_t cap,
                        int count, bool remote, bool focus_filter,
                        const std::function<void()>& on_clear,
                        bool nav_show=false, bool can_back=false, bool can_fwd=false,
-                       bool* nav_back=nullptr, bool* nav_fwd=nullptr){
+                       bool* nav_back=nullptr, bool* nav_fwd=nullptr,
+                       bool pb_show=false, bool pb_active=false, bool* pb_toggle=nullptr){
     float W = ImGui::GetContentRegionAvail().x;
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f,0.12f,0.16f,1.f));
     char cid[40]; snprintf(cid,sizeof(cid),"##%s_hdr",id);
@@ -133,20 +134,21 @@ inline void header_bar(FFTViewer& v, const char* id, char* filter, size_t cap,
     if(bewe_mod_hist_loading(id) || bewe_mod_hist_fetching(id)){
         ImGui::SameLine(0,12); ImGui::SetCursorPosY(tcy); ImGui::TextDisabled("loading...");
     }
-    // ── 우측 버튼군: [Recv][Hist][Clear] — 고정폭 + 균일 간격(GAP) + 우측정렬 ──
+    // ── 우측 버튼군: [RECV][DB][PLAYBACK][CLEAR] — 고정폭 + 균일 간격(GAP) + 우측정렬 ──
     const float GAP = 8.f, RMARGIN = 12.f;
     float pad2=ImGui::GetStyle().FramePadding.x*2;
-    float cwb=ImGui::CalcTextSize("Clear").x   +pad2;
-    float rwb=ImGui::CalcTextSize("Recv OFF").x+pad2;   // ON/OFF 넓은쪽 고정 → 전환 시 안 흔들림
+    float cwb=ImGui::CalcTextSize("CLEAR").x   +pad2;
+    float rwb=ImGui::CalcTextSize("RECV OFF").x+pad2;   // ON/OFF 넓은쪽 고정 → 전환 시 안 흔들림
     bool  hsup = remote && bewe_mod_hist_supported(id);
     float hwb  = hsup ? ImGui::CalcTextSize("DB").x+pad2+6.f : 0.f;
+    float pwb  = pb_show ? ImGui::CalcTextSize("PLAYBACK").x+pad2 : 0.f;
     if(remote){
-        float total = rwb + (hsup? GAP+hwb : 0.f) + GAP + cwb;
+        float total = rwb + (hsup? GAP+hwb : 0.f) + (pb_show? GAP+pwb : 0.f) + GAP + cwb;
         ImGui::SameLine(); ImGui::SetCursorPos(ImVec2(W-total-RMARGIN, fy));
         bool rcv=bewe_mod_recv(id);
         // 기본 Recv OFF(빨강) → 켜면 Recv ON(초록). Hist 모드에선 OFF — 클릭 시 버퍼 복원+재구독.
         ImGui::PushStyleColor(ImGuiCol_Button, rcv?ImVec4(0.15f,0.55f,0.2f,1.f):ImVec4(0.6f,0.15f,0.15f,1.f));
-        if(ImGui::Button(rcv?"Recv ON":"Recv OFF", ImVec2(rwb,0))){
+        if(ImGui::Button(rcv?"RECV ON":"RECV OFF", ImVec2(rwb,0))){
             if(histm) bewe_mod_hist_exit(v, id);                    // 과거 폐기 + 라이브 버퍼 복원 + 재구독
             else { if(!rcv) on_clear(); bewe_mod_set_recv(v,id,!rcv); }
         }
@@ -202,11 +204,18 @@ inline void header_bar(FFTViewer& v, const char* id, char* filter, size_t cap,
             }
             ImGui::PopStyleVar(2);   // WindowPadding + WindowTitleAlign (모달 미개방 시에도 짝 맞춤)
         }
+        // PLAYBACK: 타임라인 바 토글 (켜짐=초록). 기본 꺼짐 → 지도/데이터가 하단까지 꽉 참.
+        if(pb_show){
+            ImGui::SameLine(0,GAP); ImGui::SetCursorPosY(fy);
+            if(pb_active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f,0.55f,0.2f,1.f));
+            if(ImGui::Button("PLAYBACK", ImVec2(pwb,0)) && pb_toggle) *pb_toggle=true;
+            if(pb_active) ImGui::PopStyleColor();
+        }
         ImGui::SameLine(0,GAP); ImGui::SetCursorPosY(fy);
-        if(ImGui::Button("Clear", ImVec2(cwb,0))) on_clear();
+        if(ImGui::Button("CLEAR", ImVec2(cwb,0))) on_clear();
     } else {
         ImGui::SameLine(); ImGui::SetCursorPos(ImVec2(W-cwb-RMARGIN, fy));
-        if(ImGui::Button("Clear")) on_clear();
+        if(ImGui::Button("CLEAR")) on_clear();
     }
     ImGui::EndChild();
     ImGui::PopStyleColor();

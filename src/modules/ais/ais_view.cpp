@@ -175,15 +175,19 @@ void draw_content(FFTViewer& v, bool just_opened){
         if(nav_stack[nav_pos]==mmsi) return;
         nav_stack.resize(nav_pos+1); nav_stack.push_back(mmsi); nav_pos=(int)nav_stack.size()-1;
     };
+    // 플레이백(타임라인) 표시 토글 — 기본 OFF. OFF면 지도/데이터가 하단까지 꽉 참.
+    static bool tl_show=false; bool tl_toggle=false;
     bool nav_back=false, nav_fwd=false;
     modview::header_bar(v, "ais", filter, sizeof(filter), total, remote, focus_filter, on_clear,
-                        true, nav_pos>0, nav_pos<(int)nav_stack.size()-1, &nav_back, &nav_fwd);
+                        true, nav_pos>0, nav_pos<(int)nav_stack.size()-1, &nav_back, &nav_fwd,
+                        true, tl_show, &tl_toggle);
+    if(tl_toggle) tl_show=!tl_show;
     if(nav_back && nav_pos>0) nav_pos--;
     if(nav_fwd  && nav_pos<(int)nav_stack.size()-1) nav_pos++;
     cur_view = nav_stack[nav_pos];
 
     // ── 타임라인 스크러버 + 재생 (00~24시 하루축, 구간 A/B, Play) ────────────
-    const float TL_H = 46.f;
+    const float TL_H = 34.f;
     static float tl_a=0.f, tl_b=1440.f, tl_head=0.f;   // 분(0~1440)
     static bool  tl_play=false;
     // 하루 기준점: DB(과거)모드=그 날짜 / 라이브=오늘, KST 자정 epoch ms
@@ -203,31 +207,36 @@ void draw_content(FFTViewer& v, bool just_opened){
     }
     // 기준일 변경 시 리셋 — 단 재생 중이면 진행 보존(자정 넘어가도 replay 안 끊김)
     { static int64_t prev_base=-1; if(day_base!=prev_base){ prev_base=day_base; if(!tl_play){ tl_a=0.f;tl_b=1440.f;tl_head=0.f; } } }
+    if(!tl_show){ tl_play=false; tl_a=0.f; tl_b=1440.f; tl_head=0.f; }   // 플레이백 꺼짐 → 재생/구간 무효
     if(tl_play){ tl_head += io.DeltaTime * 1.0f; if(tl_head>=tl_b){ tl_head=tl_b; tl_play=false; } }   // 실1초=데이터1분
-    // 타임라인 바 UI
-    {
-        ImGui::SetCursorPos(ImVec2(x0, y0+32.f));
+    // 표/지도 세로 배분: 헤더(32) 아래부터. 플레이백 켜지면 하단 TL_H 만큼 비워 타임라인 자리 확보.
+    float body_h = tl_show ? (H-36-TL_H) : (H-36); if(body_h<80) body_h=80;
+    // 타임라인 바 UI — 지도/데이터 아래(하단바 바로 위)에 그린다. 켜졌을 때만.
+    if(tl_show){
+        const float PAD=12.f;     // 좌우 대칭 여백 (버튼 왼쪽 = 눈금 오른쪽)
+        const float BH=TL_H-16.f;  // 재생버튼 높이
+        ImGui::SetCursorPos(ImVec2(x0+PAD, y0+32.f+body_h+4.f));
         ImVec2 p0 = ImGui::GetCursorScreenPos();
         const float PB=28.f;
-        if(ImGui::Button(tl_play?"##tlpause":"##tlplay", ImVec2(PB, TL_H-16))){
+        if(ImGui::Button(tl_play?"##tlpause":"##tlplay", ImVec2(PB, BH))){
             if(tl_head>=tl_b-0.02f) tl_head=tl_a;      // 끝에서 재생 → 처음부터
             tl_play=!tl_play;
         }
         ImDrawList* dl = ImGui::GetWindowDrawList();
         { // Play/Pause 아이콘
-            ImVec2 c(p0.x+PB*0.5f, p0.y+(TL_H-16)*0.5f); ImU32 ic=IM_COL32(220,230,245,255);
+            ImVec2 c(p0.x+PB*0.5f, p0.y+BH*0.5f); ImU32 ic=IM_COL32(220,230,245,255);
             if(tl_play){ dl->AddRectFilled(ImVec2(c.x-5,c.y-6),ImVec2(c.x-1,c.y+6),ic); dl->AddRectFilled(ImVec2(c.x+1,c.y-6),ImVec2(c.x+5,c.y+6),ic); }
             else dl->AddTriangleFilled(ImVec2(c.x-4,c.y-6),ImVec2(c.x-4,c.y+6),ImVec2(c.x+6,c.y),ic);
         }
-        float tx0=p0.x+PB+12, tx1=p0.x+W-12, tw_=tx1-tx0; if(tw_<20)tw_=20;
-        float ty=p0.y+(TL_H-16)*0.5f;
+        float tx0=p0.x+PB+12, tx1=p0.x+W-2.f*PAD, tw_=tx1-tx0; if(tw_<20)tw_=20;   // p0.x=x0+PAD 이므로 창우측=p0.x-PAD+W, 여기서 우측여백 PAD → p0.x+W-2*PAD
+        float ty=p0.y+BH*0.5f;
         auto m2x=[&](float m){ return tx0+tw_*m/1440.f; };
         auto x2m=[&](float x){ float m=(x-tx0)/tw_*1440.f; return m<0.f?0.f:(m>1440.f?1440.f:m); };
         dl->AddLine(ImVec2(tx0,ty),ImVec2(tx1,ty),IM_COL32(80,90,105,255),2.f);
-        for(int hh=0;hh<=24;hh+=6){ float x=m2x(hh*60.f);
+        for(int hh=0;hh<=24;hh+=3){ float x=m2x(hh*60.f);   // 눈금선 3시간마다
             dl->AddLine(ImVec2(x,ty-4),ImVec2(x,ty+4),IM_COL32(110,120,135,255),1.f);
-            char lb[4]; snprintf(lb,sizeof(lb),"%02d",hh);
-            dl->AddText(ImVec2(x-6,ty+7),IM_COL32(130,140,155,255),lb);
+            if(hh%6==0){ char lb[4]; snprintf(lb,sizeof(lb),"%02d",hh);   // 숫자 라벨은 6시간마다
+                dl->AddText(ImVec2(x-6,ty+7),IM_COL32(130,140,155,255),lb); }
         }
         float hi_min_v = tl_play? tl_head : tl_b;
         dl->AddRectFilled(ImVec2(m2x(tl_a),ty-3),ImVec2(m2x(hi_min_v),ty+3),IM_COL32(90,150,220,110));  // 선택밴드
@@ -245,22 +254,18 @@ void draw_content(FFTViewer& v, bool just_opened){
         handle("##tlA",tl_a, 0.f, tl_b);   handle("##tlB",tl_b, tl_a, 1440.f);   // A≤B 유지
         if(tl_head<tl_a)tl_head=tl_a; if(tl_head>tl_b)tl_head=tl_b;
         if(tl_play){ float hx=m2x(tl_head); dl->AddLine(ImVec2(hx,ty-13),ImVec2(hx,ty+13),IM_COL32(255,120,90,255),2.f); }
-        char sa[8],sb[8],sh[8]; auto hm=[&](float m,char*o){int mi=(int)(m+0.5f);snprintf(o,8,"%02d:%02d",mi/60,mi%60);};
-        hm(tl_a,sa);hm(tl_b,sb);hm(hi_min_v,sh);
-        char tlab[40]; if(tl_play) snprintf(tlab,sizeof(tlab),"%s  [%s-%s]",sh,sa,sb); else snprintf(tlab,sizeof(tlab),"%s - %s",sa,sb);
-        ImVec2 tsz=ImGui::CalcTextSize(tlab);
-        dl->AddText(ImVec2(tx1-tsz.x,p0.y-1),IM_COL32(170,180,195,255),tlab);
-        ImGui::SetCursorPos(ImVec2(x0, y0+32.f+TL_H));
     }
-    // 재생/구간 필터 범위 (표·지도 공용)
+    // 표/지도는 헤더 바로 아래(y0+32)부터 그린다 — 타임라인은 이 아래(하단)에 그려짐
+    ImGui::SetCursorPos(ImVec2(x0, y0+32.f));
+    // 재생/구간 필터 범위 (표·지도 공용). 플레이백 꺼짐이면 위에서 tl_* 리셋되어 필터 없음.
     bool    tl_filt = tl_play || tl_a>0.5f || tl_b<1439.5f;
     float   hi_min  = tl_play? tl_head : tl_b;
     int64_t lo_ms = day_base + (int64_t)(tl_a*60000.0f);
     int64_t hi_ms = day_base + (int64_t)(hi_min*60000.0f);
 
-    // 세부패널 제거 — 표/지도 모두 헤더바(30)+타임라인(TL_H) 아래 전체 높이 사용
-    float upper_h = H - 36 - TL_H; if(upper_h<80) upper_h=80;   // 표 높이
-    float map_h   = H - 34 - TL_H; if(map_h<80) map_h=80;       // 지도 높이
+    // 세부패널 제거 — 표/지도 모두 body_h(헤더 아래, 플레이백 켜지면 하단 TL_H 뺀) 전체 높이 사용
+    float upper_h = body_h; if(upper_h<80) upper_h=80;   // 표 높이
+    float map_h   = body_h + 2.f; if(map_h<80) map_h=80; // 지도 높이 (기존과 동일 오프셋 유지)
 
     // ── MMSI별 최신위치 + 항적 캐시 (signature 게이팅, 증분; FIFO/clear 안전) ──
     static std::unordered_map<uint32_t, AisTrack> tracks;
