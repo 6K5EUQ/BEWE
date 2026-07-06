@@ -1453,15 +1453,8 @@ void run_cli_host(){
         v.net_bcast_thr = std::thread(&FFTViewer::net_bcast_worker, &v);
     }
 
-    // TM IQ
-    if(!v.sdr_stream_error.load()){
-        bewe_log_push(0,"[CLI] tm_iq_open: sr=%u\n", v.header.sample_rate);
-        v.tm_iq_open();
-        if(v.tm_iq_file_ready){
-            v.tm_iq_on.store(true);
-            bewe_log_push(0,"[BEWE CLI] IQ rolling enabled\n");
-        }
-    }
+    // TM IQ(롤링 IQ 녹음) 기본 OFF — 원격 토글(on_toggle_tm_iq) 시 lazy open
+    bewe_log_push(0,"[BEWE CLI] IQ rolling disabled (default off)\n");
 
     // ── System monitor state ─────────────────────────────────────────────
     long long cpu_last_idle=0, cpu_last_total=0, io_last_ms=0;

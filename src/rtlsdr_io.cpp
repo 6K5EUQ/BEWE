@@ -193,6 +193,9 @@ void FFTViewer::capture_and_process_rtl(){
     int   fcnt      = 0;
     static constexpr int WARMUP_FFTS = 15;
     int   warmup_cnt = 0;
+    // FFT 서브샘플링: waterfall 행당 최대 MAX_ROW_FFTS개 윈도우만 FFT (bladerf_io 참조)
+    static constexpr int MAX_ROW_FFTS = 32;
+    int   win_skip   = 0;
     float iq_scale   = hw.iq_scale;   // 127.5f
     float iq_offset  = hw.iq_offset;  // 127.5f
 
@@ -366,6 +369,13 @@ void FFTViewer::capture_and_process_rtl(){
             continue;
         }
         if(!spectrum_pause.load(std::memory_order_relaxed)){
+            const int fft_stride = time_average>MAX_ROW_FFTS
+                                 ? (time_average+MAX_ROW_FFTS-1)/MAX_ROW_FFTS : 1;
+            if(++win_skip < fft_stride){
+                rx_pos+=fft_input_size; rx_avail-=fft_input_size;
+                continue;
+            }
+            win_skip=0;
             const uint8_t* rp = raw + rx_pos*2;
             for(int i=0;i<fft_input_size;i++){
                 fft_in[i][0] = ((float)rp[i*2  ] - iq_offset) / iq_scale;
@@ -384,7 +394,7 @@ void FFTViewer::capture_and_process_rtl(){
                 }
             }
             pacc[0]=(pacc[1]+pacc[fft_size-1])*0.5f; fcnt++;
-            if(fcnt>=time_average){
+            if(fcnt>=(time_average+fft_stride-1)/fft_stride){
                 if(warmup_cnt < WARMUP_FFTS){
                     warmup_cnt++;
                     std::fill(pacc.begin(),pacc.end(),0.0f); fcnt=0;

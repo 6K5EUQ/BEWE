@@ -5000,11 +5000,7 @@ void run_streaming_viewer(){
         };
     }
 
-    // ── TM IQ 기본 활성화 (HOST/LOCAL 모드) ───────────────────────────────
-    if(!v.remote_mode){
-        v.tm_iq_open();
-        if(v.tm_iq_file_ready) v.tm_iq_on.store(true);
-    }
+    // ── TM IQ(롤링 IQ 녹음) 기본 OFF — T키/패널 토글 시 lazy open ─────────
 
     // 모든 모드: VSync OFF, 60fps 자체 캡 (포커스 여부 무관)
     // 워터폴 연속성 보장을 위해 백그라운드도 동일 프레임레이트 유지

@@ -153,7 +153,7 @@ void worker(FFTViewer& v, int ch_idx){
             dec.reset();
             lag=(wp-rp)&IQ_RING_MASK;
         }
-        if(lag==0){ std::this_thread::sleep_for(std::chrono::microseconds(1000)); continue; }
+        if(lag==0){ std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue; }
 
         // ── 스컬치 게이트: AM/FM 과 동일한 ch.sq_gate (HOST FFT 기반) 사용.
         //    닫힘 = 신호 없음 → 복조기에 노이즈 안 넣음(가짜 voice-sync 방지).

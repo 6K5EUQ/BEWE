@@ -261,7 +261,7 @@ void FFTViewer::rec_worker(){
     while(!rec_stop.load(std::memory_order_relaxed) && !sdr_stream_error.load()){
         size_t wp=ring_wp.load(std::memory_order_acquire);
         size_t rp=rec_rp.load(std::memory_order_relaxed);
-        if(rp==wp){ std::this_thread::sleep_for(std::chrono::microseconds(100)); continue; }
+        if(rp==wp){ std::this_thread::sleep_for(std::chrono::milliseconds(5)); continue; }
         size_t avail=std::min((wp-rp)&IQ_RING_MASK,(size_t)65536);
         for(size_t s=0;s<avail;s++){
             size_t pos=(rp+s)&IQ_RING_MASK;

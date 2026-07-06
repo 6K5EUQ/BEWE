@@ -124,8 +124,9 @@ bool FFTViewer::initialize_bladerf(float cf_mhz, float sr_msps){
 }
 
 void FFTViewer::capture_and_process(){
-    // RX 버퍼: fft_size와 무관하게 최소 8192 샘플 고정 > USB 오버헤드 최소화
-    static constexpr int RX_MIN = 8192;
+    // RX 버퍼: fft_size와 무관하게 최소 32768 샘플 고정 > USB 오버헤드 최소화
+    // + sync_rx 호출/캡처 스레드 웨이크업 1/4 (고SR context switch 절감, 지연 +0.8ms@40MSPS)
+    static constexpr int RX_MIN = 32768;
     int rx_chunk = std::max(fft_input_size, RX_MIN);
     int16_t* iq_buf=new int16_t[rx_chunk*2];
     // FFT 처리용 오프셋 (rx_chunk 내 슬라이딩)
@@ -136,6 +137,10 @@ void FFTViewer::capture_and_process(){
     // 초기 안정화: 처음 N번 FFT 결과 버림
     static constexpr int WARMUP_FFTS = 30;
     int warmup_cnt = 0;
+    // FFT 서브샘플링: waterfall 행당 최대 MAX_ROW_FFTS개 윈도우만 FFT, 나머지 스킵.
+    // 행 rate(~18/s)는 유지, 행당 평균 표본 수만 감소 → 고SR 캡처 스레드 CPU 수배 절감.
+    static constexpr int MAX_ROW_FFTS = 32;
+    int win_skip = 0;
 
     while(is_running){
         // ── Pause (타임머신 모드) ─────────────────────────────────────────
@@ -345,6 +350,13 @@ void FFTViewer::capture_and_process(){
             continue;
         }
         if(!spectrum_pause.load(std::memory_order_relaxed)){
+            const int fft_stride = time_average>MAX_ROW_FFTS
+                                 ? (time_average+MAX_ROW_FFTS-1)/MAX_ROW_FFTS : 1;
+            if(++win_skip < fft_stride){
+                rx_pos+=fft_input_size; rx_avail-=fft_input_size;
+                continue;
+            }
+            win_skip=0;
             // Fill input samples (first fft_input_size), rest stays zero (zero-padding)
             for(int i=0;i<fft_input_size;i++){
                 fft_in[i][0]=iq[i*2]/hw.iq_scale;
@@ -364,7 +376,7 @@ void FFTViewer::capture_and_process(){
                 }
             }
             pacc[0]=(pacc[1]+pacc[fft_size-1])*0.5f; fcnt++;
-            if(fcnt>=time_average){
+            if(fcnt>=(time_average+fft_stride-1)/fft_stride){
                 if(warmup_cnt < WARMUP_FFTS){
                     warmup_cnt++;
                     std::fill(pacc.begin(),pacc.end(),0.0f); fcnt=0;

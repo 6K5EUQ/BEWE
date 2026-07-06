@@ -90,7 +90,7 @@ void FFTViewer::dem_worker(int ch_idx){
             rs_pos=0.0; rs_prev=0.0f;
             lag=(wp-rp)&IQ_RING_MASK;
         }
-        if(lag==0){ std::this_thread::sleep_for(std::chrono::microseconds(1000)); continue; }
+        if(lag==0){ std::this_thread::sleep_for(std::chrono::milliseconds(5)); continue; }
 
         // 무신호(squelch 닫힘) + 녹음 비활성 → 무거운 per-sample DSP(혼합/8단 IIR/복조/리샘플) 스킵.
         // 녹음 중이면 silence-tail/force_all 보존 위해 full 처리 유지. squelch 는 FFT 스레드가 독립

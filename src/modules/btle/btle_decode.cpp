@@ -99,7 +99,7 @@ void worker(FFTViewer& v, int ch_idx){
             dec_i=dec_q=0; dec_cnt=0; prev_i=prev_q=0;
             lag=(wp-rp)&IQ_RING_MASK;
         }
-        if(lag==0){ std::this_thread::sleep_for(std::chrono::microseconds(1000)); continue; }
+        if(lag==0){ std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue; }
 
         size_t avail=std::min(lag,BATCH);
         fm.clear(); amp.clear();
