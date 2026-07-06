@@ -10,16 +10,24 @@
 namespace modview_map {
 
 // 지도 표시 한계 — 한국 bbox. 카메라(줌아웃/팬)를 이 영역에 가둠. 데이터도 이 밖은 안 그림.
-static const double MAP_LON0=123.0, MAP_LON1=132.0, MAP_LAT0=32.0, MAP_LAT1=39.0;
+static const double MAP_LON0=123.0, MAP_LON1=132.0, MAP_LAT0=32.0, MAP_LAT1=43.0;
 
-// 현재 카메라(v.lat/lon)를 MAP bbox 안으로 클램프. 줌아웃이 bbox 보다 커지면 bbox 에 맞춰 멈춤.
+// 현재 카메라(v.lat/lon)를 MAP bbox 안으로 클램프. 줌아웃 한계는 lon span=bbox lon(9°).
+// 그때 lat span 은 종횡비(isotropic)대로 lon 에 종속 → 화면비 유지(찌그러짐 없음).
+// lat span 은 bbox(11°)보다 작으므로 lat 방향은 32~43N 안에서 드래그 팬으로 이동해 봄.
 static void clamp_to_bbox(MapView& v, float W, float H){
-    // span 이 bbox 보다 크면 bbox span 으로 축소 (한 축이라도 넘으면 줌아웃 한계)
-    double lonsp=v.lon1-v.lon0, latsp=v.lat1-v.lat0;
-    double maxlon=MAP_LON1-MAP_LON0, maxlat=MAP_LAT1-MAP_LAT0;
-    if(lonsp>maxlon){ double c=(v.lon0+v.lon1)*0.5; v.lon0=c-maxlon*0.5; v.lon1=c+maxlon*0.5; lonsp=maxlon; }
-    if(latsp>maxlat){ double c=(v.lat0+v.lat1)*0.5; v.lat0=c-maxlat*0.5; v.lat1=c+maxlat*0.5; latsp=maxlat; }
-    // 경계 밖으로 나간 만큼 시프트해 되넣음 (span 유지)
+    double lonsp=v.lon1-v.lon0;
+    double maxlon=MAP_LON1-MAP_LON0;
+    // 줌아웃 한계: lon span 이 bbox lon 을 넘으면 9° 로 축소 + lat span 을 종횡비대로 재계산
+    // (isotropic 유지: lonspan = W/H * latspan / cos(latc) → latspan = lonspan * H/W * cos(latc))
+    if(lonsp>maxlon){
+        double lonc=(v.lon0+v.lon1)*0.5, latc=(v.lat0+v.lat1)*0.5;
+        v.lon0=lonc-maxlon*0.5; v.lon1=lonc+maxlon*0.5;
+        double cl=std::cos(latc*M_PI/180.0); if(cl<0.05) cl=0.05;
+        double latsp=maxlon*(double)H/(double)W*cl;
+        v.lat0=latc-latsp*0.5; v.lat1=latc+latsp*0.5;
+    }
+    // 경계 밖으로 나간 만큼 시프트해 되넣음 (span 유지 → lat 방향 자유 팬)
     if(v.lon0<MAP_LON0){ v.lon1+=MAP_LON0-v.lon0; v.lon0=MAP_LON0; }
     if(v.lon1>MAP_LON1){ v.lon0-=v.lon1-MAP_LON1; v.lon1=MAP_LON1; }
     if(v.lat0<MAP_LAT0){ v.lat1+=MAP_LAT0-v.lat0; v.lat0=MAP_LAT0; }
@@ -54,6 +62,7 @@ static void fit_to_points(MapView& v, const std::vector<MapPoint>& pts, float W,
 
 // 육지 채움용 엣지 — 해안선(KR_OSM_COAST) 닫힌 링만 모아 lat 오름차순 정렬 (1회 캐시).
 // 화면 scanline even-odd 로 "해안선이 둘러싼 영역"을 그대로 채우는 paint-bucket 용.
+// (데이터는 bbox 32~43N 로 클립된 닫힌 링 — 북한 육지도 온전히 닫혀 채워짐.)
 struct FillEdge { float latlo, lathi, lonlo, slope; };  // lonlo=latlo 에서의 lon, slope=dlon/dlat
 static const std::vector<FillEdge>& fill_edges(){
     static std::vector<FillEdge> E; static bool done=false;
@@ -115,6 +124,11 @@ MapResult draw_map(const char* id, MapView& v, const std::vector<MapPoint>& pts,
         double curlon=v.lon0+fx*(v.lon1-v.lon0);
         double curlat=v.lat1-fy*(v.lat1-v.lat0);
         double latspan=(v.lat1-v.lat0)*zf;
+        // 줌아웃 한계 = lon span 이 bbox lon(9°) 이 되는 latspan. 그 이상 줌아웃은 latspan 을
+        // 한계로 고정(커서고정 유지) → clamp 의 중심-재계산과 충돌해 생기던 남/북 드리프트 제거.
+        double latc0=(v.lat0+v.lat1)*0.5, cl0=std::cos(latc0*M_PI/180.0); if(cl0<0.05)cl0=0.05;
+        double maxlatsp=(MAP_LON1-MAP_LON0)*(double)H/(double)W*cl0;
+        if(latspan>maxlatsp) latspan=maxlatsp;
         if(latspan<0.002) latspan=0.002; if(latspan>170.0) latspan=170.0;
         v.lat1=curlat+fy*latspan; v.lat0=v.lat1-latspan;
         double latc=(v.lat0+v.lat1)*0.5, cl=std::cos(latc*M_PI/180.0); if(cl<0.05)cl=0.05;
@@ -144,7 +158,7 @@ MapResult draw_map(const char* id, MapView& v, const std::vector<MapPoint>& pts,
     dl->AddRectFilled(p0, p1, IM_COL32(14,22,34,255));     // 바다 배경
 
     // 한국 bbox — OSM 데이터는 이 영역만 커버. 카메라가 겹칠 때만 그림.
-    const float KRX0=123.f,KRX1=132.f,KRY0=32.f,KRY1=39.f;
+    const float KRX0=123.f,KRX1=132.f,KRY0=32.f,KRY1=43.f;
     bool kr_active = v.lon1>=KRX0 && v.lon0<=KRX1 && v.lat1>=KRY0 && v.lat0<=KRY1;
     // KR bbox 밖은 클리핑해 빈 바다로. bbox 안만 OSM 육지/해안선 표시.
     {
@@ -224,7 +238,9 @@ MapResult draw_map(const char* id, MapView& v, const std::vector<MapPoint>& pts,
         const double steps[]={0.05,0.1,0.25,0.5,1,2,5,10,30};
         double latspan=v.lat1-v.lat0, step=30;
         for(double s : steps){ if(latspan/s <= 7){ step=s; break; } }
-        ImU32 gc=IM_COL32(45,60,78,140), tc=IM_COL32(120,140,160,200);
+        // 격자선: 반투명이면 육지 fill(34,46,40) 위가 바다(14,22,34) 위보다 밝게 합성돼 진해 보임.
+        // → 바다 위 합성 결과색을 불투명으로 고정 → 육지·바다 동일 밝기.
+        ImU32 gc=IM_COL32(31,43,58,255), tc=IM_COL32(120,140,160,200);
         char lab[24];
         for(double lon=std::ceil(v.lon0/step)*step; lon<=v.lon1; lon+=step){
             ImVec2 a=LL2PX(v.lat0,lon), b=LL2PX(v.lat1,lon);
