@@ -44,9 +44,11 @@ struct __attribute__((packed)) AiReqHdr {   // len 프리픽스 뒤 28B + f32 IQ
     uint16_t n; uint8_t ch; uint8_t flags;
 };
 static_assert(sizeof(AiReqHdr)==28, "AiReqHdr must be 28 bytes");
-struct __attribute__((packed)) AiResp {     // 총 22B (len 포함); conf_millipct = 신뢰(%)*1000 (소수점 3자리)
+struct __attribute__((packed)) AiResp {     // 총 22B (len 포함); conf_decipct = 신뢰(%)*10 (소수점 1자리)
+    // u16 필드라 최대 65535 — *1000(3자리) 였을 때 신뢰 65.535%↑ 예측마다 오버플로로
+    // 데몬 struct.pack 이 죽어 서버 루프 전체 다운(2026-07-07). *10 이면 100.0%까지 안전.
     uint32_t len; uint32_t magic; uint16_t ver; uint16_t type;
-    uint8_t status; uint8_t pad; uint16_t conf_millipct; uint16_t model_ver; uint32_t pred_mmsi;
+    uint8_t status; uint8_t pad; uint16_t conf_decipct; uint16_t model_ver; uint32_t pred_mmsi;
 };
 static_assert(sizeof(AiResp)==22, "AiResp must be 22 bytes");
 
@@ -140,7 +142,7 @@ static bool ai_query(const AisRecord& m, uint32_t out_sr, const float* iq, int n
        || !send_all(g_fd,iq,(size_t)n*8,deadline)){ sock_drop(); return false; }
     AiResp r{};
     if(!recv_all(g_fd,&r,sizeof(r),deadline) || r.magic!=AIRP_MAGIC || r.len!=18){ sock_drop(); return false; }
-    st=r.status; pm=r.pred_mmsi; cf=r.conf_millipct;
+    st=r.status; pm=r.pred_mmsi; cf=r.conf_decipct;
     return true;
 }
 

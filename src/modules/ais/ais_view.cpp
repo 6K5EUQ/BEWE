@@ -538,7 +538,7 @@ void draw_content(FFTViewer& v, bool just_opened){
             else modview::cell("-", ImVec4(0.4f,0.4f,0.4f,1.f));
 #ifdef BEWE_MODULE_AIS_AI
             ImGui::TableSetColumnIndex(12);   // Match_AI: DL 지문 예측 (불일치=빨강, 불확실=UNKNOWN)
-            if(G.ai_status==2){ snprintf(b,sizeof(b),"%u %.3f%%",G.ai_mmsi,G.ai_conf/1000.0);
+            if(G.ai_status==2){ snprintf(b,sizeof(b),"%u %.1f%%",G.ai_mmsi,G.ai_conf/10.0);
                 modview::cell(b, G.ai_mmsi==G.mmsi? ImVec4(0.55f,0.8f,0.55f,1.f):ImVec4(1.f,0.5f,0.4f,1.f)); }
             else if(G.ai_status==1) modview::cell("UNKNOWN", ImVec4(0.75f,0.72f,0.5f,1.f));
             else modview::cell("-", ImVec4(0.4f,0.4f,0.4f,1.f));
@@ -726,7 +726,7 @@ void draw_content(FFTViewer& v, bool just_opened){
         }
 #ifdef BEWE_MODULE_AIS_AI
         // ── Match_AI (DL 지문; has_rf 와 독립) ──
-        if(focus.ai_status==2){ char s[32]; snprintf(s,sizeof(s),"%u (%.3f%%)",focus.ai_mmsi,focus.ai_conf/1000.0);
+        if(focus.ai_status==2){ char s[32]; snprintf(s,sizeof(s),"%u (%.1f%%)",focus.ai_mmsi,focus.ai_conf/10.0);
             row("Match_AI", s, focus.ai_mmsi==focus.mmsi? ImVec4(0.55f,0.8f,0.55f,1.f):ImVec4(1.f,0.5f,0.4f,1.f)); }
         else if(focus.ai_status==1) row("Match_AI","UNKNOWN", ImVec4(0.75f,0.72f,0.5f,1.f));
 #endif

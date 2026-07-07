@@ -3,8 +3,12 @@
 Request : u32 len(=28+8n) | u32 'AIRQ' | u16 ver | u16 type | u32 mmsi |
           i64 t_ms | u32 out_sr | u16 n | u8 ch | u8 flags | f32 IQ[2n]
 Reply   : u32 len(=18) | u32 'AIRP' | u16 ver | u16 type | u8 status |
-          u8 pad | u16 conf_millipct | u16 model_ver | u32 pred_mmsi  (22 bytes total)
-          conf_millipct = confidence * 1000 (0..100000, i.e. 3 decimal places on the %)
+          u8 pad | u16 conf_decipct | u16 model_ver | u32 pred_mmsi  (22 bytes total)
+          conf_decipct = confidence * 1000 (0..1000, i.e. 1 decimal place on the %).
+          NOTE: was *100000 (3 decimals) until 2026-07-07 — that overflowed this u16
+          field (max 65535) whenever confidence exceeded 65.535%, crashing the
+          server's select loop silently (every high-confidence match killed the
+          daemon, so gui showed nothing but '-' afterward). Keep this <=65535-safe.
 """
 import struct
 
@@ -45,6 +49,6 @@ def parse_request(hdr_payload: bytes):
     return mmsi, t_ms, out_sr, n, ch, flags, hdr_payload[REQ_HDR.size:]
 
 
-def build_reply(status: int, conf_millipct: int, model_ver: int, pred_mmsi: int) -> bytes:
+def build_reply(status: int, conf_decipct: int, model_ver: int, pred_mmsi: int) -> bytes:
     return RSP.pack(18, MAGIC_RSP, VER, TYPE_INFER, status & 0xFF, 0,
-                    max(0, min(100000, conf_millipct)), model_ver & 0xFFFF, pred_mmsi)
+                    max(0, min(1000, conf_decipct)), model_ver & 0xFFFF, pred_mmsi)

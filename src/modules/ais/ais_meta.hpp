@@ -47,7 +47,7 @@ struct AisRecord {
     // ── Match_AI (DL 지문; ais_ai.cpp 데몬 질의 결과) ──
     uint8_t  ai_status = 0;       // 0=off/데몬부재/모델없음 1=UNKNOWN 2=match
     uint32_t ai_mmsi = 0;         // 예측 MMSI (status=2)
-    uint16_t ai_conf = 0;         // 신뢰 millipercent 0..100000 (percent*1000, 소수점 3자리)
+    uint16_t ai_conf = 0;         // 신뢰 decipercent 0..1000 (percent*10, 소수점 1자리)
 };
 
 // wire 포맷 (framework BEWE_MK_DATA payload; station 은 MpData 봉투가 운반)
