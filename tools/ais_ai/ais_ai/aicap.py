@@ -95,3 +95,39 @@ def inspect(path: str):
     return {"file": path, "bytes": len(data), "records": n_rec,
             "skipped_bytes": skipped, "distinct_mmsi": len(per_mmsi),
             "sr_histogram": srs, "per_mmsi": per_mmsi}
+
+
+def data_summary(data_dir: str, days: int, min_class: int):
+    """Aggregate the last `days` aicap files: totals, per-day, per-MMSI,
+    training readiness. Returns a dict for the /bewe-ai ais status table."""
+    files = day_files(data_dir, days)
+    per_mmsi, per_day, total_rec, total_bytes = {}, [], 0, 0
+    t_lo = t_hi = None
+    for path in files:
+        st = inspect(path)
+        day = os.path.basename(path)[len("aicap_"):-len(".bin")]
+        per_day.append((day, st["records"], os.path.getsize(path)))
+        total_rec += st["records"]
+        total_bytes += os.path.getsize(path)
+        for m, n in st["per_mmsi"].items():
+            per_mmsi[m] = per_mmsi.get(m, 0) + n
+        # burst time range (first/last record of file)
+        for rec in iter_file(path):
+            t_lo = rec.t_ms if t_lo is None else min(t_lo, rec.t_ms)
+            t_hi = rec.t_ms if t_hi is None else max(t_hi, rec.t_ms)
+            break
+        with open(path, "rb") as f:
+            data = f.read()
+        recs = list(iter_bytes(data))
+        if recs:
+            t_hi = max(t_hi or 0, recs[-1].t_ms)
+    ready = sorted(((m, n) for m, n in per_mmsi.items() if n >= min_class),
+                   key=lambda kv: -kv[1])
+    top = sorted(per_mmsi.items(), key=lambda kv: -kv[1])
+    return {
+        "n_files": len(files), "days": days, "min_class": min_class,
+        "total_records": total_rec, "total_bytes": total_bytes,
+        "distinct_mmsi": len(per_mmsi), "n_ready": len(ready),
+        "t_lo_ms": t_lo, "t_hi_ms": t_hi,
+        "per_day": per_day, "top_mmsi": top, "ready_mmsi": ready,
+    }

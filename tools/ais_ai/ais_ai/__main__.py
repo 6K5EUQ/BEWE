@@ -24,7 +24,9 @@ def main():
     ep.add_argument("--baseline-jsonl", action="store_true", help="also run hand-feature baseline")
     ep.add_argument("--min-class", type=int, default=None)
 
-    sp = sub.add_parser("status", help="pretty-print ai_status.json")
+    sp = sub.add_parser("status", help="training-data accumulation + model/daemon state")
+    sp.add_argument("--days", type=int, default=14)
+    sp.add_argument("--json", action="store_true", help="raw ai_status.json instead of table")
 
     ip = sub.add_parser("inspect", help="aicap .bin parser statistics")
     ip.add_argument("path")
@@ -47,10 +49,14 @@ def main():
         from .evaluate import run_eval
         run_eval(cfg, a.days, a.holdout_k, a.baseline_jsonl, a.crop)
     elif a.cmd == "status":
-        try:
-            print(json.dumps(json.load(open(cfg.status_path)), indent=2))
-        except FileNotFoundError:
-            print("no status file - daemon not running?")
+        if a.json:
+            try:
+                print(json.dumps(json.load(open(cfg.status_path)), indent=2))
+            except FileNotFoundError:
+                print("no status file - daemon not running?")
+        else:
+            from .statusview import render
+            print(render(cfg, a.days))
     elif a.cmd == "inspect":
         from .aicap import inspect
         st = inspect(a.path)
