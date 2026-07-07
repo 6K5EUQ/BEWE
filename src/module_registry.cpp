@@ -148,6 +148,13 @@ uint64_t bewe_mod_host_mask(const char* id){
     return fw(id).host_mask;
 }
 
+bool bewe_mod_ch_has_decoder(int ch){
+    if(ch<0 || ch>=64) return false;
+    std::lock_guard<std::mutex> lk(g_fw_mtx);
+    for(auto& kv : g_fw) if((kv.second.host_mask>>ch)&1) return true;
+    return false;
+}
+
 void bewe_mod_host_announce(FFTViewer& v){
     (void)v;
     for(auto& m : reg()) if(m.target_modes) host_send_state(m.id);

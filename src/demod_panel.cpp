@@ -258,11 +258,16 @@ static void draw_targets(FFTViewer& v){
               char db[24]; snprintf(db,sizeof(db),"%.1f",bw*1000.f); overlay_ctr_input(db, ImGui::GetColorU32(ImGuiCol_Text));
               if(ImGui::IsItemDeactivatedAfterEdit() && bwk>0.f){
                   float nb=bwk/1000.f; bewe_mod_edit_ch(v, r.station.c_str(), r.ch, r.mode, cf-nb*0.5f, cf+nb*0.5f); } }
-            // ── Mode 편집 ──
+            // ── Mode 편집 ── 디코더 활성이면 라벨 'DEMOD'/보라 (mode 무관 우선; 콤보는 여전히 AM/FM 편집 가능)
             ImGui::TableSetColumnIndex(3);
             { int cm=r.mode<3?r.mode:0; ImGui::SetNextItemWidth(-1);
-              bool mo=ImGui::BeginCombo("##md", mode_name((uint8_t)cm));
-              overlay_ctr_combo(mode_name((uint8_t)cm), ImGui::GetColorU32(ImGuiCol_Text));
+              bool dec_on = (r.running>=0);
+              const char* mlbl = dec_on ? "DEMOD" : mode_name((uint8_t)cm);
+              ImU32 mcol = dec_on ? IM_COL32(180,80,255,255) : ImGui::GetColorU32(ImGuiCol_Text);
+              if(dec_on) ImGui::PushStyleColor(ImGuiCol_Text, mcol);
+              bool mo=ImGui::BeginCombo("##md", mlbl);
+              overlay_ctr_combo(mlbl, mcol);
+              if(dec_on) ImGui::PopStyleColor();
               if(mo){
                   for(int k=0;k<3;k++){ bool s=(k==cm);
                       if(ImGui::Selectable(mode_name((uint8_t)k),s) && !s)

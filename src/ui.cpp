@@ -508,10 +508,15 @@ void FFTViewer::draw_all_channels(ImDrawList* dl, float gx, float gw, float gy, 
             ? (ch.mode != Channel::DM_NONE)
             : ch.dem_run.load();
 
+        bool has_dec = !remote_mode && bewe_mod_ch_has_decoder(i);
         if(is_rec){
             // 녹음 중: 빨간색
             bord=IM_COL32(255, 60, 60,220);
             fill=IM_COL32(255, 60, 60, ch.selected?70:30);
+        } else if(has_dec){
+            // 디코더 활성(DEMOD): 보라색 — mode 무관 우선
+            bord=IM_COL32(180, 80,255,220);
+            fill=IM_COL32(180, 80,255, ch.selected?70:25);
         } else if(!dem || ch.mode==Channel::DM_NONE){
             // 복조 없음: 회색 투명
             bord=IM_COL32(160,160,160,160);
@@ -3979,6 +3984,9 @@ void run_streaming_viewer(){
             v.autoscale_active = false;
             v.create_waterfall_texture();
         } else {
+            // 초기화 성공 → 에러 래치 명시적 해제 (switch/reconnect 경로와 동일)
+            v.sdr_stream_error.store(false);
+            v.rx_stopped.store(false);
             if(v.hw.type == HWType::BLADERF)
                 cap = std::thread(&FFTViewer::capture_and_process, &v);
             else if(v.hw.type == HWType::PLUTO)
@@ -6873,13 +6881,16 @@ void run_streaming_viewer(){
                             // Holding: stop_dem이 ch.mode를 NONE으로 지우므로 dem_paused_mode를 표시
                             int mi_raw = is_holding ? (int)ch.dem_paused_mode : (int)ch.mode;
                             int mi = mi_raw; if(mi<0||mi>3) mi=0;
+                            // 디코더 활성이면 mode 무관 'DEMOD'/보라 우선 (HOST/LOCAL 한정)
+                            bool has_dec = !v.remote_mode && !is_holding && bewe_mod_ch_has_decoder(ci);
+                            const char* mlabel = has_dec ? "DEMOD" : mnames[mi];
 
                             // ── 채널 색상 (draw_all_channels와 동일) ──────
                             bool is_arec = !is_holding && ch.audio_rec_on.load();
                             bool is_irec = !is_holding && (v.rec_on.load()&&ci==v.rec_ch);
-                            bool dem = !is_holding && (v.remote_mode
+                            bool dem = !is_holding && (has_dec || (v.remote_mode
                                 ? (ch.mode!=Channel::DM_NONE)
-                                : ch.dem_run.load());
+                                : ch.dem_run.load()));
                             bool gate = !is_holding && ch.sq_gate.load();
 
                             ImU32 mode_col;
@@ -6887,6 +6898,8 @@ void run_streaming_viewer(){
                                 mode_col=IM_COL32(120,120,140,255); // Holding: 어두운 회색
                             else if(is_irec||is_arec)
                                 mode_col=IM_COL32(255,60,60,255);
+                            else if(has_dec)
+                                mode_col=IM_COL32(180,80,255,255);  // 디코더 활성(DEMOD): 보라 — mode 무관 우선
                             else if(!dem||ch.mode==Channel::DM_NONE)
                                 mode_col=IM_COL32(160,160,160,255);
                             else if(ch.mode==Channel::DM_AM)
@@ -6952,8 +6965,8 @@ void run_streaming_viewer(){
                             int act_s=(int)ch.sq_active_time, tot_s=(int)ch.sq_total_time;
                             if(act_s<0) act_s=0; if(tot_s<0) tot_s=0;
                             snprintf(label,sizeof(label),
-                                "[%2d] %-3s %10.3f MHz %6.0fkHz  [%02d:%02d:%02d / %02d:%02d:%02d]",
-                                dn,mnames[mi],cf_mhz,bw_khz,
+                                "[%2d] %-5s %10.3f MHz %6.0fkHz  [%02d:%02d:%02d / %02d:%02d:%02d]",
+                                dn,mlabel,cf_mhz,bw_khz,
                                 act_s/3600,(act_s/60)%60,act_s%60,
                                 tot_s/3600,(tot_s/60)%60,tot_s%60);
                             ImGui::PushID(ci*1000+700);

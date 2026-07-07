@@ -62,6 +62,7 @@ void bewe_mod_route(FFTViewer& v, bool host_side, const uint8_t* payload, size_t
 void bewe_mod_host_announce(FFTViewer& v);                       // 전 모듈 STATE 브로드캐스트 (conn_open 등)
 void bewe_mod_host_mask_clear(FFTViewer& v, const char* id, int ch); // 워커 자연 종료 → mask 정리+브로드캐스트
 uint64_t bewe_mod_host_mask(const char* id);                     // HOST 자기 mask (ch 0~63)
+bool bewe_mod_ch_has_decoder(int ch);                            // 이 채널서 도는 디코더 1개+ 있으면 true
 void bewe_mod_reconcile(FFTViewer& v);                           // want↔host_mask 재조정 (HOST 주기 호출)
 void bewe_mod_want_clear_ch(int ch);                             // 채널 진짜 삭제 시 그 ch want 해제
 void bewe_mod_rec_request(const char* id, const char* station, int ch, uint64_t rec_id);            // JOIN→HOST: 녹음 WAV 요청
