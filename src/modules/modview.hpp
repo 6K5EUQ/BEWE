@@ -99,8 +99,8 @@ inline bool row_col0(int uid, bool selected, const char* col0_text){
 inline void header_bar(FFTViewer& v, const char* id, char* filter, size_t cap,
                        int count, bool remote, bool focus_filter,
                        const std::function<void()>& on_clear,
-                       bool nav_show=false, bool can_back=false, bool can_fwd=false,
-                       bool* nav_back=nullptr, bool* nav_fwd=nullptr,
+                       bool nav_show=false, bool can_back=false,
+                       bool* nav_back=nullptr,
                        bool pb_show=false, bool pb_active=false, bool* pb_toggle=nullptr){
     float W = ImGui::GetContentRegionAvail().x;
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f,0.12f,0.16f,1.f));
@@ -114,15 +114,11 @@ inline void header_bar(FFTViewer& v, const char* id, char* filter, size_t cap,
     char fid[40]; snprintf(fid,sizeof(fid),"##%s_flt",id);
     ImGui::InputText(fid, filter, cap);                       // 힌트 없음
     ImGui::SameLine(0,16); ImGui::SetCursorPosY(tcy); ImGui::Text("%d msg", count);
-    // 뒤로/앞으로 네비 버튼 (msg 우측). 비활성이면 회색 비클릭.
+    // 뒤로가기 버튼 (msg 우측): 선박 상세뷰 → 전체 목록으로 복귀. 비활성이면 회색 비클릭.
     if(nav_show){
         ImGui::SameLine(0,16); ImGui::SetCursorPosY(fy);
         ImGui::BeginDisabled(!can_back);
         if(ImGui::Button("<##nav_back") && nav_back) *nav_back=true;
-        ImGui::EndDisabled();
-        ImGui::SameLine(0,4); ImGui::SetCursorPosY(fy);
-        ImGui::BeginDisabled(!can_fwd);
-        if(ImGui::Button(">##nav_fwd") && nav_fwd) *nav_fwd=true;
         ImGui::EndDisabled();
     }
     // 과거조회(Hist) 모드: 조회 중 날짜 앰버 라벨

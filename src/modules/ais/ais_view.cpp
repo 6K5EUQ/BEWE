@@ -180,27 +180,23 @@ void draw_content(FFTViewer& v, bool just_opened){
     }
 
     int total; { std::lock_guard<std::mutex> lk(mtx); total=(int)log.size(); }
-    // ── 뷰 네비게이션: 그룹목록 ↔ 선박이력. nav_stack[0]=0(목록), >0=해당 MMSI 이력 ──
-    static std::vector<uint32_t> nav_stack(1, 0u);   // 히스토리 (0=그룹목록)
-    static int nav_pos = 0;                          // 현재 위치
-    uint32_t cur_view = nav_stack[nav_pos];          // 0=목록, else=MMSI 이력
-    auto nav_go = [&](uint32_t mmsi){                // 새 화면 이동 (앞쪽 히스토리 버림)
+    // ── 뷰 네비게이션: 그룹목록(0) ↔ 선박이력(해당 MMSI). 스택 없이 현재 화면만 기억 ──
+    // 목록에서든 지도에서든 배를 몇 번 갈아타든 뒤로가기는 항상 목록으로 1회 복귀.
+    static uint32_t cur_view = 0;                    // 0=목록, else=MMSI 이력
+    auto nav_go = [&](uint32_t mmsi){                // 선박 상세뷰로 이동
         // JOIN: 배 활성화 시 그 MMSI 전체 이력 온디맨드 다운로드 (구독 요약엔 최초/최근10분만 있음)
         // Hist 모드는 제외 — 과거 아카이브는 이미 전체 데이터라 요청 불필요 (요청하면 오늘 데이터가 섞임)
         if(remote && mmsi && !histm && !vloaded.count(mmsi)){ bewe_mod_req_vessel("ais", mmsi); vloaded.insert(mmsi); }
-        if(nav_stack[nav_pos]==mmsi) return;
-        nav_stack.resize(nav_pos+1); nav_stack.push_back(mmsi); nav_pos=(int)nav_stack.size()-1;
+        cur_view = mmsi;
     };
     // 플레이백(타임라인) 표시 토글 — 기본 OFF. OFF면 지도/데이터가 하단까지 꽉 참.
     static bool tl_show=false; bool tl_toggle=false;
-    bool nav_back=false, nav_fwd=false;
+    bool nav_back=false;
     modview::header_bar(v, "ais", filter, sizeof(filter), total, remote, focus_filter, on_clear,
-                        true, nav_pos>0, nav_pos<(int)nav_stack.size()-1, &nav_back, &nav_fwd,
+                        true, cur_view!=0, &nav_back,
                         true, tl_show, &tl_toggle);
     if(tl_toggle) tl_show=!tl_show;
-    if(nav_back && nav_pos>0) nav_pos--;
-    if(nav_fwd  && nav_pos<(int)nav_stack.size()-1) nav_pos++;
-    cur_view = nav_stack[nav_pos];
+    if(nav_back){ cur_view=0; sel_mmsi=0; map_pin=0; has_focus=false; }
 
     // ── 타임라인 스크러버 + 재생 (00~24시 하루축, 구간 A/B, Play) ────────────
     const float TL_H = 34.f;
