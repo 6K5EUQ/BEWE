@@ -4,7 +4,6 @@
 #include "fft_viewer.hpp"
 #include "ais_module.hpp"
 #include "ais_decode.hpp"
-#include "ais_fp.hpp"
 #include "module_api.hpp"
 #include <cmath>
 #include <algorithm>
@@ -117,7 +116,7 @@ void worker(FFTViewer& v, int ch_idx){
             m.rssi_db     = (float)(10.0*std::log10(acc.sum_mag2*inv + 1e-20));
             m.dur_ms      = (float)(acc.n_d*1000.0/out_sr);
             m.clk_ppm     = acc.n_bits ? (float)(acc.sum_pll/acc.n_bits*1e6/(double)PLLINC) : 0.f;
-            m.fp_ver      = ais_fp::FP_VER;
+            m.fp_ver      = 1;            // RF 특징벡터 버전 (진단용 스탬프)
             m.has_rf      = true;
             if(cap && !acc.series.empty()) host_fpcap(m.mmsi, acc.series.data(), (int)acc.series.size());
         }

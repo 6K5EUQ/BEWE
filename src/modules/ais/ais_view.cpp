@@ -19,14 +19,15 @@
 #include <chrono>
 #include <algorithm>
 
-// Match_AI 열(테이블 idx 12)은 AI 모듈(ais_ai.cpp) 있을 때만 표시. 없으면 열 개수·Info
+// Match_AI 열(테이블 idx 11)은 AI 모듈(ais_ai.cpp) 있을 때만 표시. 없으면 열 개수·Info
 // 인덱스가 하나씩 줄어든다. 컴파일 타임 상수로 인덱스 밀림을 일괄 처리.
+// (비-DL Match 열은 제거됨 — 기본 열 = Up~Cnt 11개 + Info.)
 #ifdef BEWE_MODULE_AIS_AI
-  #define AIS_TBL_NCOL 14
-  #define AIS_TBL_INFO 13
-#else
   #define AIS_TBL_NCOL 13
   #define AIS_TBL_INFO 12
+#else
+  #define AIS_TBL_NCOL 12
+  #define AIS_TBL_INFO 11
 #endif
 
 namespace ais_mod {
@@ -82,14 +83,11 @@ struct AisGrp {
     int64_t  last;         // Down — 최근 수신(갱신)
     AisRecord latest;      // last 시점의 최신 레코드 (Type/Lat/Lon/SOG/COG/Info)
     char     name[21]={};  // 최신 비공백 선박명
-    uint8_t  spoof=0;      // RF 지문 판정 (max spoof_flag)
-    uint32_t match_mmsi=0; // 지문 최근접 MMSI (최신 버스트)
-    float    match_conf=0.f;
     uint8_t  ai_status=0;  // Match_AI (최신 non-zero; sticky)
     uint32_t ai_mmsi=0;
-    uint16_t ai_conf=0;    // millipercent (percent*1000)
+    uint16_t ai_conf=0;    // decipercent (percent*10)
 };
-// 컬럼: 0 Up 1 Down 2 MMSI 3 Type 4 Name 5 Country 6 Lat 7 Lon 8 SOG 9 COG 10 Cnt 11 Match 12 Match_AI 13 Info
+// 컬럼: 0 Up 1 Down 2 MMSI 3 Type 4 Name 5 Country 6 Lat 7 Lon 8 SOG 9 COG 10 Cnt 11 Match_AI 12 Info
 int grp_cmp(int c, const AisGrp& a, const AisGrp& b){
     switch(c){
         case 0:  return a.first<b.first?-1:(a.first>b.first?1:0);
@@ -103,9 +101,8 @@ int grp_cmp(int c, const AisGrp& a, const AisGrp& b){
         case 8:  return a.latest.sog<b.latest.sog?-1:(a.latest.sog>b.latest.sog?1:0);
         case 9:  return a.latest.cog<b.latest.cog?-1:(a.latest.cog>b.latest.cog?1:0);
         case 10: return a.cnt-b.cnt;
-        case 11: return (int)a.match_mmsi-(int)b.match_mmsi;
 #ifdef BEWE_MODULE_AIS_AI
-        case 12: return a.ai_mmsi<b.ai_mmsi?-1:(a.ai_mmsi>b.ai_mmsi?1:0);
+        case 11: return a.ai_mmsi<b.ai_mmsi?-1:(a.ai_mmsi>b.ai_mmsi?1:0);
 #endif
         default: return a.latest.nav_status-b.latest.nav_status;
     }
@@ -444,9 +441,7 @@ void draw_content(FFTViewer& v, bool just_opened){
                 if(m.rx_cnt>G.auth_cnt) G.auth_cnt=m.rx_cnt;   // Central 요약 실제 누계 (권위)
                 if(m.t_ms<G.first) G.first=m.t_ms;          // Up = 최초(불변)
                 if(m.t_ms>=G.last){ G.last=m.t_ms; G.latest=m; }   // Down = 최근
-                if(m.match_mmsi){ G.match_mmsi=m.match_mmsi; G.match_conf=m.match_conf; }  // sticky: non-zero 만 갱신 → 빈 버스트는 이전 매치 유지
-                if(m.ai_status){ G.ai_status=m.ai_status; G.ai_mmsi=m.ai_mmsi; G.ai_conf=m.ai_conf; }  // Match_AI sticky (동일 규칙)
-                if(m.spoof_flag>G.spoof) G.spoof=m.spoof_flag;   // RF 판정 (최대)
+                if(m.ai_status){ G.ai_status=m.ai_status; G.ai_mmsi=m.ai_mmsi; G.ai_conf=m.ai_conf; }  // Match_AI sticky: non-zero 만 갱신
                 if(m.name[0] && !G.name[0]){ strncpy(G.name,m.name,sizeof(G.name)-1); G.name[sizeof(G.name)-1]=0; }
             }
             for(AisGrp& G : g) if(G.auth_cnt) G.cnt=(int)G.auth_cnt;   // 요약 상태: 실제 누계로 표시/정렬 통일
@@ -467,9 +462,9 @@ void draw_content(FFTViewer& v, bool just_opened){
     float tw, mapw;
     if(mv.big){ tw=0.f; mapw=W; }
     else {
-        const float FIXED_COLS = 70+70+82+40+130+64+78+84+48+48+46+82  // Up Down MMSI Type Name Country Lat Lon SOG COG Cnt Match
+        const float FIXED_COLS = 70+70+82+40+130+64+78+84+48+48+46  // Up Down MMSI Type Name Country Lat Lon SOG COG Cnt
 #ifdef BEWE_MODULE_AIS_AI
-            +96                                                       // Match_AI (모듈 있을 때만)
+            +96                                                     // Match_AI (모듈 있을 때만)
 #endif
             ;
         // 컬럼 cell padding(~8px each) + inner border + 세로스크롤바(~14). 이만큼만 더해
@@ -496,7 +491,6 @@ void draw_content(FFTViewer& v, bool just_opened){
         ImGui::TableSetupColumn("SOG",     ImGuiTableColumnFlags_WidthFixed, 48);
         ImGui::TableSetupColumn("COG",     ImGuiTableColumnFlags_WidthFixed, 48);
         ImGui::TableSetupColumn("Cnt",     ImGuiTableColumnFlags_WidthFixed, 46);
-        ImGui::TableSetupColumn("Match",   ImGuiTableColumnFlags_WidthFixed, 82);  // 지문 예상 MMSI
 #ifdef BEWE_MODULE_AIS_AI
         ImGui::TableSetupColumn("Match_AI",ImGuiTableColumnFlags_WidthFixed, 96);  // DL 지문 예측 MMSI+% (AI 모듈)
 #endif
@@ -517,8 +511,7 @@ void draw_content(FFTViewer& v, bool just_opened){
             }
             char b[24];
             ImGui::TableSetColumnIndex(1); { char dn[12]; hms(G.last,dn); modview::cell(dn); }
-            ImGui::TableSetColumnIndex(2); snprintf(b,sizeof(b),"%u",G.mmsi);
-            if(G.spoof==2) modview::cell(b, ImVec4(1.f,0.35f,0.30f,1.f)); else modview::cell(b);  // 스푸핑 의심=빨강
+            ImGui::TableSetColumnIndex(2); snprintf(b,sizeof(b),"%u",G.mmsi); modview::cell(b);
             ImGui::TableSetColumnIndex(3); snprintf(b,sizeof(b),"%d",m.msg_type); modview::cell(b);
             ImGui::TableSetColumnIndex(4);
             if(G.name[0]) modview::cell(G.name); else { const char* cc=ais_mid_country(G.mmsi); if(cc[0]) modview::cell(cc, ImVec4(0.6f,0.6f,0.6f,1.f)); }
@@ -528,12 +521,8 @@ void draw_content(FFTViewer& v, bool just_opened){
             ImGui::TableSetColumnIndex(8); if(m.sog>=0){ snprintf(b,sizeof(b),"%.1f",m.sog); modview::cell(b); }
             ImGui::TableSetColumnIndex(9); if(m.cog>=0){ snprintf(b,sizeof(b),"%.0f",m.cog); modview::cell(b); }
             ImGui::TableSetColumnIndex(10); snprintf(b,sizeof(b),"%d",G.cnt); modview::cell(b);
-            ImGui::TableSetColumnIndex(11);   // Match: 고신뢰 예상 MMSI (claimed 불일치=빨강)
-            if(G.match_mmsi){ snprintf(b,sizeof(b),"%u",G.match_mmsi);
-                modview::cell(b, G.match_mmsi==G.mmsi? ImVec4(0.55f,0.8f,0.55f,1.f):ImVec4(1.f,0.5f,0.4f,1.f)); }
-            else modview::cell("-", ImVec4(0.4f,0.4f,0.4f,1.f));
 #ifdef BEWE_MODULE_AIS_AI
-            ImGui::TableSetColumnIndex(12);   // Match_AI: DL 지문 예측 (불일치=빨강, 불확실=UNKNOWN)
+            ImGui::TableSetColumnIndex(11);   // Match_AI: DL 지문 예측 (불일치=빨강, 불확실=UNKNOWN)
             if(G.ai_status==2){ snprintf(b,sizeof(b),"%u %.1f%%",G.ai_mmsi,G.ai_conf/10.0);
                 modview::cell(b, G.ai_mmsi==G.mmsi? ImVec4(0.55f,0.8f,0.55f,1.f):ImVec4(1.f,0.5f,0.4f,1.f)); }
             else if(G.ai_status==1) modview::cell("UNKNOWN", ImVec4(0.75f,0.72f,0.5f,1.f));
@@ -544,7 +533,15 @@ void draw_content(FFTViewer& v, bool just_opened){
         ImGui::EndTable();
     }
     // ── 선박 이력 뷰: 선택 MMSI 의 Up~Down 사이 모든 메시지 (시간순) ──
-    else if(!mv.big && cur_view!=0 && ImGui::BeginTable("##ais_hist", 7, tf, ImVec2(tw, upper_h))){
+    // 기록별 히스토리 테이블. Match_AI 열(idx 6)은 AI 모듈 있을 때만 → Info 인덱스 6/7 가변.
+#ifdef BEWE_MODULE_AIS_AI
+    #define AIS_HIST_NCOL 8
+    #define AIS_HIST_INFO 7
+#else
+    #define AIS_HIST_NCOL 7
+    #define AIS_HIST_INFO 6
+#endif
+    else if(!mv.big && cur_view!=0 && ImGui::BeginTable("##ais_hist", AIS_HIST_NCOL, tf, ImVec2(tw, upper_h))){
         ImGui::TableSetupScrollFreeze(1,1);
         ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 70);
         ImGui::TableSetupColumn("Lat",  ImGuiTableColumnFlags_WidthFixed, 78);
@@ -552,9 +549,12 @@ void draw_content(FFTViewer& v, bool just_opened){
         ImGui::TableSetupColumn("SOG",  ImGuiTableColumnFlags_WidthFixed, 48);
         ImGui::TableSetupColumn("COG",  ImGuiTableColumnFlags_WidthFixed, 48);
         ImGui::TableSetupColumn("HDG",  ImGuiTableColumnFlags_WidthFixed, 44);
+#ifdef BEWE_MODULE_AIS_AI
+        ImGui::TableSetupColumn("Match_AI", ImGuiTableColumnFlags_WidthFixed, 96);  // 기록별 DL 지문 예측
+#endif
         ImGui::TableSetupColumn("Info", ImGuiTableColumnFlags_WidthStretch);
         static int hsc=-1; static bool hsa=true;
-        modview::sortable_headers(7, hsc, hsa, 6);   // Info(6)만 좌측, 나머지(Time/Lat/Lon/SOG/COG/HDG) 중앙
+        modview::sortable_headers(AIS_HIST_NCOL, hsc, hsa, AIS_HIST_INFO);   // Info 만 좌측, 나머지 중앙
 
         std::lock_guard<std::mutex> lk(mtx);
         static std::vector<int> hvis; hvis.clear();
@@ -573,11 +573,20 @@ void draw_content(FFTViewer& v, bool just_opened){
             ImGui::TableSetColumnIndex(3); if(m.sog>=0){ snprintf(b,sizeof(b),"%.1f",m.sog); modview::cell(b); }
             ImGui::TableSetColumnIndex(4); if(m.cog>=0){ snprintf(b,sizeof(b),"%.0f",m.cog); modview::cell(b); }
             ImGui::TableSetColumnIndex(5); if(m.heading!=511){ snprintf(b,sizeof(b),"%d",m.heading); modview::cell(b); }
-            ImGui::TableSetColumnIndex(6); { char inf[64]; info_str(m,inf,sizeof(inf)); if(inf[0]) ImGui::TextUnformatted(inf); }
+#ifdef BEWE_MODULE_AIS_AI
+            ImGui::TableSetColumnIndex(6);   // Match_AI: 이 기록의 DL 지문 예측 (불일치=빨강, 불확실=UNKNOWN)
+            if(m.ai_status==2){ snprintf(b,sizeof(b),"%u %.1f%%",m.ai_mmsi,m.ai_conf/10.0);
+                modview::cell(b, m.ai_mmsi==m.mmsi? ImVec4(0.55f,0.8f,0.55f,1.f):ImVec4(1.f,0.5f,0.4f,1.f)); }
+            else if(m.ai_status==1) modview::cell("UNKNOWN", ImVec4(0.75f,0.72f,0.5f,1.f));
+            else modview::cell("-", ImVec4(0.4f,0.4f,0.4f,1.f));
+#endif
+            ImGui::TableSetColumnIndex(AIS_HIST_INFO); { char inf[64]; info_str(m,inf,sizeof(inf)); if(inf[0]) ImGui::TextUnformatted(inf); }
         }
         modview::tail_follow(atb, false);
         ImGui::EndTable();
     }
+#undef AIS_HIST_NCOL
+#undef AIS_HIST_INFO
 
     // ── 수신소(기지) 마커: 지구본과 동일하게 discovered_stations 전부 + 내 위치(HOST) 오버레이 ──
     static std::vector<modview_map::MapStation> stns;
@@ -710,15 +719,10 @@ void draw_content(FFTViewer& v, bool just_opened){
         if(focus.dest[0]) row("Dest", focus.dest, ImVec4(0.82f,0.76f,0.55f,1.f));
         if(focus.draught>=0){ char s[16]; snprintf(s,sizeof(s),"%.1f m",focus.draught); row("Draught", s, V); }
         if(focus.eta_mon){ char s[24]; snprintf(s,sizeof(s),"%02d-%02d %02d:%02d",focus.eta_mon,focus.eta_day,focus.eta_hour,focus.eta_min); row("ETA", s, V); }
-        // ── RF 지문 (스푸핑 검증 / Match) ──
+        // ── RF 진단 (CFO — 버스트 특징) ──
         if(focus.has_rf){
             ImGui::Separator();
-            { char s[24]; snprintf(s,sizeof(s),"%.0f Hz",focus.cfo_hz); row("CFO", s, V); }
-            if(focus.spoof_flag==2)      row("RF ALERT","2nd TX 의심", ImVec4(1.f,0.4f,0.35f,1.f));
-            else if(focus.spoof_flag==1) row("RF","서명 정상", ImVec4(0.55f,0.85f,0.55f,1.f));
-            else                          row("RF","확립 중…", ImVec4(0.6f,0.6f,0.6f,1.f));
-            if(focus.match_mmsi){ char s[32]; snprintf(s,sizeof(s),"%u (%.0f%%)",focus.match_mmsi,focus.match_conf*100.f);
-                row("Match", s, focus.match_mmsi==focus.mmsi? ImVec4(0.55f,0.8f,0.55f,1.f):ImVec4(1.f,0.5f,0.4f,1.f)); }
+            char s[24]; snprintf(s,sizeof(s),"%.0f Hz",focus.cfo_hz); row("CFO", s, V);
         }
 #ifdef BEWE_MODULE_AIS_AI
         // ── Match_AI (DL 지문; has_rf 와 독립) ──
