@@ -84,7 +84,12 @@ Thumbs.db
 
 # HOST 세션상태 (런타임, 머신별)
 host_state_*.json
-# BEAE AI 모듈 (venv 6.9GB torch, 학습데이터/모델 — 코드만 추적)
+# BEAE AI 모듈 (venv 6.9GB torch — 코드만 추적)
 BEAE/ais/.venv/
-BEAE/ais/data/
 BEAE/ais/**/__pycache__/
+# data/ 는 ai_model(스냅샷)·ai_history(차트/CSV) 만 추적. aicap(raw IQ, 매일 수십MB
+# 누적)·ai.sock·ai_status.json(런타임 상태)·ai_daemon.log 는 계속 제외.
+BEAE/ais/data/aicap_*.bin
+BEAE/ais/data/ai.sock
+BEAE/ais/data/ai_status.json
+BEAE/ais/data/ai_daemon.log
