@@ -1,8 +1,8 @@
 // ── AIS Match_AI (DL 지문) — 버스트 캡처 사이드카 + 추론 데몬 UDS 클라이언트 ──
 // env BEWE_AIS_AI=1 일 때만 활성 (미설정 = 완전 비활성, 타 기지 영향 zero).
-//  - aicap_append: 라벨링된 버스트 복소 베이스밴드를 modules/ais/aicap_YYYYMMDD.bin 에 append
+//  - aicap_append: 라벨링된 버스트 복소 베이스밴드를 BEAE/ais/data/aicap_YYYYMMDD.bin 에 append
 //    (학습데이터; 레코드 = 24B 헤더 'AIC1' + f32 I/Q interleave)
-//  - ai_query: modules/ais/ai.sock 의 Python 데몬에 버스트 전송 → 예측 MMSI/신뢰 수신.
+//  - ai_query: BEAE/ais/data/ai.sock 의 Python 데몬에 버스트 전송 → 예측 MMSI/신뢰 수신.
 //    지속 연결 + 전체 트랜잭션 단일 데드라인(60ms < 워커 MAX_LAG 80ms) + 실패 5초 래치.
 // 워커 스레드(2채널)에서 host_emit 경유 호출 — g_cap_mtx 로 파일 직렬화,
 // g_sock_mtx try_lock 으로 소켓 직렬화(경합 시 그 버스트만 포기, 스톨 중첩 방지).
@@ -66,11 +66,12 @@ static int64_t mono_ms(){
 // ── 학습데이터 append (일 단위 바이너리; host_fpcap 패턴 + mutex) ────────────
 static void aicap_append(const AisRecord& m, uint32_t out_sr, const float* iq, int n){
     std::lock_guard<std::mutex> lk(g_cap_mtx);
-    mkdir((BEWEPaths::data_dir()+"/modules").c_str(),0755);
-    mkdir((BEWEPaths::data_dir()+"/modules/ais").c_str(),0755);
+    mkdir((BEWEPaths::data_dir()+"/BEAE").c_str(),0755);
+    mkdir((BEWEPaths::data_dir()+"/BEAE/ais").c_str(),0755);
+    mkdir((BEWEPaths::data_dir()+"/BEAE/ais/data").c_str(),0755);
     struct tm tmv; KST::to_tm((time_t)(m.t_ms/1000),tmv);
     char d[16]; strftime(d,sizeof(d),"%Y%m%d",&tmv);
-    FILE* f=fopen((BEWEPaths::data_dir()+"/modules/ais/aicap_"+d+".bin").c_str(),"ab");
+    FILE* f=fopen((BEWEPaths::data_dir()+"/BEAE/ais/data/aicap_"+d+".bin").c_str(),"ab");
     if(!f) return;
     AiCapHdr h{}; h.magic=AICAP_MAGIC; h.mmsi=m.mmsi; h.t_ms=m.t_ms;
     h.out_sr=out_sr; h.n=(uint16_t)n; h.ch=(uint8_t)m.ch; h.flags=0;
@@ -110,7 +111,7 @@ static bool recv_all(int fd, void* buf, size_t n, int64_t deadline){
 static void sock_drop(){ if(g_fd>=0){ close(g_fd); g_fd=-1; } g_retry_at_ms = mono_ms()+AI_RETRY_MS; }
 
 static bool sock_connect(int64_t deadline){
-    std::string path = BEWEPaths::data_dir()+"/modules/ais/ai.sock";
+    std::string path = BEWEPaths::data_dir()+"/BEAE/ais/data/ai.sock";
     int fd=socket(AF_UNIX, SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC, 0);
     if(fd<0) return false;
     struct sockaddr_un a{}; a.sun_family=AF_UNIX;

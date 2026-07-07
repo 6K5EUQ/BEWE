@@ -15,7 +15,7 @@ import sys
 import time
 
 MODE = sys.argv[1] if len(sys.argv) > 1 else "match"
-SOCK = os.path.expanduser("~/BEWE/modules/ais/ai.sock")
+SOCK = os.path.expanduser("~/BEWE/BEAE/ais/data/ai.sock")
 REQ = struct.Struct("<IHHIqIHBB")   # after len prefix, 28 bytes
 
 try:

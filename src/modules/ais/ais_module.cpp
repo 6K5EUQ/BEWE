@@ -240,7 +240,11 @@ void host_emit(FFTViewer& v, AisRecord m, const float* ai_iq, int ai_n, uint32_t
         m.freq = (v.channels[m.ch].s + v.channels[m.ch].e)/2.0f;
     m.t_ms = (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
                  std::chrono::system_clock::now().time_since_epoch()).count();
+#ifdef BEWE_MODULE_AIS_AI
     if(ai_iq) host_ai(m, ai_sr, ai_iq, ai_n);   // Match_AI: 캡처 append + 데몬 질의 (BEWE_AIS_AI)
+#else
+    (void)ai_iq; (void)ai_n; (void)ai_sr;        // AI 모듈 제거 빌드 — 미사용 인자 경고 억제
+#endif
     // RF 지문 판정 (로컬 수신만; CFO 수신기-상대). Match 는 갱신 전 조회(자기 자신 편향 방지).
     if(m.has_rf){
         std::lock_guard<std::mutex> lk(mtx);

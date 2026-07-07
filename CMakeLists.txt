@@ -16,6 +16,13 @@ if(BEWE_MODULE_VIEW_SRCS)
     list(REMOVE_ITEM BEWE_MODULE_SRCS_CLI ${BEWE_MODULE_VIEW_SRCS})
 endif()
 
+# ── BEAE AIS AI (Match_AI) — 독립 판매/제거 가능 모듈 ─────────────────────────
+# ais_ai.cpp 있을 때만 컴파일 define 주입. 파일 삭제 = Match_AI 열·기능·링크 전부
+# 자동 제외(host_ai/ai_enabled 호출부가 #ifdef 로 빠짐) → 코어 운용 무영향.
+if(EXISTS ${CMAKE_SOURCE_DIR}/src/modules/ais/ais_ai.cpp)
+    add_compile_definitions(BEWE_MODULE_AIS_AI)
+endif()
+
 # ── mbelib (DMR AMBE+2 음성 보코더, ISC) — DMR 모듈 있을 때만 컴파일 ──────────
 # 모듈 부재 = 흔적 없음 원칙 유지. libs/mbelib 는 C 소스.
 set(MBELIB_SRCS "")

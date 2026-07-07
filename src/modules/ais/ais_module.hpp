@@ -31,8 +31,11 @@ void host_emit(FFTViewer& v, AisRecord m, const float* ai_iq = nullptr,
 void host_fpcap(uint32_t mmsi, const float* series, int n);
 
 // Match_AI (ais_ai.cpp): env BEWE_AIS_AI=1 게이트. aicap 파일 append + UDS 데몬 질의
+// 독립 판매 모듈 — ais_ai.cpp 없으면 BEWE_MODULE_AIS_AI 미정의 → 선언·호출·열 전부 제외.
+#ifdef BEWE_MODULE_AIS_AI
 bool ai_enabled();
 void host_ai(AisRecord& m, uint32_t out_sr, const float* iq, int n_complex);
+#endif
 
 // 공통 (ais_module.cpp)
 void append_log(const AisRecord& m);

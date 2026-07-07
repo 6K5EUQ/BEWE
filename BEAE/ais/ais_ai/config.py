@@ -10,7 +10,7 @@ def _home() -> str:
 @dataclass
 class Config:
     # ── paths ──────────────────────────────────────────────────────────────
-    data_dir: str = field(default_factory=lambda: os.path.join(_home(), "BEWE", "modules", "ais"))
+    data_dir: str = field(default_factory=lambda: os.path.join(_home(), "BEWE", "BEAE", "ais", "data"))
     sock_path: str = ""
     model_dir: str = ""
     log_path: str = ""

@@ -82,7 +82,11 @@ void worker(FFTViewer& v, int ch_idx){
     // 저장 구간 = 송신기 특징 최농축부(램프업 과도응답+프리앰블+시작플래그) + 여유.
     // AI_PRE: 게이트(페이로드 시작) 前 640 샘플 — 40비트=200샘플 + FIR/DPLL 지연 ~23 + 마진.
     // AI_CAP: 총 896 샘플(~18.7ms @48k) — 게이트 후 256(crop 시프트 여유). 버스트당 ~7.2KB.
+#ifdef BEWE_MODULE_AIS_AI
     const bool ai = ai_enabled();
+#else
+    const bool ai = false;                   // AI 모듈 제거 빌드 — 캡처 경로 전부 no-op
+#endif
     constexpr uint32_t AI_PRE_RING = 4096;   // pow2 (마스크 색인, ~85ms @48k)
     constexpr uint32_t AI_PRE = 640, AI_CAP = 896;
     std::vector<float> pre; if(ai) pre.assign((size_t)AI_PRE_RING*2, 0.f);
