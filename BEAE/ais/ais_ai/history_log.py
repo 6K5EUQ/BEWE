@@ -10,6 +10,7 @@ import os
 FIELDS = [
     "version", "model_name", "trained_at", "classes", "train_n", "val_n",
     "val_top1", "val_bal_acc", "false_unknown", "natural_unknown_fpr",
+    "ece", "worst_class_mmsi", "worst_class_recall",
     "param_count", "model_bytes", "train_seconds",
 ]
 
@@ -41,6 +42,9 @@ def record(model_dir, history_dir, version):
         "val_bal_acc": meta.get("val_bal_acc"),
         "false_unknown": meta.get("false_unknown"),
         "natural_unknown_fpr": meta.get("natural_unknown_fpr"),
+        "ece": meta.get("ece"),
+        "worst_class_mmsi": meta.get("worst_class_mmsi"),
+        "worst_class_recall": meta.get("worst_class_recall"),
         "param_count": _param_count(model_path),
         "model_bytes": os.path.getsize(model_path),
         "train_seconds": meta.get("train_seconds"),
@@ -65,48 +69,111 @@ def record(model_dir, history_dir, version):
     return csv_path
 
 
+_INK = "#3a3a34"
+_MUTED = "#6b6a60"
+_GRID = "#d8d6ca"
+_BLUE = "#2a78d6"     # categorical slot 1 — val_top1
+_RED = "#e34948"      # categorical slot 6 — natural_unknown_fpr (status: higher = worse)
+_GREEN = "#008300"    # categorical slot 4 — trained classes
+_ORANGE = "#eb6834"   # categorical slot 8 — data volume
+
+
+def _style_axis(ax, title):
+    ax.set_title(title, color=_INK, fontsize=12, fontweight="bold", loc="left")
+    ax.tick_params(colors=_MUTED, labelsize=9)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    for spine in ("left", "bottom"):
+        ax.spines[spine].set_color(_GRID)
+    ax.grid(True, axis="y", color=_GRID, linewidth=0.8, alpha=0.7)
+    ax.set_axisbelow(True)
+
+
 def _plot_charts(rows, charts_dir):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     os.makedirs(charts_dir, exist_ok=True)
-    versions = [f"BEAEv{r['version']}" for r in rows]
+    versions = [f"v{r['version']}" for r in rows]
     top1 = [float(r["val_top1"]) * 100 for r in rows]
-    bal_acc = [float(r["val_bal_acc"]) * 100 for r in rows]
     nat_fpr = [float(r["natural_unknown_fpr"]) * 100 for r in rows]
     classes = [int(r["classes"]) for r in rows]
-    params = [int(r["param_count"]) for r in rows]
     train_n = [int(r["train_n"]) + int(r["val_n"]) for r in rows]
+    # ece/worst_class_recall are absent from pre-existing rows (added later) —
+    # only plot versions that actually have them rather than faking a 0.
+    ece_v = [(v, float(r["ece"]) * 100) for v, r in zip(versions, rows) if r.get("ece")]
+    worst_v = [(v, float(r["worst_class_recall"]) * 100) for v, r in zip(versions, rows)
+               if r.get("worst_class_recall")]
 
-    fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+    fig, axes = plt.subplots(2, 3, figsize=(17, 8))
+    fig.patch.set_facecolor("white")
 
+    # Closed-set accuracy: values cluster near 100%, so zoom to where the
+    # differences actually live instead of wasting 0-90 on empty axis.
     ax = axes[0][0]
-    ax.plot(versions, top1, marker="o", label="val_top1 (%)")
-    ax.plot(versions, bal_acc, marker="s", label="val_bal_acc (%)")
-    ax.set_title("Accuracy over model versions")
-    ax.set_ylim(0, 105)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    lo = min(top1)
+    ax.plot(versions, top1, marker="o", markersize=8, linewidth=2, color=_BLUE)
+    for x, y in zip(versions, top1):
+        ax.annotate(f"{y:.1f}%", xy=(x, y), xytext=(0, 8), textcoords="offset points",
+                    ha="center", fontsize=9, color=_INK)
+    ax.set_ylim(max(0, lo - 3), 101.5)
+    _style_axis(ax, "Closed-set accuracy (val_top1, %)")
 
+    # Open-set false-positive rate: real risk metric, so the axis must start
+    # at 0 — a floating floor here would exaggerate version-to-version noise.
     ax = axes[0][1]
-    ax.plot(versions, nat_fpr, marker="o", color="tab:red")
-    ax.set_title("Natural unknown FPR (%) — lower is better")
-    ax.grid(True, alpha=0.3)
+    ax.plot(versions, nat_fpr, marker="o", markersize=8, linewidth=2, color=_RED)
+    for x, y in zip(versions, nat_fpr):
+        ax.annotate(f"{y:.0f}%", xy=(x, y), xytext=(0, 8), textcoords="offset points",
+                    ha="center", fontsize=9, color=_INK)
+    ax.set_ylim(0, max(nat_fpr) * 1.2)
+    _style_axis(ax, "Unknown-vessel false-positive rate (%, lower=better)")
+
+    # Calibration error: a high top1 can hide a model whose confidence numbers
+    # are meaningless (e.g. always says 99.9% regardless of whether it's right).
+    # 0 = a stated confidence matches its actual hit rate; axis starts at 0.
+    ax = axes[0][2]
+    if ece_v:
+        vv, ee = zip(*ece_v)
+        ax.plot(vv, ee, marker="o", markersize=8, linewidth=2, color=_BLUE)
+        for x, y in zip(vv, ee):
+            ax.annotate(f"{y:.1f}%", xy=(x, y), xytext=(0, 8), textcoords="offset points",
+                        ha="center", fontsize=9, color=_INK)
+        ax.set_ylim(0, max(max(ee) * 1.3, 2))
+    else:
+        ax.text(0.5, 0.5, "no data yet", transform=ax.transAxes, ha="center",
+                color=_MUTED, fontsize=10)
+    _style_axis(ax, "Calibration error (ECE, %, lower=better)")
 
     ax = axes[1][0]
-    ax.bar(versions, classes, color="tab:green")
-    ax.set_title("Trained vessel classes")
-    ax.grid(True, alpha=0.3, axis="y")
+    bars = ax.bar(versions, classes, color=_GREEN, width=0.55)
+    ax.bar_label(bars, padding=3, fontsize=9, color=_INK)
+    ax.set_ylim(0, max(classes) * 1.2)
+    _style_axis(ax, "Trained vessel classes (count)")
 
+    # Param count barely moves version to version (< 0.2% drift) — not worth
+    # a second axis; drop it and show what actually changes: training data volume.
     ax = axes[1][1]
-    ax.bar(versions, train_n, color="tab:orange", label="train+val samples")
-    ax2 = ax.twinx()
-    ax2.plot(versions, params, marker="d", color="tab:purple", label="param count")
-    ax.set_title("Data volume vs. model size")
-    ax.legend(loc="upper left")
-    ax2.legend(loc="upper right")
+    bars = ax.bar(versions, train_n, color=_ORANGE, width=0.55)
+    ax.bar_label(bars, padding=3, fontsize=9, color=_INK,
+                 labels=[f"{n:,}" for n in train_n])
+    ax.set_ylim(0, max(train_n) * 1.2)
+    _style_axis(ax, "Training data volume (train+val bursts)")
+
+    # Worst-performing class: overall top1/bal_acc are means and can hide one
+    # thin-data vessel doing badly — this surfaces that floor directly.
+    ax = axes[1][2]
+    if worst_v:
+        vv, ww = zip(*worst_v)
+        bars = ax.bar(vv, ww, color=_RED, width=0.55)
+        ax.bar_label(bars, padding=3, fontsize=9, color=_INK, fmt="%.0f%%")
+        ax.set_ylim(0, 105)
+    else:
+        ax.text(0.5, 0.5, "no data yet", transform=ax.transAxes, ha="center",
+                color=_MUTED, fontsize=10)
+    _style_axis(ax, "Worst single-class recall (%, lower=worse)")
 
     fig.tight_layout()
-    fig.savefig(os.path.join(charts_dir, "training_trend.png"), dpi=150)
+    fig.savefig(os.path.join(charts_dir, "training_trend.png"), dpi=150, facecolor="white")
     plt.close(fig)

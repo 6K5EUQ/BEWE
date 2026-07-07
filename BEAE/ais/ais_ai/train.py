@@ -17,6 +17,20 @@ from .model import IQResNet1D
 from .openset import calibrate_thresholds, fit_temperature
 
 
+def _ece(conf: np.ndarray, correct: np.ndarray, n_bins: int = 10) -> float:
+    """Expected Calibration Error: |confidence - accuracy| averaged over
+    equal-width confidence bins, weighted by bin size. 0 = perfectly
+    calibrated (a 0.99-confidence prediction is right 99% of the time)."""
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    err = 0.0
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        m = (conf > lo) & (conf <= hi) if lo > 0 else (conf >= lo) & (conf <= hi)
+        if not m.any():
+            continue
+        err += (m.mean()) * abs(conf[m].mean() - correct[m].mean())
+    return float(err)
+
+
 def _augment(x: torch.Tensor, cfg: Config, gen: torch.Generator) -> torch.Tensor:
     """Batched GPU augmentation. x [B,2,N] RMS-normalized.
     Phase rotation (carrier phase is random per burst — safe & essential),
@@ -131,17 +145,28 @@ def _fit(cfg: Config, bursts, crop: str, log=print):
     vl = _logits_all(model, va_xt, cfg.batch, device)
     T = fit_temperature(vl, va_yt)
     pv = torch.softmax(vl / T, 1).numpy()
-    top1 = float((pv.argmax(1) == va_y).mean())
+    pred = pv.argmax(1)
+    top1 = float((pred == va_y).mean())
     pu = None
     if unk_x is not None and len(unk_x):
         ul = _logits_all(model, torch.from_numpy(unk_x), cfg.batch, device)
         pu = torch.softmax(ul / T, 1).numpy()
     taus, floor = calibrate_thresholds(cfg, pv, va_y, pu, len(classes))
-    eff = np.array(taus)[pv.argmax(1)]
+    eff = np.array(taus)[pred]
     false_unknown = float((pv.max(1) < eff).mean())
     unk_fpr = float((pu.max(1) >= np.array(taus)[pu.argmax(1)]).mean()) if pu is not None else -1.0
+
+    # Calibration: does a 0.99-confidence prediction turn out right ~99% of the
+    # time? High top1 can hide a model that is systematically over-confident.
+    ece = _ece(pv.max(1), (pred == va_y).astype(np.float64))
+    # Per-class recall: a class with few bursts can hide behind a good overall
+    # top1/bal_acc — surface the worst one so thin classes get flagged.
+    per_class_recall = {int(classes[c]): float((pred[va_y == c] == c).mean())
+                        for c in range(len(classes)) if (va_y == c).sum()}
+    worst_mmsi, worst_recall = min(per_class_recall.items(), key=lambda kv: kv[1])
     log(f"top1={top1:.4f} bal_acc={best_acc:.4f} T={T:.3f} floor={floor:.2f} "
-        f"false_unknown={false_unknown:.3f} natural_unknown_fpr={unk_fpr:.3f}")
+        f"false_unknown={false_unknown:.3f} natural_unknown_fpr={unk_fpr:.3f} "
+        f"ece={ece:.4f} worst_class={worst_mmsi}({worst_recall:.3f})")
 
     meta = {
         "crop": crop, "input_len": int(tr_x.shape[2]),
@@ -149,6 +174,8 @@ def _fit(cfg: Config, bursts, crop: str, log=print):
         "temperature": T, "taus": taus, "tau_floor": floor,
         "val_top1": top1, "val_bal_acc": best_acc,
         "false_unknown": false_unknown, "natural_unknown_fpr": unk_fpr,
+        "ece": ece, "per_class_recall": per_class_recall,
+        "worst_class_mmsi": worst_mmsi, "worst_class_recall": worst_recall,
         "train_n": int(len(tr_x)), "val_n": int(len(va_x)),
         "trained_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "train_seconds": round(time.time() - t0, 1),
