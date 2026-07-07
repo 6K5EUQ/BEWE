@@ -55,7 +55,7 @@ class ModelRegistry:
             log.exception("model reload failed — keeping previous")
 
     def predict(self, iq: np.ndarray, out_sr: int):
-        """iq complex64 (full capture) -> (status, pred_mmsi, conf_pct, model_ver)."""
+        """iq complex64 (full capture) -> (status, pred_mmsi, conf_millipct, model_ver)."""
         with self._lock:
             model, meta = self._model, self._meta
         if model is None:

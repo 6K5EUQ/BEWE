@@ -2,8 +2,9 @@
 
 Request : u32 len(=28+8n) | u32 'AIRQ' | u16 ver | u16 type | u32 mmsi |
           i64 t_ms | u32 out_sr | u16 n | u8 ch | u8 flags | f32 IQ[2n]
-Reply   : u32 len(=16) | u32 'AIRP' | u16 ver | u16 type | u8 status |
-          u8 conf_pct | u16 model_ver | u32 pred_mmsi          (20 bytes total)
+Reply   : u32 len(=18) | u32 'AIRP' | u16 ver | u16 type | u8 status |
+          u8 pad | u16 conf_millipct | u16 model_ver | u32 pred_mmsi  (22 bytes total)
+          conf_millipct = confidence * 1000 (0..100000, i.e. 3 decimal places on the %)
 """
 import struct
 
@@ -15,8 +16,8 @@ TYPE_INFER = 1
 # after the len prefix: magic..flags = 28 bytes
 REQ_HDR = struct.Struct("<IHHIqIHBB")
 assert REQ_HDR.size == 28
-RSP = struct.Struct("<IIHHBBHI")
-assert RSP.size == 20
+RSP = struct.Struct("<IIHHBBHHI")
+assert RSP.size == 22
 
 MAX_FRAME = 65536
 
@@ -44,6 +45,6 @@ def parse_request(hdr_payload: bytes):
     return mmsi, t_ms, out_sr, n, ch, flags, hdr_payload[REQ_HDR.size:]
 
 
-def build_reply(status: int, conf_pct: int, model_ver: int, pred_mmsi: int) -> bytes:
-    return RSP.pack(16, MAGIC_RSP, VER, TYPE_INFER,
-                    status & 0xFF, max(0, min(100, conf_pct)), model_ver & 0xFFFF, pred_mmsi)
+def build_reply(status: int, conf_millipct: int, model_ver: int, pred_mmsi: int) -> bytes:
+    return RSP.pack(18, MAGIC_RSP, VER, TYPE_INFER, status & 0xFF, 0,
+                    max(0, min(100000, conf_millipct)), model_ver & 0xFFFF, pred_mmsi)

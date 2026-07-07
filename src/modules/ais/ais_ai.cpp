@@ -44,11 +44,11 @@ struct __attribute__((packed)) AiReqHdr {   // len 프리픽스 뒤 28B + f32 IQ
     uint16_t n; uint8_t ch; uint8_t flags;
 };
 static_assert(sizeof(AiReqHdr)==28, "AiReqHdr must be 28 bytes");
-struct __attribute__((packed)) AiResp {     // 총 20B (len 포함)
+struct __attribute__((packed)) AiResp {     // 총 22B (len 포함); conf_millipct = 신뢰(%)*1000 (소수점 3자리)
     uint32_t len; uint32_t magic; uint16_t ver; uint16_t type;
-    uint8_t status; uint8_t conf_pct; uint16_t model_ver; uint32_t pred_mmsi;
+    uint8_t status; uint8_t pad; uint16_t conf_millipct; uint16_t model_ver; uint32_t pred_mmsi;
 };
-static_assert(sizeof(AiResp)==20, "AiResp must be 20 bytes");
+static_assert(sizeof(AiResp)==22, "AiResp must be 22 bytes");
 
 static constexpr int AI_IO_BUDGET_MS = 60;    // connect+send+recv 총 예산 (< MAX_LAG 80ms)
 static constexpr int64_t AI_RETRY_MS = 5000;  // 실패 후 재시도 금지 래치
@@ -126,7 +126,7 @@ static bool sock_connect(int64_t deadline){
 }
 
 static bool ai_query(const AisRecord& m, uint32_t out_sr, const float* iq, int n,
-                     uint8_t& st, uint32_t& pm, uint8_t& cf){
+                     uint8_t& st, uint32_t& pm, uint16_t& cf){
     if(mono_ms() < g_retry_at_ms) return false;
     if(!g_sock_mtx.try_lock()) return false;   // 타 채널 트랜잭션 중 → 이 버스트 포기
     std::lock_guard<std::mutex> lk(g_sock_mtx, std::adopt_lock);
@@ -139,8 +139,8 @@ static bool ai_query(const AisRecord& m, uint32_t out_sr, const float* iq, int n
     if(!send_all(g_fd,&len,4,deadline) || !send_all(g_fd,&h,sizeof(h),deadline)
        || !send_all(g_fd,iq,(size_t)n*8,deadline)){ sock_drop(); return false; }
     AiResp r{};
-    if(!recv_all(g_fd,&r,sizeof(r),deadline) || r.magic!=AIRP_MAGIC || r.len!=16){ sock_drop(); return false; }
-    st=r.status; pm=r.pred_mmsi; cf=r.conf_pct;
+    if(!recv_all(g_fd,&r,sizeof(r),deadline) || r.magic!=AIRP_MAGIC || r.len!=18){ sock_drop(); return false; }
+    st=r.status; pm=r.pred_mmsi; cf=r.conf_millipct;
     return true;
 }
 
@@ -149,7 +149,7 @@ void host_ai(AisRecord& m, uint32_t out_sr, const float* iq, int n_complex){
     m.ai_status=0; m.ai_mmsi=0; m.ai_conf=0;
     if(!ai_enabled() || !iq || n_complex<=0 || m.mmsi==0) return;
     aicap_append(m, out_sr, iq, n_complex);
-    uint8_t st=0, cf=0; uint32_t pm=0;
+    uint8_t st=0; uint16_t cf=0; uint32_t pm=0;
     if(ai_query(m, out_sr, iq, n_complex, st, pm, cf)){
         if(st==2){ m.ai_status=2; m.ai_mmsi=pm; m.ai_conf=cf; }
         else if(st==1){ m.ai_status=1; m.ai_mmsi=pm; m.ai_conf=cf; }

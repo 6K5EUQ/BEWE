@@ -48,12 +48,12 @@ def calibrate_thresholds(cfg, probs_val: np.ndarray, labels_val: np.ndarray,
 
 
 def decide(logits: np.ndarray, temperature: float, taus, classes):
-    """logits [C] -> (status, pred_mmsi, conf_pct)."""
+    """logits [C] -> (status, pred_mmsi, conf_millipct). conf scaled *1000 (3 decimal places)."""
     z = logits / max(temperature, 1e-6)
     z -= z.max()
     p = np.exp(z); p /= p.sum()
     c = int(p.argmax())
-    conf = int(round(100.0 * float(p[c])))
+    conf = int(round(100000.0 * float(p[c])))
     if float(p[c]) >= taus[c]:
         return ST_MATCH, int(classes[c]), conf
     return ST_UNKNOWN, int(classes[c]), conf

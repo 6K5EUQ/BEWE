@@ -87,7 +87,7 @@ struct AisGrp {
     float    match_conf=0.f;
     uint8_t  ai_status=0;  // Match_AI (최신 non-zero; sticky)
     uint32_t ai_mmsi=0;
-    uint8_t  ai_conf=0;
+    uint16_t ai_conf=0;    // millipercent (percent*1000)
 };
 // 컬럼: 0 Up 1 Down 2 MMSI 3 Type 4 Name 5 Country 6 Lat 7 Lon 8 SOG 9 COG 10 Cnt 11 Match 12 Match_AI 13 Info
 int grp_cmp(int c, const AisGrp& a, const AisGrp& b){
@@ -538,7 +538,7 @@ void draw_content(FFTViewer& v, bool just_opened){
             else modview::cell("-", ImVec4(0.4f,0.4f,0.4f,1.f));
 #ifdef BEWE_MODULE_AIS_AI
             ImGui::TableSetColumnIndex(12);   // Match_AI: DL 지문 예측 (불일치=빨강, 불확실=UNKNOWN)
-            if(G.ai_status==2){ snprintf(b,sizeof(b),"%u %u%%",G.ai_mmsi,(unsigned)G.ai_conf);
+            if(G.ai_status==2){ snprintf(b,sizeof(b),"%u %.3f%%",G.ai_mmsi,G.ai_conf/1000.0);
                 modview::cell(b, G.ai_mmsi==G.mmsi? ImVec4(0.55f,0.8f,0.55f,1.f):ImVec4(1.f,0.5f,0.4f,1.f)); }
             else if(G.ai_status==1) modview::cell("UNKNOWN", ImVec4(0.75f,0.72f,0.5f,1.f));
             else modview::cell("-", ImVec4(0.4f,0.4f,0.4f,1.f));
@@ -726,7 +726,7 @@ void draw_content(FFTViewer& v, bool just_opened){
         }
 #ifdef BEWE_MODULE_AIS_AI
         // ── Match_AI (DL 지문; has_rf 와 독립) ──
-        if(focus.ai_status==2){ char s[32]; snprintf(s,sizeof(s),"%u (%u%%)",focus.ai_mmsi,(unsigned)focus.ai_conf);
+        if(focus.ai_status==2){ char s[32]; snprintf(s,sizeof(s),"%u (%.3f%%)",focus.ai_mmsi,focus.ai_conf/1000.0);
             row("Match_AI", s, focus.ai_mmsi==focus.mmsi? ImVec4(0.55f,0.8f,0.55f,1.f):ImVec4(1.f,0.5f,0.4f,1.f)); }
         else if(focus.ai_status==1) row("Match_AI","UNKNOWN", ImVec4(0.75f,0.72f,0.5f,1.f));
 #endif

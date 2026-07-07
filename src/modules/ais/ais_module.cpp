@@ -130,7 +130,7 @@ void store_append(const AisRecord& m){
             m.spoof_flag,m.cfo_z,m.match_mmsi,m.match_conf);
     if(m.ai_status)   // Match_AI (DL 지문 예측)
         fprintf(f,",\"aist\":%u,\"aim\":%u,\"aic\":%u",
-            (unsigned)m.ai_status,m.ai_mmsi,(unsigned)m.ai_conf);
+            (unsigned)m.ai_status,m.ai_mmsi,(unsigned)m.ai_conf);   // aic = millipercent
     fprintf(f,"}\n");
     fclose(f);
 }
@@ -176,7 +176,7 @@ void store_parse_jsonl(const char* data, size_t n, std::vector<AisRecord>& out){
         }
         if(strstr(l,"\"aist\":")){   // Match_AI (없으면 기본 0 유지)
             m.ai_status=(uint8_t)jll(l,"\"aist\":");
-            m.ai_mmsi=(uint32_t)jll(l,"\"aim\":"); m.ai_conf=(uint8_t)jll(l,"\"aic\":");
+            m.ai_mmsi=(uint32_t)jll(l,"\"aim\":"); m.ai_conf=(uint16_t)jll(l,"\"aic\":");
         }
         out.push_back(m);
     }
