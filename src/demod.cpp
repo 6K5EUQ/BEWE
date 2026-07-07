@@ -161,6 +161,7 @@ void FFTViewer::dem_worker(int ch_idx){
                         float r=rs_prev+(float)rs_pos*(raw_out-rs_prev);
                         float out=gate_open?r:0.0f;
                         ch.maybe_rec_audio(r, gate_open);
+                        ch.maybe_stt_audio(r, gate_open);   // STT 발화 캡처 (squelch 기반; 오디오 비소유)
                         // 외부 디코더(DMR 음성)가 오디오 소유 시 FM/AM 오디오 억제 (잡음 대신 무음/음성)
                         if(!ch.ext_audio.load(std::memory_order_relaxed)){
                           ch.push_audio(out);

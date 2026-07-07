@@ -282,8 +282,16 @@ static void draw_targets(FFTViewer& v){
             //    Holding 은 CF 범위 밖이라 복조 정지 → decode_on 이어도 RUN 아님 ──
             bool run_live = (r.running>=0 && !r.hold);
             ImGui::TableSetColumnIndex(5);
-            if(run_live){ ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f,0.95f,0.45f,1.f)); cell_ctr("RUN");  ImGui::PopStyleColor(); }
-            else        { ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f,0.5f,0.56f,1.f));   cell_ctr("idle"); ImGui::PopStyleColor(); }
+            // STT: 모델 로드 중이면 READY(노랑), 준비완료면 RUN(초록). stt_ready 는 HOST 로컬
+            // 채널 상태 → 원격 JOIN 행에선 조회 불가(항상 RUN 표시). 내가 HOST(my_station="")일 때만.
+            bool is_local = (bewe_mod_my_station()[0]==0);
+            bool stt_dec = run_live && strcmp(mods[r.running].id,"stt")==0;
+            bool stt_not_ready = false;
+            if(stt_dec && is_local && r.ch>=0 && r.ch<MAX_CHANNELS && !v.channels[r.ch].stt_ready.load())
+                stt_not_ready = true;
+            if(stt_not_ready){ ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f,0.85f,0.30f,1.f)); cell_ctr("READY"); ImGui::PopStyleColor(); }
+            else if(run_live){ ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f,0.95f,0.45f,1.f)); cell_ctr("RUN");  ImGui::PopStyleColor(); }
+            else             { ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f,0.5f,0.56f,1.f));   cell_ctr("idle"); ImGui::PopStyleColor(); }
             // ── Data: 누적 수신 메시지 (###,###msg) — HOST 측정값 (Central 경유, 전 뷰어 동일) ──
             ImGui::TableSetColumnIndex(6);
             if(r.running>=0){

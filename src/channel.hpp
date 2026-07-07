@@ -9,6 +9,7 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <functional>
 
 // ── Oscillator ────────────────────────────────────────────────────────────
 struct Oscillator {
@@ -172,6 +173,51 @@ struct Channel {
         int16_t s16=(int16_t)(out<-1.f?-32767:out>1.f?32767:(int)(out*32767.f));
         fwrite(&s16,2,1,audio_rec_fp);
         audio_rec_frames++;
+    }
+
+    // ── STT 발화 캡처 (demod 스레드 전용) ─────────────────────────────────
+    // squelch open→close 한 구간 = 발화 하나. gate_open 동안 mono float 축적,
+    // close(+tail) 시 완성 콜백 stt_on_utt 로 그 버퍼를 STT 모듈에 넘긴다.
+    // 코어는 STT 를 모른다 — 모듈이 stt_on 을 켜고 stt_on_utt 콜백을 등록.
+    std::atomic<bool> stt_on{false};              // 이 채널 STT decode 활성 (모듈이 토글)
+    std::atomic<bool> stt_ready{false};           // STT 워커 모델 로드완료 (READY→RUN 표시용; 모듈이 세팅)
+    std::function<void(int ch,uint32_t sr,const float* a,size_t n)> stt_on_utt; // 발화 완성 콜백
+    int      stt_ch_idx      = -1;                // 콜백에 실어보낼 채널 인덱스
+    uint32_t stt_sr          = 0;                 // 발화 샘플레이트 (= AUDIO_SR)
+    std::vector<float> stt_utt;                   // 현재 발화 축적 버퍼
+    int      stt_state       = SQR_IDLE;          // 발화 상태머신 (녹음과 독립)
+    uint32_t stt_tail_remain = 0;
+
+    inline void maybe_stt_audio(float out, bool gate_open){
+        if(!stt_on.load(std::memory_order_relaxed) || !stt_on_utt) return;
+        if(dem_paused.load(std::memory_order_relaxed)) return;   // Holding 중 정지
+        uint32_t tail = stt_sr/2;                                // 0.5초 tail (발화 끝 여유)
+        switch(stt_state){
+        case SQR_IDLE:
+            if(!gate_open) return;
+            stt_state=SQR_RECORDING; stt_utt.clear();
+            break;
+        case SQR_RECORDING:
+            if(!gate_open){ stt_state=SQR_TAIL; stt_tail_remain=tail; }
+            break;
+        case SQR_TAIL:
+            if(gate_open){ stt_state=SQR_RECORDING; }
+            else if(stt_tail_remain==0){                          // 발화 끝 → 전사 요청
+                stt_state=SQR_IDLE;
+                // 너무 짧은 잡음(<0.3초)은 버림
+                if(stt_utt.size() >= (size_t)(stt_sr*0.3f) && stt_sr>0)
+                    stt_on_utt(stt_ch_idx, stt_sr, stt_utt.data(), stt_utt.size());
+                stt_utt.clear();
+                return;
+            } else stt_tail_remain--;
+            break;
+        }
+        stt_utt.push_back(out);
+        // 폭주 방지 상한 (30초) — 초과 시 강제 절단해 전사
+        if(stt_utt.size() >= (size_t)(stt_sr*30) && stt_sr>0){
+            stt_on_utt(stt_ch_idx, stt_sr, stt_utt.data(), stt_utt.size());
+            stt_utt.clear(); stt_state=SQR_IDLE;
+        }
     }
 
     // ── Per-channel IQ recording (demod 스레드 내에서만 접근) ────────────
