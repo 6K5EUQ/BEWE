@@ -14,18 +14,34 @@
 #include <cstring>
 #include <cstdlib>
 #include <ctime>
+#include <string>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <poll.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <signal.h>
 #include <errno.h>
 
 namespace ais_mod {
 
+// BEAE/ais/.venv/bin/python — 이 파일 존재 = AI 스택 설치된 기지 (DGS-N).
+// 미설치(개발PC 등)면 경로 없음 → AI 완전 비활성 (타 기지 영향 zero).
+static std::string venv_python(){ return BEWEPaths::data_dir()+"/BEAE/ais/.venv/bin/python"; }
+static std::string ais_pkg_dir(){ return BEWEPaths::data_dir()+"/BEAE/ais"; }
+
 bool ai_enabled(){
-    static int c=-1; if(c<0){ const char* e=getenv("BEWE_AIS_AI"); c=(e&&e[0]=='1')?1:0; }
+    // 게이트: venv 존재 여부. env BEWE_AIS_AI 는 강제 오버라이드(1=강제 on, 0=강제 off).
+    static int c=-1;
+    if(c<0){
+        const char* e=getenv("BEWE_AIS_AI");
+        if(e && e[0]=='0')      c=0;                       // 명시적 비활성
+        else if(e && e[0]=='1') c=1;                       // 명시적 활성 (venv 없어도 시도)
+        else                    c = (access(venv_python().c_str(), X_OK)==0) ? 1 : 0;  // 자동: venv 존재 시
+    }
     return c==1;
 }
 
@@ -111,6 +127,54 @@ static bool recv_all(int fd, void* buf, size_t n, int64_t deadline){
     return true;
 }
 static void sock_drop(){ if(g_fd>=0){ close(g_fd); g_fd=-1; } g_retry_at_ms = mono_ms()+AI_RETRY_MS; }
+
+// ── 추론 데몬 spawn (BEWE 자식 프로세스) ────────────────────────────────────
+// 정책: 소켓이 이미 응답하면(systemd 등 외부 데몬 존재) spawn 안 함 → 안전 공존.
+//       자식이 살아있으면 재spawn 안 함. 크래시하면 다음 호출 때 재spawn.
+// 반드시 단일스레드 시점(host_start 의 g_mgmt 락 내부)에서만 호출 —
+// 워커 스레드에서 fork 하면 멀티스레드 fork 위험(락 상태 복제)에 걸림.
+static pid_t g_daemon_pid = -1;
+
+static bool sock_alive(){   // 논블록 connect 로 소켓 응답 여부만 확인 (외부 데몬 감지)
+    int fd=socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0);
+    if(fd<0) return false;
+    struct sockaddr_un a{}; a.sun_family=AF_UNIX;
+    strncpy(a.sun_path,(BEWEPaths::data_dir()+"/BEAE/ais/data/ai.sock").c_str(),sizeof(a.sun_path)-1);
+    bool ok = connect(fd,(struct sockaddr*)&a,sizeof(a))==0;
+    close(fd); return ok;
+}
+
+void ai_ensure_daemon(){
+    if(!ai_enabled()) return;
+    if(g_daemon_pid>0){                       // 이미 spawn 한 자식 — 살아있나 확인
+        if(waitpid(g_daemon_pid, nullptr, WNOHANG)==0) return;   // 살아있음
+        g_daemon_pid=-1;                      // 죽었음 → 수확 완료, 재spawn 진행
+    }
+    if(sock_alive()) return;                  // 외부(systemd) 데몬이 이미 응답 → spawn 불필요
+    std::string py=venv_python(), cwd=ais_pkg_dir();
+    if(access(py.c_str(), X_OK)!=0) return;   // venv 없음 → no-op (강제 on 이어도 실행 불가)
+    static bool s_atexit=false;               // BEWE 종료 시 자식 데몬 정리 (최초 spawn 시 1회 등록)
+    if(!s_atexit){ atexit(ai_stop_daemon); s_atexit=true; }
+    pid_t pid=fork();
+    if(pid<0) return;
+    if(pid==0){                               // 자식: cwd=BEAE/ais 로 -m ais_ai daemon
+        setsid();                             // 세션 분리 (BEWE 종료 시그널 전파 격리)
+        if(chdir(cwd.c_str())!=0) _exit(127);
+        int nul=open("/dev/null",O_RDONLY); if(nul>=0){ dup2(nul,0); if(nul>0) close(nul); }
+        execl(py.c_str(), py.c_str(), "-m", "ais_ai", "daemon", (char*)nullptr);
+        _exit(127);
+    }
+    g_daemon_pid=pid;                         // 부모: pid 기억 (종료 시 kill, 좀비 수확용)
+    g_retry_at_ms=mono_ms()+AI_RETRY_MS;      // 소켓 뜰 시간 확보 (즉시 질의 실패 방지)
+}
+
+void ai_stop_daemon(){                        // BEWE 종료 시 자식 데몬 정리 (자기 spawn 분만)
+    if(g_daemon_pid>0){
+        kill(g_daemon_pid, SIGTERM);
+        waitpid(g_daemon_pid, nullptr, 0);
+        g_daemon_pid=-1;
+    }
+}
 
 static bool sock_connect(int64_t deadline){
     std::string path = BEWEPaths::data_dir()+"/BEAE/ais/data/ai.sock";

@@ -30,11 +30,13 @@ void host_emit(FFTViewer& v, AisRecord m, const float* ai_iq = nullptr,
 // RF 지문 raw 시리즈 캡처 (BEWE_AIS_FPCAP; 학습데이터 사이드카)
 void host_fpcap(uint32_t mmsi, const float* series, int n);
 
-// Match_AI (ais_ai.cpp): env BEWE_AIS_AI=1 게이트. aicap 파일 append + UDS 데몬 질의
+// Match_AI (ais_ai.cpp): venv 존재 게이트(env BEWE_AIS_AI 로 강제 오버라이드). aicap append + UDS 질의
 // 독립 판매 모듈 — ais_ai.cpp 없으면 BEWE_MODULE_AIS_AI 미정의 → 선언·호출·열 전부 제외.
 #ifdef BEWE_MODULE_AIS_AI
 bool ai_enabled();
 void host_ai(AisRecord& m, uint32_t out_sr, const float* iq, int n_complex);
+void ai_ensure_daemon();   // AIS decode 워커 켤 때 추론 데몬 spawn (외부 데몬 있으면 no-op)
+void ai_stop_daemon();     // BEWE 종료 시 자기 spawn 데몬 정리
 #endif
 
 // 공통 (ais_module.cpp)

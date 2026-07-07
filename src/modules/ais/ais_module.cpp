@@ -46,6 +46,9 @@ static bool host_start(FFTViewer& v, int ch){
     if(!w.on.load() && w.thr.joinable()) w.thr.join();
     if(w.on.load()) return true;
     if(!v.channels[ch].filter_active) return false;   // 복조 모드 무관 — 워커가 IQ ring 직접 탭
+#ifdef BEWE_MODULE_AIS_AI
+    ai_ensure_daemon();   // 단일스레드(g_mgmt 락)에서 추론 데몬 확보 — 워커 fork 위험 회피
+#endif
     w.stop.store(false);
     w.on.store(true);
     w.thr = std::thread(worker, std::ref(v), ch);
