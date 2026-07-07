@@ -400,7 +400,7 @@ static long host_today_count(const char* id, int ch){
     }
     fclose(f); return cnt;
 }
-// 오늘 jsonl 을 1회 파싱해 전 채널 카운트 배열로 캐시 (30초 TTL, 모듈 id 별).
+// 오늘 jsonl 을 1회 파싱해 전 채널 카운트 배열로 캐시 (3초 TTL, 모듈 id 별).
 //  decstat 폴링이 채널마다 파일을 재파싱하지 않도록 — 파일 1회 read 로 ch0~ 전부.
 static long host_today_count_cached(const char* id, int ch){
     if(ch<0 || ch>=MAX_CHANNELS) return 0;
@@ -409,7 +409,7 @@ static long host_today_count_cached(const char* id, int ch){
     std::lock_guard<std::mutex> lk(m);
     int64_t now = mod_now_ms();
     auto& e = cache[id];
-    if(now - e.first >= 30000 || e.first==0){
+    if(now - e.first >= 3000 || e.first==0){
         e.first = now; e.second.fill(0);
         const char* home = getenv("HOME");
         std::string base = home ? std::string(home) : std::string(".");
@@ -469,7 +469,7 @@ void bewe_mod_host_ch_decstat(int ch, uint32_t& count, uint32_t& runtime_s){
     if(id.empty()) return;
     // 라이브 누적(stat_total: 켠 뒤 emit) 과 오늘 저장본(jsonl 총수=DMR 뷰 누적) 중 큰 값.
     //  → reconcile 재장전/자정 직후처럼 stat_total 이 비어도 화면 Data 가 뷰와 일치.
-    //  jsonl 은 채널별 30초 캐시 (폴링마다 파일 파싱 방지).
+    //  jsonl 은 채널별 3초 캐시 (폴링마다 파일 파싱 방지).
     long live = 0;
     { std::lock_guard<std::mutex> lk(g_stat_mtx);
       auto it = g_stat_total.find(stat_key(id.c_str(), g_my_station, ch));
