@@ -84,3 +84,5 @@ Thumbs.db
 
 # HOST 세션상태 (런타임, 머신별)
 host_state_*.json
+tools/ais_ai/.venv/
+tools/ais_ai/**/__pycache__/

@@ -44,6 +44,10 @@ struct AisRecord {
     float    cfo_z = 0.f;         // 그 MMSI 서명 대비 편차 (진단)
     uint32_t match_mmsi = 0;      // 지문 최근접 MMSI (0=미상/저신뢰)
     float    match_conf = 0.f;    // Match 신뢰도 0..1
+    // ── Match_AI (DL 지문; ais_ai.cpp 데몬 질의 결과) ──
+    uint8_t  ai_status = 0;       // 0=off/데몬부재/모델없음 1=UNKNOWN 2=match
+    uint32_t ai_mmsi = 0;         // 예측 MMSI (status=2)
+    uint8_t  ai_conf = 0;         // 신뢰 percent 0..100
 };
 
 // wire 포맷 (framework BEWE_MK_DATA payload; station 은 MpData 봉투가 운반)
@@ -61,6 +65,8 @@ struct __attribute__((packed)) AisWireMsg {
     uint16_t fp_ver; uint8_t has_rf;
     float    cfo_hz, fdev_std_hz, rssi_db, clk_ppm, dur_ms;
     uint8_t  spoof_flag; float cfo_z; uint32_t match_mmsi; float match_conf;
+    // ── Match_AI (끝에 추가; append-only 유지) ──
+    uint8_t  ai_status; uint32_t ai_mmsi; uint8_t ai_conf;
 };
 
 inline void ais_msg_to_wire(const AisRecord& m, AisWireMsg& w){
@@ -76,6 +82,7 @@ inline void ais_msg_to_wire(const AisRecord& m, AisWireMsg& w){
     w.fp_ver=m.fp_ver; w.has_rf=m.has_rf?1:0;
     w.cfo_hz=m.cfo_hz; w.fdev_std_hz=m.fdev_std_hz; w.rssi_db=m.rssi_db; w.clk_ppm=m.clk_ppm; w.dur_ms=m.dur_ms;
     w.spoof_flag=m.spoof_flag; w.cfo_z=m.cfo_z; w.match_mmsi=m.match_mmsi; w.match_conf=m.match_conf;
+    w.ai_status=m.ai_status; w.ai_mmsi=m.ai_mmsi; w.ai_conf=m.ai_conf;
 }
 inline void ais_wire_to_msg(const AisWireMsg& w, AisRecord& m){
     m = AisRecord{};
@@ -91,6 +98,7 @@ inline void ais_wire_to_msg(const AisWireMsg& w, AisRecord& m){
     m.fp_ver=w.fp_ver; m.has_rf=w.has_rf!=0;
     m.cfo_hz=w.cfo_hz; m.fdev_std_hz=w.fdev_std_hz; m.rssi_db=w.rssi_db; m.clk_ppm=w.clk_ppm; m.dur_ms=w.dur_ms;
     m.spoof_flag=w.spoof_flag; m.cfo_z=w.cfo_z; m.match_mmsi=w.match_mmsi; m.match_conf=w.match_conf;
+    m.ai_status=w.ai_status; m.ai_mmsi=w.ai_mmsi; m.ai_conf=w.ai_conf;
 }
 
 // ── AIS 6-bit ASCII → 8-bit ASCII (ITU-R M.1371 Table 47) ──────────────────

@@ -77,10 +77,28 @@ void worker(FFTViewer& v, int ch_idx){
     long frames=0;
     BurstAcc acc; acc.reset();
     const bool cap = fpcap_enabled();
+
+    // ── Match_AI 버스트 캡처 (BEWE_AIS_AI): 데시메이트 복소 프리롤 링 + 게이트 스냅샷 ──
+    // 저장 구간 = 송신기 특징 최농축부(램프업 과도응답+프리앰블+시작플래그) + 여유.
+    // AI_PRE: 게이트(페이로드 시작) 前 640 샘플 — 40비트=200샘플 + FIR/DPLL 지연 ~23 + 마진.
+    // AI_CAP: 총 896 샘플(~18.7ms @48k) — 게이트 후 256(crop 시프트 여유). 버스트당 ~7.2KB.
+    const bool ai = ai_enabled();
+    constexpr uint32_t AI_PRE_RING = 4096;   // pow2 (마스크 색인, ~85ms @48k)
+    constexpr uint32_t AI_PRE = 640, AI_CAP = 896;
+    std::vector<float> pre; if(ai) pre.assign((size_t)AI_PRE_RING*2, 0.f);
+    uint64_t pre_wp = 0;      // 누적 데시메이트 샘플수 (monotonic — 리셋 금지, 마스크로 wrap)
+    uint64_t pre_valid = 0;   // 리셋 이후 연속 유효 샘플수 (불연속 가드)
+    std::vector<float> aicap; bool aicap_on = false; if(ai) aicap.reserve((size_t)AI_CAP*2);
     // RF 지문 게이팅: 페이로드(ST_DATA) 구간만 누산 (프리앰블/플래그/탐색노이즈 제외 → CFO 잡음↓).
     bool acc_gate=false; int acc_skip=0;
-    dec.on_gate = [&](bool on){ if(on){ acc.reset(); acc_gate=true; acc_skip=6; }   // FIR/DPLL 지연 6심볼 건너뜀
-                                else   { acc_gate=false; } };
+    dec.on_gate = [&](bool on){ if(on){ acc.reset(); acc_gate=true; acc_skip=6;   // FIR/DPLL 지연 6심볼 건너뜀
+                                        if(ai){ aicap.clear(); aicap_on=false;
+                                            if(pre_valid>=AI_PRE){   // 프리롤 미확보(리셋 직후) 버스트는 skip
+                                                for(uint64_t i=pre_wp-AI_PRE;i<pre_wp;i++){
+                                                    size_t p=(size_t)(i&(AI_PRE_RING-1))*2;
+                                                    aicap.push_back(pre[p]); aicap.push_back(pre[p+1]); }
+                                                aicap_on=true; } } }
+                                else   { acc_gate=false; aicap_on=false; } };   // aicap clear 금지 — emit 이 reset_all 보다 먼저
     dec.on_record = [&](const AisRecord& r){
         frames++;
         AisRecord m=r; m.ch=ch_idx;
@@ -99,8 +117,12 @@ void worker(FFTViewer& v, int ch_idx){
             m.has_rf      = true;
             if(cap && !acc.series.empty()) host_fpcap(m.mmsi, acc.series.data(), (int)acc.series.size());
         }
-        host_emit(v, m);
+        // Match_AI: 캡처 완료된 버스트만 전달 (emit 은 reset_all 전 → aicap 유효)
+        const float* aq=nullptr; int an=0;
+        if(ai && !aicap.empty() && m.mmsi){ aq=aicap.data(); an=(int)(aicap.size()/2); }
+        host_emit(v, m, aq, an, out_sr);
         acc.reset(); acc_gate=false;
+        aicap.clear(); aicap_on=false;
     };
 
     bewe_log_push(0,"AIS[%d] start: %.4f MHz  BW=%.1f kHz  station=%u  decim=%u out=%u Hz (%.2f sps)\n",
@@ -120,7 +142,8 @@ void worker(FFTViewer& v, int ch_idx){
         if(hold!=hold_prev){
             bewe_mod_host_ch_hold(ch_idx, hold);
             if(hold){ for(int k=0;k<4;k++){ lpi[k].s=lpq[k].s=0; } dec_i=dec_q=0; dec_cnt=0; prev_i=prev_q=0;
-                      std::fill(fir,fir+36,0.f); fir_pos=0; pll=0; prev_zc=0; lastbit=0; dec.reset_all(); acc.reset(); acc_gate=false; }
+                      std::fill(fir,fir+36,0.f); fir_pos=0; pll=0; prev_zc=0; lastbit=0; dec.reset_all(); acc.reset(); acc_gate=false;
+                      pre_valid=0; aicap.clear(); aicap_on=false; }
             hold_prev=hold;
         }
         if(hold){
@@ -142,6 +165,7 @@ void worker(FFTViewer& v, int ch_idx){
             rp=(wp-keep)&IQ_RING_MASK; my_rp.store(rp,std::memory_order_release);
             for(int k=0;k<4;k++){ lpi[k].s=lpq[k].s=0; }
             dec_i=dec_q=0; dec_cnt=0; prev_i=prev_q=0; acc.reset(); acc_gate=false;
+            pre_valid=0; aicap.clear(); aicap_on=false;
             lag=(wp-rp)&IQ_RING_MASK;
         }
         if(lag==0){ std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue; }
@@ -157,6 +181,14 @@ void worker(FFTViewer& v, int ch_idx){
             if(++dec_cnt < decim) continue;
             float oi=(float)(dec_i/dec_cnt), oq=(float)(dec_q/dec_cnt);
             dec_i=dec_q=0; dec_cnt=0;
+
+            // Match_AI 프리롤 링 + 라이브 캡처. 게이트 트리거 샘플은 여기서 링에 먼저 기록됨
+            // → on_gate 스냅샷에 포함, 다음 샘플부터 live append (중복/공백 없음).
+            if(ai){
+                size_t p=(size_t)(pre_wp&(AI_PRE_RING-1))*2; pre[p]=oi; pre[p+1]=oq;
+                pre_wp++; pre_valid++;
+                if(aicap_on && aicap.size()<(size_t)AI_CAP*2){ aicap.push_back(oi); aicap.push_back(oq); }
+            }
 
             // FM 판별: arg(z * conj(prev)) — 순시주파수 (GMSK mark/space). 부호모호성은 NRZI 가 흡수.
             float d = atan2f(oq*prev_i - oi*prev_q, oi*prev_i + oq*prev_q + 1e-20f);

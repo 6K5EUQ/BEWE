@@ -128,6 +128,9 @@ void store_append(const AisRecord& m){
                   "\"sf\":%d,\"cz\":%.2f,\"mm\":%u,\"mc\":%.2f",
             m.fp_ver,m.cfo_hz,m.fdev_std_hz,m.rssi_db,m.clk_ppm,m.dur_ms,
             m.spoof_flag,m.cfo_z,m.match_mmsi,m.match_conf);
+    if(m.ai_status)   // Match_AI (DL 지문 예측)
+        fprintf(f,",\"aist\":%u,\"aim\":%u,\"aic\":%u",
+            (unsigned)m.ai_status,m.ai_mmsi,(unsigned)m.ai_conf);
     fprintf(f,"}\n");
     fclose(f);
 }
@@ -170,6 +173,10 @@ void store_parse_jsonl(const char* data, size_t n, std::vector<AisRecord>& out){
             m.rssi_db=(float)jf(l,"\"rssi\":"); m.clk_ppm=(float)jf(l,"\"ppm\":"); m.dur_ms=(float)jf(l,"\"dur\":");
             m.spoof_flag=(uint8_t)jll(l,"\"sf\":"); m.cfo_z=(float)jf(l,"\"cz\":");
             m.match_mmsi=(uint32_t)jll(l,"\"mm\":"); m.match_conf=(float)jf(l,"\"mc\":");
+        }
+        if(strstr(l,"\"aist\":")){   // Match_AI (없으면 기본 0 유지)
+            m.ai_status=(uint8_t)jll(l,"\"aist\":");
+            m.ai_mmsi=(uint32_t)jll(l,"\"aim\":"); m.ai_conf=(uint8_t)jll(l,"\"aic\":");
         }
         out.push_back(m);
     }
@@ -228,11 +235,12 @@ void host_fpcap(uint32_t mmsi, const float* series, int n){
 }
 
 // ── HOST: 워커 → 지문판정 + 스탬프 + 아카이브 + framework emit ──────────────
-void host_emit(FFTViewer& v, AisRecord m){
+void host_emit(FFTViewer& v, AisRecord m, const float* ai_iq, int ai_n, uint32_t ai_sr){
     if(m.ch>=0 && m.ch<MAX_CHANNELS && v.channels[m.ch].filter_active)
         m.freq = (v.channels[m.ch].s + v.channels[m.ch].e)/2.0f;
     m.t_ms = (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
                  std::chrono::system_clock::now().time_since_epoch()).count();
+    if(ai_iq) host_ai(m, ai_sr, ai_iq, ai_n);   // Match_AI: 캡처 append + 데몬 질의 (BEWE_AIS_AI)
     // RF 지문 판정 (로컬 수신만; CFO 수신기-상대). Match 는 갱신 전 조회(자기 자신 편향 방지).
     if(m.has_rf){
         std::lock_guard<std::mutex> lk(mtx);
