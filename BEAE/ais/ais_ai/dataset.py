@@ -20,6 +20,32 @@ def crop_bounds(cfg: Config, crop: str):
     raise ValueError(f"unknown crop {crop!r}")
 
 
+def resample_to_nominal(iq: np.ndarray, out_sr: int, cfg: Config) -> np.ndarray:
+    """Resample a burst captured at out_sr onto nominal_sr so crop indices (which
+    are defined in nominal-sr samples) line up. CFO/clock-ppm fingerprints are
+    preserved: resampling changes the sample grid, not the carrier/timing offsets
+    the model keys on. Returns iq unchanged when already within tolerance.
+
+    FFT resample (numpy-only, no scipy dep) — exact for these short bursts; the
+    same function runs in training and inference so the two stay in lockstep."""
+    if abs(out_sr - cfg.nominal_sr) / cfg.nominal_sr <= cfg.sr_tol:
+        return iq
+    n = len(iq)
+    m = int(round(n * cfg.nominal_sr / out_sr))
+    if m < 8 or m == n:
+        return iq
+    spec = np.fft.fft(iq)
+    if m > n:   # upsample: zero-pad the spectrum around Nyquist
+        h = n // 2
+        out = np.zeros(m, dtype=complex)
+        out[:h] = spec[:h]
+        out[m - (n - h):] = spec[h:]
+    else:       # downsample: keep the m lowest-|freq| bins
+        h = m // 2
+        out = np.concatenate([spec[:h], spec[n - (m - h):]])
+    return (np.fft.ifft(out) * (m / n)).astype(np.complex64)
+
+
 def crop_and_norm(iq: np.ndarray, start: int, length: int) -> np.ndarray | None:
     """Crop [start, start+length) and per-burst RMS normalize.
     Returns float32 [2, length] (I, Q rows) or None if unusable."""
@@ -41,9 +67,14 @@ def load_bursts(cfg: Config, days: int, crop: str = "preamble"):
     per: dict[int, list] = {}
     for path in day_files(cfg.data_dir, days):
         for rec in iter_file(path):
-            if abs(rec.out_sr - cfg.nominal_sr) / cfg.nominal_sr > cfg.sr_tol:
-                continue   # mixed sample rate — exclude rather than silently mix
-            x = crop_and_norm(rec.iq, start, length)
+            # Off-nominal capture rate: resample onto nominal_sr instead of
+            # dropping (whole-day exclusion silently starved training when the
+            # SDR settled on a slightly different rate). Guard against wild
+            # outliers that would distort more than they help.
+            if abs(rec.out_sr - cfg.nominal_sr) / cfg.nominal_sr > cfg.sr_resample_max:
+                continue
+            iq = resample_to_nominal(rec.iq, rec.out_sr, cfg)
+            x = crop_and_norm(iq, start, length)
             if x is None:
                 continue
             per.setdefault(rec.mmsi, []).append((rec.t_ms, x))

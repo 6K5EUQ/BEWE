@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from .config import Config
-from .dataset import crop_and_norm, crop_bounds
+from .dataset import crop_and_norm, crop_bounds, resample_to_nominal
 from .model import IQResNet1D
 from .proto import ST_ERROR, ST_NO_MODEL
 
@@ -62,6 +62,7 @@ class ModelRegistry:
             return ST_NO_MODEL, 0, 0, 0
         try:
             start, length = crop_bounds(self.cfg, meta.get("crop", "preamble"))
+            iq = resample_to_nominal(iq, out_sr, self.cfg)   # match training grid
             x = crop_and_norm(iq, start, length)
             if x is None:
                 return ST_ERROR, 0, 0, meta["version"]

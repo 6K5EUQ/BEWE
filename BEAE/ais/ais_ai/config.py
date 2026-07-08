@@ -31,7 +31,8 @@ class Config:
     crop_payload_len: int = 504
 
     nominal_sr: int = 48000
-    sr_tol: float = 0.005      # |sr-nominal|/nominal above this → resample
+    sr_tol: float = 0.005          # |sr-nominal|/nominal within this → use as-is
+    sr_resample_max: float = 0.05  # above sr_tol but within this → resample; beyond → drop
 
     # ── dataset ────────────────────────────────────────────────────────────
     window_days: int = 14

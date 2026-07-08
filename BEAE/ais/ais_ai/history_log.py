@@ -156,11 +156,23 @@ def _plot_charts(rows, charts_dir):
 
     # Param count barely moves version to version (< 0.2% drift) — not worth
     # a second axis; drop it and show what actually changes: training data volume.
+    # Runs of identical volume across consecutive versions mean new captures
+    # weren't reaching training (e.g. the 2026-07 sample-rate-mismatch bug that
+    # silently dropped a whole day's bursts) — fade those bars and call it out
+    # instead of letting a flat run look like normal data growth.
     ax = axes[1][1]
-    bars = ax.bar(versions, train_n, color=_ORANGE, width=0.55)
+    stuck = [i for i in range(1, len(train_n)) if train_n[i] == train_n[i - 1]]
+    colors = [(_ORANGE + "55") if (i in stuck or i + 1 in stuck) else _ORANGE
+              for i in range(len(train_n))]
+    bars = ax.bar(versions, train_n, color=colors, width=0.55)
     ax.bar_label(bars, padding=3, fontsize=9, color=_INK,
                  labels=[f"{n:,}" for n in train_n])
     ax.set_ylim(0, max(train_n) * 1.2)
+    if stuck:
+        lo, hi = versions[stuck[0] - 1], versions[stuck[-1]]
+        ax.annotate(f"stuck {lo}–{hi}: new data not reaching training\n(fixed: sample-rate resample)",
+                    xy=(0.5, 0.97), xycoords="axes fraction", ha="center", va="top",
+                    fontsize=8, color=_MUTED, style="italic")
     _style_axis(ax, "Training data volume (train+val bursts)")
 
     # Worst-performing class: overall top1/bal_acc are means and can hide one
