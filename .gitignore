@@ -93,3 +93,7 @@ BEAE/ais/data/aicap_*.bin
 BEAE/ais/data/ai.sock
 BEAE/ais/data/ai_status.json
 BEAE/ais/data/ai_daemon.log
+# BEAE STT POC (venv + 러닝로그 — 코드만 추적)
+BEAE/stt/.venv/
+BEAE/stt/**/__pycache__/
+BEAE/stt/*.log
