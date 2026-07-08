@@ -508,7 +508,7 @@ void FFTViewer::draw_all_channels(ImDrawList* dl, float gx, float gw, float gy, 
             ? (ch.mode != Channel::DM_NONE)
             : ch.dem_run.load();
 
-        bool has_dec = !remote_mode && bewe_mod_ch_has_decoder(i);
+        bool has_dec = bewe_mod_ch_decode_on(remote_mode, i);
         if(is_rec){
             // 녹음 중: 빨간색
             bord=IM_COL32(255, 60, 60,220);
@@ -4816,7 +4816,6 @@ void run_streaming_viewer(){
     bool  chat_cursor_end  = false; // 다음 프레임에 커서를 끝으로 이동 (/ 입력 후 선택 방지)
     char  chat_input[256] = {};
 
-    bool  ops_open     = false;
     bool  stat_open    = false;
     int   last_fft_seq = -1;  // CONNECT 모드 FFT 시퀀스 추적
     bool  chat_scroll_bottom = false;
@@ -5808,9 +5807,6 @@ void run_streaming_viewer(){
                 if(ImGui::IsKeyPressed(ImGuiKey_RightArrow,false)) arrow_set_out(sci, 2); // R
                 if(ImGui::IsKeyPressed(ImGuiKey_UpArrow,false))    arrow_set_out(sci, 1); // L+R
                 if(ImGui::IsKeyPressed(ImGuiKey_DownArrow,false))  arrow_set_out(sci, 3); // M(뮤트)
-            }
-            if(main_kbd_active && ImGui::IsKeyPressed(ImGuiKey_O,false) && !editing){
-                ops_open = !ops_open;
             }
             if(main_kbd_active && ImGui::IsKeyPressed(ImGuiKey_Escape,false)){
                 if(sci>=0){ v.channels[sci].selected=false; v.selected_ch=-1; }
@@ -6882,7 +6878,7 @@ void run_streaming_viewer(){
                             int mi_raw = is_holding ? (int)ch.dem_paused_mode : (int)ch.mode;
                             int mi = mi_raw; if(mi<0||mi>3) mi=0;
                             // 디코더 활성이면 mode 무관 'DEMOD'/보라 우선 (HOST/LOCAL 한정)
-                            bool has_dec = !v.remote_mode && !is_holding && bewe_mod_ch_has_decoder(ci);
+                            bool has_dec = !is_holding && bewe_mod_ch_decode_on(v.remote_mode, ci);
                             const char* mlabel = has_dec ? "DEMOD" : mnames[mi];
 
                             // ── 채널 색상 (draw_all_channels와 동일) ──────
@@ -8993,54 +8989,6 @@ void run_streaming_viewer(){
             ImGui::PopStyleColor(2); ImGui::PopStyleVar();
         }
 
-        // ── 오퍼레이터 목록 패널 (O키 토글) ─────────────────────────────
-        if(ops_open){
-            const float OW=280.f;
-            // HOST/JOIN 통합 목록 구성 (index=0: HOST, index>=1: JOIN)
-            std::vector<OpEntry> ops_display;
-            if(v.net_srv){
-                // HOST 모드: 내 항목(index=0) 직접 구성 + JOIN 목록
-                OpEntry host_e{}; host_e.index=0; host_e.tier=(uint8_t)login_get_tier();
-                const char* my_id = login_get_id();
-                strncpy(host_e.name, (my_id && my_id[0]) ? my_id : "Host", 31);
-                ops_display.push_back(host_e);
-                auto joins = v.net_srv->get_operators();
-                ops_display.insert(ops_display.end(), joins.begin(), joins.end());
-            } else if(v.net_cli){
-                // JOIN 모드: op_list (index=0은 HOST, 나머지는 JOIN)
-                std::unique_lock<std::mutex> lk(v.net_cli->op_mtx, std::try_to_lock);
-                if(lk.owns_lock()){
-                    for(int i=0;i<v.net_cli->op_list.count;i++)
-                        ops_display.push_back(v.net_cli->op_list.ops[i]);
-                }
-            }
-            float OH=60.f+(float)ops_display.size()*22.f;
-            OH=std::max(OH,100.f);
-
-            ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x-OW-10, TOPBAR_H+10));
-            ImGui::SetNextWindowSize(ImVec2(OW,OH));
-            ImGui::SetNextWindowBgAlpha(0.90f);
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,8.f);
-            ImGui::PushStyleColor(ImGuiCol_WindowBg,ImVec4(0.05f,0.07f,0.12f,1.f));
-            ImGui::Begin("##ops",nullptr,
-                ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|
-                ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar);
-
-            ImGui::TextColored(ImVec4(0.4f,0.7f,1.f,1.f),"Operators");
-            ImGui::SameLine(OW-30); if(ImGui::SmallButton("X##oc")) ops_open=false;
-            ImGui::Separator();
-
-            for(auto& op : ops_display){
-                bool is_host = (op.index == 0);
-                const char* badge = is_host ? "[HOST]" : "[JOIN]";
-                ImVec4 col = is_host ? ImVec4(0.4f,0.85f,1.f,1.f)
-                                     : ImVec4(0.7f,0.92f,0.7f,1.f);
-                ImGui::TextColored(col,"%s %s  [Tier%d]",
-                    badge, op.name, op.tier);
-            }
-            ImGui::End();
-            ImGui::PopStyleColor(); ImGui::PopStyleVar();
-        }
 
         // ╔══════════════════════════════════════════════════════════════════╗
         // ║  Signal Analysis 독립 오버레이 (E키 토글)                        ║

@@ -155,6 +155,20 @@ bool bewe_mod_ch_has_decoder(int ch){
     return false;
 }
 
+// HOST/LOCAL 은 host_mask, JOIN 은 CH_LIST 미러(targets.decode_on) 로 판단 → 양쪽 통일
+bool bewe_mod_ch_decode_on(bool remote, int ch){
+    if(ch<0 || ch>=64) return false;
+    std::lock_guard<std::mutex> lk(g_fw_mtx);
+    if(!remote){
+        for(auto& kv : g_fw) if((kv.second.host_mask>>ch)&1) return true;
+        return false;
+    }
+    for(auto& kv : g_fw)
+        for(auto& t : kv.second.targets)
+            if((int)t.ch==ch && t.decode_on) return true;
+    return false;
+}
+
 void bewe_mod_host_announce(FFTViewer& v){
     (void)v;
     for(auto& m : reg()) if(m.target_modes) host_send_state(m.id);
