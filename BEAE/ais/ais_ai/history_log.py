@@ -11,7 +11,7 @@ FIELDS = [
     "version", "model_name", "trained_at", "classes", "train_n", "val_n",
     "val_top1", "val_bal_acc", "false_unknown", "natural_unknown_fpr",
     "ece", "worst_class_mmsi", "worst_class_recall",
-    "param_count", "model_bytes", "train_seconds",
+    "epochs_run", "param_count", "model_bytes", "train_seconds",
 ]
 
 
@@ -45,6 +45,7 @@ def record(model_dir, history_dir, version):
         "ece": meta.get("ece"),
         "worst_class_mmsi": meta.get("worst_class_mmsi"),
         "worst_class_recall": meta.get("worst_class_recall"),
+        "epochs_run": meta.get("epochs_run"),
         "param_count": _param_count(model_path),
         "model_bytes": os.path.getsize(model_path),
         "train_seconds": meta.get("train_seconds"),
@@ -102,6 +103,7 @@ def _plot_charts(rows, charts_dir):
     classes = [int(r["classes"]) for r in rows]
     train_n = [int(r["train_n"]) + int(r["val_n"]) for r in rows]
     train_s = [float(r["train_seconds"]) for r in rows]
+    epochs = [int(r["epochs_run"]) if r.get("epochs_run") else None for r in rows]
     # ece/worst_class_recall are absent from pre-existing rows (added later) —
     # only plot versions that actually have them rather than faking a 0.
     ece_v = [(v, float(r["ece"]) * 100) for v, r in zip(versions, rows) if r.get("ece")]
@@ -196,7 +198,20 @@ def _plot_charts(rows, charts_dir):
     ax.set_ylim(0, max(train_s) * 1.2)
     _style_axis(ax, "Train time (s, from scratch)")
 
-    axes[1][3].axis("off")   # 8th cell unused — 7 metrics in a 2x4 grid
+    # Epochs actually run before early-stop. This is why train time doesn't track
+    # data volume: a run that plateaus early stops sooner and finishes faster
+    # (fewer epochs), even on a bigger dataset — the real driver of wall-clock.
+    ax = axes[1][3]
+    ep_v = [(v, e) for v, e in zip(versions, epochs) if e is not None]
+    if ep_v:
+        vv, ee = zip(*ep_v)
+        bars = ax.bar(vv, ee, color=_BLUE, width=0.55)
+        ax.bar_label(bars, padding=3, fontsize=9, color=_INK)
+        ax.set_ylim(0, max(ee) * 1.25)
+    else:
+        ax.text(0.5, 0.5, "no data yet", transform=ax.transAxes, ha="center",
+                color=_MUTED, fontsize=10)
+    _style_axis(ax, "Epochs run (early-stop point)")
 
     fig.tight_layout()
     fig.savefig(os.path.join(charts_dir, "training_trend.png"), dpi=150, facecolor="white")

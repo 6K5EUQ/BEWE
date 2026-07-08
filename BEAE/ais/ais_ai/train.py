@@ -139,6 +139,7 @@ def _fit(cfg: Config, bursts, crop: str, log=print):
             if bad >= cfg.patience:
                 log(f"early stop at epoch {ep + 1}")
                 break
+    epochs_run = ep + 1   # epochs actually executed (early-stop point or max)
     model.load_state_dict(best_state)
 
     # ── calibration ────────────────────────────────────────────────────────
@@ -177,6 +178,7 @@ def _fit(cfg: Config, bursts, crop: str, log=print):
         "ece": ece, "per_class_recall": per_class_recall,
         "worst_class_mmsi": worst_mmsi, "worst_class_recall": worst_recall,
         "train_n": int(len(tr_x)), "val_n": int(len(va_x)),
+        "epochs_run": epochs_run,
         "trained_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "train_seconds": round(time.time() - t0, 1),
     }
