@@ -76,6 +76,7 @@ _BLUE = "#2a78d6"     # categorical slot 1 — val_top1
 _RED = "#e34948"      # categorical slot 6 — natural_unknown_fpr (status: higher = worse)
 _GREEN = "#008300"    # categorical slot 4 — trained classes
 _ORANGE = "#eb6834"   # categorical slot 8 — data volume
+_VIOLET = "#4a3aa7"   # categorical slot 5 — train time
 
 
 def _style_axis(ax, title):
@@ -100,13 +101,14 @@ def _plot_charts(rows, charts_dir):
     nat_fpr = [float(r["natural_unknown_fpr"]) * 100 for r in rows]
     classes = [int(r["classes"]) for r in rows]
     train_n = [int(r["train_n"]) + int(r["val_n"]) for r in rows]
+    train_s = [float(r["train_seconds"]) for r in rows]
     # ece/worst_class_recall are absent from pre-existing rows (added later) —
     # only plot versions that actually have them rather than faking a 0.
     ece_v = [(v, float(r["ece"]) * 100) for v, r in zip(versions, rows) if r.get("ece")]
     worst_v = [(v, float(r["worst_class_recall"]) * 100) for v, r in zip(versions, rows)
                if r.get("worst_class_recall")]
 
-    fig, axes = plt.subplots(2, 3, figsize=(17, 8))
+    fig, axes = plt.subplots(2, 4, figsize=(22, 8))
     fig.patch.set_facecolor("white")
 
     # Closed-set accuracy: values cluster near 100%, so zoom to where the
@@ -173,6 +175,16 @@ def _plot_charts(rows, charts_dir):
         ax.text(0.5, 0.5, "no data yet", transform=ax.transAxes, ha="center",
                 color=_MUTED, fontsize=10)
     _style_axis(ax, "Worst single-class recall (%, lower=worse)")
+
+    # Train time scales with data volume (from-scratch each run) — useful to know
+    # how the retrain cost grows as more vessels/bursts accumulate.
+    ax = axes[0][3]
+    bars = ax.bar(versions, train_s, color=_VIOLET, width=0.55)
+    ax.bar_label(bars, padding=3, fontsize=9, color=_INK, fmt="%.0fs")
+    ax.set_ylim(0, max(train_s) * 1.2)
+    _style_axis(ax, "Train time (s, from scratch)")
+
+    axes[1][3].axis("off")   # 8th cell unused — 7 metrics in a 2x4 grid
 
     fig.tight_layout()
     fig.savefig(os.path.join(charts_dir, "training_trend.png"), dpi=150, facecolor="white")
