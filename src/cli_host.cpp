@@ -309,23 +309,24 @@ void run_cli_host(){
         { "DGS-1", 35.1786f, 128.5553f },
         { "DGS-2", 35.2054f, 128.7076f },
         { "DGS-3", 35.8685f, 128.6046f },
+        { "DGS-4", 35.1559f, 128.6835f },
     };
     bewe_log_push(0,"\n=== SELECT HOSTING LOCATION ===\n");
-    for(int i=0;i<3;i++)
+    for(int i=0;i<4;i++)
         bewe_log_push(0,"%d. %s\n", i+1, presets[i].name);
-    bewe_log_push(0,"4. ETC\n\n");
+    bewe_log_push(0,"5. ETC\n\n");
 
     int loc_choice = 0;
-    while(loc_choice < 1 || loc_choice > 4){
+    while(loc_choice < 1 || loc_choice > 5){
         std::string s = prompt_input("> ");
         loc_choice = atoi(s.c_str());
-        if(loc_choice < 1 || loc_choice > 4)
-            bewe_log_push(0,"Please enter 1-4.\n");
+        if(loc_choice < 1 || loc_choice > 5)
+            bewe_log_push(0,"Please enter 1-5.\n");
     }
 
     float lat, lon;
     std::string station_str;
-    if(loc_choice >= 1 && loc_choice <= 3){
+    if(loc_choice >= 1 && loc_choice <= 4){
         const StationPreset& p = presets[loc_choice - 1];
         station_str = p.name;
         lat = p.lat;
