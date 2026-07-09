@@ -1,11 +1,11 @@
 {
-  "_comment": "Hazard zones - copy to ~/BEWE/BEAE/ais/data/guard/zones.json and edit. type: reef | shallow | forbidden. poly: [lat,lon] x3+. Names in ASCII (GUI font).",
+  "_comment": "위험구역 정의 - ~/BEWE/BEAE/ais/data/guard/zones.json 으로 복사 후 편집. type: reef | shallow | forbidden. poly: [lat,lon] 3+. 좌표는 수역 검증 완료분.",
   "zones": [
     { "name": "REEF-A",     "type": "reef",
       "poly": [[35.055, 128.640], [35.055, 128.662], [35.070, 128.662], [35.070, 128.640]] },
     { "name": "SHALLOW-B",  "type": "shallow",
-      "poly": [[35.125, 128.700], [35.125, 128.715], [35.135, 128.715], [35.135, 128.700]] },
+      "poly": [[35.085, 128.665], [35.085, 128.685], [35.093, 128.685], [35.093, 128.665]] },
     { "name": "NO-ENTRY-C", "type": "forbidden",
-      "poly": [[35.130, 128.608], [35.130, 128.624], [35.142, 128.624], [35.142, 128.608]] }
+      "poly": [[35.121, 128.628], [35.121, 128.642], [35.129, 128.642], [35.129, 128.628]] }
   ]
 }
