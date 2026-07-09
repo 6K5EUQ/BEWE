@@ -686,7 +686,8 @@ void draw_content(FFTViewer& v, bool just_opened){
             { std::lock_guard<std::mutex> lk(mtx);
               for(auto& s : vs){ for(auto it=log.rbegin(); it!=log.rend(); ++it){
                     if(it->mmsi!=s.mmsi || it->t_ms>cut) continue;
-                    s.sog=it->sog; s.cog=it->cog; s.ai_status=it->ai_status; s.ai_mmsi=it->ai_mmsi; break; } } }
+                    s.sog=it->sog; s.cog=it->cog; s.nav_status=it->nav_status;
+                    s.ai_status=it->ai_status; s.ai_mmsi=it->ai_mmsi; break; } } }
             guard_mod::eval_local_zones(vs, wall_now_ms());
             if(tl_filt) guard_mod::eval_playback_alerts(vs, wall_now_ms());
         }

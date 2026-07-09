@@ -360,31 +360,39 @@ static std::map<uint32_t,int64_t> g_pb_live;   // aid → 마지막 조건참 (�
 static void pb_emit(const GuardAlert& a){ upsert_local(a); g_pb_live[a.aid]=a.t_ms; }
 
 void eval_playback_alerts(const std::vector<VesselSnap>& vs, int64_t now_ms){
-    const double CPA_WARN=500.0, CPA_CRIT=200.0, TCPA_MAX=600.0;
-    // 로컬 평면좌표(m): 스냅샷 중앙 위도 기준 등거리
+    const double CPA_WARN=300.0, CPA_CRIT=100.0, TCPA_MAX=360.0;   // 6분·300/100m
+    const double MOVE_KT=1.0;        // SOG 이 값 미만 = 정박/표류로 보고 COG 무시(정지 취급)
+    const double MIN_REL=0.8;        // 상대속도 하한(m/s ≈1.5kt) — 평행·동속·근접정지 제외
     double lat0=0; int nn=0; for(const auto& v : vs){ lat0+=v.lat; nn++; } if(nn) lat0/=nn;
     double mlat=111320.0, mlon=111320.0*std::cos(lat0*M_PI/180.0);
-    auto vel=[&](const VesselSnap& v, double& vx, double& vy){
-        double s=(v.sog>0?v.sog:0)*0.514444;               // kt→m/s
-        double th=(v.cog>=0?v.cog:0)*M_PI/180.0;
-        vx=s*std::sin(th); vy=s*std::cos(th);              // x=동(경도), y=북(위도)
+    // 속도벡터: 저속·정박·계류는 COG 신뢰 불가 → 0 (정지). 반환 = 이동 여부.
+    auto vel=[&](const VesselSnap& v, double& vx, double& vy)->bool{
+        bool moving = v.sog>=(float)MOVE_KT && v.cog>=0.f && v.nav_status!=1 && v.nav_status!=5;
+        if(!moving){ vx=vy=0; return false; }
+        double s=v.sog*0.514444, th=v.cog*M_PI/180.0;
+        vx=s*std::sin(th); vy=s*std::cos(th); return true;
     };
-    // 1) 충돌위험 — 모든 쌍 CPA/TCPA (다가오는 경우만)
+    // 1) 충돌위험 — 등속직선 CPA/TCPA (실제 접근·유의미 상대속도만)
     for(size_t i=0;i<vs.size();i++) for(size_t j=i+1;j<vs.size();j++){
         const auto& A=vs[i]; const auto& B=vs[j];
-        if(A.sog<0.5f && B.sog<0.5f) continue;              // 둘 다 정지 → 무의미
-        double dx=(B.lon-A.lon)*mlon, dy=(B.lat-A.lat)*mlat;
-        double avx,avy,bvx,bvy; vel(A,avx,avy); vel(B,bvx,bvy);
+        double avx,avy,bvx,bvy; bool ma=vel(A,avx,avy), mb=vel(B,bvx,bvy);
+        if(!ma && !mb) continue;                            // 둘 다 정지 → 무의미
         double rvx=bvx-avx, rvy=bvy-avy, rv2=rvx*rvx+rvy*rvy;
-        double tcpa = rv2>1e-6? -(dx*rvx+dy*rvy)/rv2 : -1;
-        if(tcpa<0 || tcpa>TCPA_MAX) continue;              // 멀어지는 중/너무 먼 미래
+        if(rv2 < MIN_REL*MIN_REL) continue;                 // 상대속도 미미 → 무시
+        double dx=(B.lon-A.lon)*mlon, dy=(B.lat-A.lat)*mlat;
+        if(dx*dx+dy*dy > 6000.0*6000.0) continue;           // 6km 밖은 스킵(성능)
+        double tcpa = -(dx*rvx+dy*rvy)/rv2;
+        if(tcpa<0 || tcpa>TCPA_MAX) continue;               // 멀어지는 중/너무 먼 미래
         double cx=dx+rvx*tcpa, cy=dy+rvy*tcpa, cpa=std::sqrt(cx*cx+cy*cy);
         if(cpa>CPA_WARN) continue;
         uint32_t m1=std::min(A.mmsi,B.mmsi), m2=std::max(A.mmsi,B.mmsi);
         char k[32]; snprintf(k,sizeof(k),"PBC:%u:%u",m1,m2);
         GuardAlert a; a.t_ms=now_ms; a.aid=fnv32(k); a.typ=1;
         a.sev = cpa<=CPA_CRIT?3:2; a.mmsi=m1; a.mmsi2=m2;
-        a.lat=(float)((A.lat+B.lat)/2); a.lon=(float)((A.lon+B.lon)/2);
+        // 경보 지점 = 최근접 순간 두 배의 위치 중점 (실제 근접 지점)
+        double aLat=A.lat+avy*tcpa/mlat, aLon=A.lon+avx*tcpa/mlon;
+        double bLat=B.lat+bvy*tcpa/mlat, bLon=B.lon+bvx*tcpa/mlon;
+        a.lat=(float)((aLat+bLat)/2); a.lon=(float)((aLon+bLon)/2);
         a.score=(float)std::min(100.0,100.0*(1.0-cpa/CPA_WARN));
         a.cpa_m=(float)cpa; a.tcpa_s=(float)tcpa;
         snprintf(a.msg,sizeof(a.msg),"%.0fm %.1f분 후", cpa, tcpa/60.0);

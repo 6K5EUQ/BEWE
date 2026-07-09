@@ -20,9 +20,11 @@ def to_local(lat, lon, ref_lat, ref_lon):
     return ((lon - ref_lon) * kx, (lat - ref_lat) * M_PER_DEG_LAT)
 
 
-def vel_ms(sog_kn, cog_deg):
-    """SOG/COG → (vx,vy) m/s. n/a(-1)면 정지 취급."""
-    if sog_kn is None or sog_kn < 0 or cog_deg is None or cog_deg < 0 or cog_deg >= 360:
+def vel_ms(sog_kn, cog_deg, nav=None):
+    """SOG/COG → (vx,vy) m/s. 저속(<1kt)·정박(nav 1)·계류(nav 5)는 COG 신뢰불가 → 정지."""
+    if sog_kn is None or sog_kn < 1.0 or cog_deg is None or cog_deg < 0 or cog_deg >= 360:
+        return (0.0, 0.0)
+    if nav in (1, 5):
         return (0.0, 0.0)
     v = sog_kn * KN2MS
     r = math.radians(cog_deg)
@@ -52,8 +54,11 @@ def check_pairs(cfg, active, predict_fn=None):
             a, b = trs[i], trs[j]
             _, la1, lo1, sog1, cog1 = a.latest()
             _, la2, lo2, sog2, cog2 = b.latest()
-            if max(sog1, sog2) < cfg.pair_min_sog_kn:
-                continue                                # 둘 다 정박 — 잡음
+            v1 = vel_ms(sog1, cog1, getattr(a, "nav", None))
+            v2 = vel_ms(sog2, cog2, getattr(b, "nav", None))
+            relsp = math.hypot(v2[0] - v1[0], v2[1] - v1[1])
+            if relsp < 0.8:                             # 상대속도 <~1.5kt: 평행·동속·정지 → 무시
+                continue
             p2 = to_local(la2, lo2, la1, lo1)
             if math.hypot(*p2) > cfg.pair_max_dist_m:
                 continue
@@ -70,12 +75,13 @@ def check_pairs(cfg, active, predict_fn=None):
                             best_d, best_k = d, k
                     cpa, tcpa = best_d, (best_k + 1) * cfg.predict_step_s
             if cpa is None:
-                cpa, tcpa = cpa_tcpa((0.0, 0.0), vel_ms(sog1, cog1), p2, vel_ms(sog2, cog2))
-            if cpa > cfg.cpa_warn_m or tcpa > cfg.tcpa_max_s:
-                continue
-            if tcpa < 0 and cpa > cfg.cpa_crit_m:
-                continue                                # 평행 근접항해는 심각 반경만
-            out.append((a, b, cpa, tcpa, (la1 + la2) / 2, (lo1 + lo2) / 2))
+                cpa, tcpa = cpa_tcpa((0.0, 0.0), v1, p2, v2)
+            if tcpa < 0 or tcpa > cfg.tcpa_max_s or cpa > cfg.cpa_warn_m:
+                continue                                # 멀어지는 중/먼 미래/충분히 먼 최근접
+            # 경보 지점 = 최근접 순간 두 배 위치 중점
+            aL = (la1 + v1[1] * tcpa / M_PER_DEG_LAT, lo1 + v1[0] * tcpa / (M_PER_DEG_LAT * math.cos(math.radians(la1))))
+            bL = (la2 + v2[1] * tcpa / M_PER_DEG_LAT, lo2 + v2[0] * tcpa / (M_PER_DEG_LAT * math.cos(math.radians(la2))))
+            out.append((a, b, cpa, tcpa, (aL[0] + bL[0]) / 2, (aL[1] + bL[1]) / 2))
     return out
 
 
