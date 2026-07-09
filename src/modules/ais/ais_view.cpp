@@ -18,6 +18,9 @@
 #include <ctime>
 #include <chrono>
 #include <algorithm>
+#ifdef BEWE_MODULE_GUARD
+#include "../guard/guard_meta.hpp"   // guard_mod::vessel_alert (경보 선박 펄스 링)
+#endif
 
 // Match_AI 열(테이블 idx 11)은 AI 모듈(ais_ai.cpp) 있을 때만 표시. 없으면 열 개수·Info
 // 인덱스가 하나씩 줄어든다. 컴파일 타임 상수로 인덱스 밀림을 일괄 처리.
@@ -76,7 +79,8 @@ void info_str(const AisRecord& m, char* o, size_t n){
     else o[0]=0;
 }
 // MMSI별 최신 head + 항적 꼬리 (지도용)
-struct AisTrack { AisRecord head; std::deque<std::array<float,3>> trail; int ship_type=0; char name[24]={0}; };  // trail: {lat, lon, t_ms_초}
+struct TrailPt { float lat, lon; int64_t t_ms; };   // t_ms 는 int64 (float 로 epoch 분 저장 시 ULP≈4분 → prune 오작동)
+struct AisTrack { AisRecord head; std::deque<TrailPt> trail; int ship_type=0; char name[24]={0}; };
 // ── MMSI 그룹 (표: 동일 MMSI 묶음, 최신값 + Up/Down/Cnt) ──
 struct AisGrp {
     uint32_t mmsi;
@@ -92,6 +96,7 @@ struct AisGrp {
     uint8_t  anom_flag=0;  // Behavior 이상탐지 (최신 non-zero; sticky)
     uint8_t  anom_reason=0;
     uint16_t anom_score=0;
+    int      ship_type=0;  // sticky (static msg 5/24) — 지도 마커 색용
 };
 // 컬럼: 0 Up 1 Down 2 MMSI 3 Type 4 Name 5 Country 6 Lat 7 Lon 8 SOG 9 COG 10 Cnt [11 Match_AI] Behavior Info
 int grp_cmp(int c, const AisGrp& a, const AisGrp& b){
@@ -292,144 +297,23 @@ void draw_content(FFTViewer& v, bool just_opened){
     float upper_h = body_h; if(upper_h<80) upper_h=80;   // 표 높이
     float map_h   = body_h + 2.f; if(map_h<80) map_h=80; // 지도 높이 (기존과 동일 오프셋 유지)
 
-    // ── MMSI별 최신위치 + 항적 캐시 (signature 게이팅, 증분; FIFO/clear 안전) ──
-    static std::unordered_map<uint32_t, AisTrack> tracks;
-    static int64_t track_wm=-1; static size_t track_logn=(size_t)-1;
-    {
-        std::lock_guard<std::mutex> lk(mtx);
-        size_t n=log.size(); int64_t last=n?log.back().t_ms:0;
-        if(n<track_logn){ tracks.clear(); track_wm=-1; }          // Clear/리셋
-        track_logn=n;
-        if(last>track_wm){
-            int start=(int)n-1; while(start>=0 && log[start].t_ms>track_wm) start--; start++;
-            for(int j=start;j<(int)n;j++){
-                const AisRecord& m=log[j];
-                AisTrack& t=tracks[m.mmsi];
-                if(m.ship_type>0) t.ship_type=m.ship_type;     // sticky: static msg(5/24)에서만 옴
-                if(m.name[0] && !t.name[0]) { strncpy(t.name,m.name,sizeof(t.name)-1); }
-                if(!m.has_pos) continue;                       // head/trail은 위치 msg만
-                if(t.head.t_ms==0 || m.t_ms>=t.head.t_ms) t.head=m;
-                // tt = 분 단위 상대시간 (float 정밀도 확보; 절대 epoch/1000 은 float 로 초단위 구분 불가)
-                float la=(float)m.lat, lo=(float)m.lon, tt=(float)(m.t_ms/60000.0);
-                if(t.trail.empty()) t.trail.push_back({la,lo,tt});
-                else { auto& bk=t.trail.back();
-                       float dla=la-bk[0], dlo=(lo-bk[1])*cosf(la*(float)M_PI/180.f);
-                       if(dla*dla+dlo*dlo > 4.5e-5f*4.5e-5f) t.trail.push_back({la,lo,tt}); }
-                while(t.trail.size()>800) t.trail.pop_front();   // 안전상한
-            }
-            track_wm=last;
-        }
-        // 꼬리 10분 창: 현재시각(최신 데이터 기준) - 10분 이전 점은 매 프레임 제거 (새 패킷 없어도 계속 줄어듦).
-        // 트랙 자체는 삭제 안 함 (30분 제거 폐지) — 조용한 배도 유지되다 10분 지나면 꼬리만 빔.
-        float now_min = (float)((n?log.back().t_ms:last)/60000.0);
-        float cut10 = now_min - 10.f;
-        for(auto& kv : tracks){
-            auto& tr=kv.second.trail;
-            while(!tr.empty() && tr.front()[2]<cut10) tr.pop_front();
-        }
-    }
-    // ── 표시용 MapPoint 빌드 (락 밖, 안정 버퍼) ──
+    // ── 표(grps) + 지도(mlatest/mtrail) 공유 캐시 — 아래 한 번의 필터링 패스에서 함께 채움 (표⟺지도 100% 동기) ──
+    static std::vector<AisGrp> grps;
+    static std::set<std::string> rx_stations;      // 실제 AIS 복조한 기지 이름들 ("" = LOCAL)
+    static float info_w = 60.f;                     // Info 컬럼 동적폭
+    static std::unordered_map<uint32_t, AisRecord>            mlatest;  // MMSI별 최신 위치 레코드 (마커·정보)
+    static std::unordered_map<uint32_t, std::vector<TrailPt>> mtrail;   // MMSI별 최근10분 위치점(int64) — 연속 꼬리
     static std::vector<modview_map::MapPoint> pts;
     static std::vector<std::vector<float>>    trailbuf;
     static std::vector<std::string>           tip1, tip2;
-    static bool pidx_valid=false;   // 재생/구간 스냅샷 유효 (tl_filt 진입 시 1회 색인; 재생 중 라이브 무시)
-    pts.clear(); trailbuf.clear(); tip1.clear(); tip2.clear();
-    if(tl_filt){
-        // ── 타임라인 재생/구간 모드: MMSI별 위치색인(pidx)에서 hi_ms 시점 위치(보간)+10분꼬리 ──
-        // pidx 는 tl_filt 진입 시 1회만 색인(스냅샷) — 재생 중 라이브 append 로 매프레임 재색인하지 않음
-        // (합의된 "재생 중 실시간 일시정지"; 성능: 100k 재색인 매패킷 방지).
-        static std::unordered_map<uint32_t, std::vector<PosPt>> pidx;
-        static std::unordered_map<uint32_t, std::pair<int,std::string>> pmeta;   // {ship_type, name}
-        static int64_t pidx_base=-1;
-        if(!pidx_valid || day_base!=pidx_base){
-            std::lock_guard<std::mutex> lk(mtx);
-            pidx.clear(); pmeta.clear();
-            for(const AisRecord& m : log){
-                if(m.ship_type>0 || m.name[0]){ auto& mt=pmeta[m.mmsi];
-                    if(m.ship_type>0) mt.first=m.ship_type; if(m.name[0]&&mt.second.empty()) mt.second=m.name; }
-                if(!m.has_pos) continue;
-                pidx[m.mmsi].push_back({m.t_ms,(float)m.lat,(float)m.lon,m.cog,(float)m.heading,m.sog});
-            }
-            for(auto& kv : pidx) std::sort(kv.second.begin(),kv.second.end(),
-                [](const PosPt&a,const PosPt&b){return a.t<b.t;});
-            pidx_valid=true; pidx_base=day_base;
-        }
-        int64_t tgt=hi_ms, tail0=tgt-600000;   // 10분 꼬리
-        for(auto& kv : pidx){
-            auto& vec=kv.second; if(vec.empty()) continue;
-            int lo=0,hi=(int)vec.size(); while(lo<hi){int mid=(lo+hi)>>1; if(vec[mid].t<=tgt)lo=mid+1;else hi=mid;}
-            int idx=lo-1; if(idx<0) continue;              // 그 시각 이전 위치 없음 → 아직 미출현
-            const PosPt& p0=vec[idx];
-            float la=p0.lat, ln=p0.lon, cg=p0.cog, sg=p0.sog;
-            if(tl_play && idx+1<(int)vec.size()){          // 다음 표본과 선형보간(부드럽게)
-                const PosPt& p1=vec[idx+1];
-                double f=(p1.t>p0.t)?(double)(tgt-p0.t)/(double)(p1.t-p0.t):0.0; if(f>1)f=1; if(f<0)f=0;
-                la=p0.lat+(float)((p1.lat-p0.lat)*f); ln=p0.lon+(float)((p1.lon-p0.lon)*f);
-                if(p0.cog>=0&&p1.cog>=0){ float dd=fmodf(p1.cog-p0.cog+540.f,360.f)-180.f;  // 최단각(0/360 경계)
-                                          cg=fmodf(p0.cog+dd*(float)f+360.f,360.f); }
-            }
-            modview_map::MapPoint mpt; mpt.lat=la; mpt.lon=ln; mpt.id=kv.first;
-            mpt.heading=(cg>=0.f)?cg:(p0.hdg!=511?p0.hdg:-1.f);
-            mpt.selected=(sel_mmsi==kv.first);
-            auto mit=pmeta.find(kv.first);
-            int st=(mit!=pmeta.end())?mit->second.first:0;
-            mpt.color=mpt.selected?IM_COL32(255,210,80,255):type_color(st);
-            mpt.label=(mit!=pmeta.end()&&!mit->second.second.empty())?mit->second.second.c_str():nullptr;
-            trailbuf.emplace_back();
-            int tl=0,th=idx+1; while(tl<th){int mid=(tl+th)>>1; if(vec[mid].t<tail0)tl=mid+1;else th=mid;}  // tail0 시작 이진탐색
-            for(int j=tl;j<=idx;j++){ trailbuf.back().push_back(vec[j].lat); trailbuf.back().push_back(vec[j].lon); }
-            trailbuf.back().push_back(la); trailbuf.back().push_back(ln);   // 현재(보간) 끝점
-            char b1[32],b2[96],sog[16],cog[16],hdg[16];
-            snprintf(b1,sizeof(b1),"%u",kv.first);
-            if(sg>=0) snprintf(sog,sizeof(sog),"%.1f kt",sg); else snprintf(sog,sizeof(sog),"-");
-            if(cg>=0) snprintf(cog,sizeof(cog),"%.1f°",cg); else snprintf(cog,sizeof(cog),"-");
-            if(p0.hdg!=511) snprintf(hdg,sizeof(hdg),"%d°",(int)p0.hdg); else snprintf(hdg,sizeof(hdg),"-");
-            snprintf(b2,sizeof(b2),"SOG : %s\nCOG : %s\nHDG : %s",sog,cog,hdg);
-            tip1.emplace_back(b1); tip2.emplace_back(b2);
-            pts.push_back(mpt);
-        }
-    }
-    else {
-    pidx_valid=false;   // tl_filt 해제 → 다음 진입 시 pidx 재색인(스냅샷 갱신)
-    for(auto& kv : tracks){
-        const AisRecord& m=kv.second.head;
-        modview_map::MapPoint mpt;
-        mpt.lat=m.lat; mpt.lon=m.lon; mpt.id=m.mmsi;
-        mpt.heading = (m.cog>=0.f)? m.cog : (m.heading!=511? (float)m.heading : -1.f);
-        mpt.selected = (sel_mmsi==m.mmsi);   // 표/지도 클릭 공통 — 선택 배 강조+full꼬리
-        int st = kv.second.ship_type>0? kv.second.ship_type : m.ship_type;
-        mpt.color = mpt.selected? IM_COL32(255,210,80,255) : type_color(st);
-        mpt.label = m.name[0]? m.name : (kv.second.name[0]? kv.second.name : nullptr);
-        trailbuf.emplace_back();
-        if(sel_mmsi==m.mmsi){
-            // 선택된 배(표/지도 공통): 캐시 무시, log 전체 점을 시간순으로 모두 연결 = full 꼬리
-            std::lock_guard<std::mutex> lk(mtx);
-            for(const AisRecord& r : log)
-                if(r.mmsi==m.mmsi && r.has_pos){ trailbuf.back().push_back((float)r.lat); trailbuf.back().push_back((float)r.lon); }
-        } else
-        for(auto& pr : kv.second.trail){ trailbuf.back().push_back(pr[0]); trailbuf.back().push_back(pr[1]); }
-        char b1[32], b2[96];
-        snprintf(b1,sizeof(b1),"%u", m.mmsi);                       // MMSI
-        char sog[16],cog[16],hdg[16];
-        if(m.sog>=0) snprintf(sog,sizeof(sog),"%.1f kt",m.sog); else snprintf(sog,sizeof(sog),"-");
-        if(m.cog>=0) snprintf(cog,sizeof(cog),"%.1f°",m.cog);  else snprintf(cog,sizeof(cog),"-");
-        if(m.heading!=511) snprintf(hdg,sizeof(hdg),"%d°",m.heading); else snprintf(hdg,sizeof(hdg),"-");
-        snprintf(b2,sizeof(b2),"SOG : %s\nCOG : %s\nHDG : %s", sog,cog,hdg);
-        tip1.emplace_back(b1); tip2.emplace_back(b2);
-        pts.push_back(mpt);
-    }
-    }
-    for(size_t i=0;i<pts.size();i++){
-        pts[i].trail   = trailbuf[i].empty()? nullptr : trailbuf[i].data();
-        pts[i].trail_n = (int)trailbuf[i].size()/2;
-        pts[i].tip_l1  = tip1[i].c_str();
-        pts[i].tip_l2  = tip2[i].empty()? nullptr : tip2[i].c_str();
-    }
+#ifdef BEWE_MODULE_GUARD
+    struct GuardRing { double lat, lon; uint8_t typ, sev; };   // 경보 선박 위치+유형 (펄스 링용)
+    static std::vector<GuardRing> grings;
+#endif
+    // (지도 pts 는 아래 grps/mlatest/mtrail 집계 직후 "지도 오버레이 빌드" 블록에서 채움)
 
     // ── MMSI 그룹 집계 (표: 동일 MMSI 묶음, Up/Down/Cnt + 최신값. 캐시 게이팅) ──
-    static std::vector<AisGrp> grps;
-    static std::set<std::string> rx_stations;   // 실제 AIS 복조한 기지 이름들 ("" = LOCAL)
-    static float info_w = 60.f;   // Info 컬럼 동적폭
+    // (grps/rx_stations/info_w 선언은 위 "공유 캐시" 블록으로 이동)
     {
         std::lock_guard<std::mutex> lk(mtx);
         static size_t c_n=(size_t)-1; static int64_t c_last=-1;
@@ -443,6 +327,10 @@ void draw_content(FFTViewer& v, bool just_opened){
            ||c_lo!=lo_q||c_hi!=hi_q){
             std::vector<AisGrp> g; g.reserve(256);
             std::unordered_map<uint32_t,int> idx; idx.reserve(512);
+            std::unordered_map<uint32_t, AisRecord> ml; ml.reserve(512);
+            std::unordered_map<uint32_t, std::vector<TrailPt>> mt; mt.reserve(512);
+            int64_t data_now=0; for(size_t i=0;i<n_now;i++) if(log[i].t_ms>data_now) data_now=log[i].t_ms;  // 현재시각=최댓값 (log.back()은 vessel-hist append 로 재정렬돼 신뢰불가 → 클릭시 꼬리 전체 튐 방지)
+            int64_t tcut = (tl_filt ? hi_ms : data_now) - 600000;   // 최근 10분 꼬리 창
             rx_stations.clear();
             for(size_t i=0;i<n_now;i++){
                 const AisRecord& m=log[i];
@@ -460,10 +348,14 @@ void draw_content(FFTViewer& v, bool just_opened){
                 if(m.ai_status){ G.ai_status=m.ai_status; G.ai_mmsi=m.ai_mmsi; G.ai_conf=m.ai_conf; }  // Match_AI sticky: non-zero 만 갱신
                 if(m.anom_flag){ G.anom_flag=m.anom_flag; G.anom_reason=m.anom_reason; G.anom_score=m.anom_score; }  // Behavior sticky
                 if(m.name[0] && !G.name[0]){ strncpy(G.name,m.name,sizeof(G.name)-1); G.name[sizeof(G.name)-1]=0; }
+                if(m.ship_type>0) G.ship_type=m.ship_type;   // 지도 마커 색 sticky
+                if(m.has_pos){ AisRecord& L=ml[m.mmsi];
+                    if(L.t_ms==0 || m.t_ms>=L.t_ms) L=m;                                   // 최신 위치 레코드(마커)
+                    if(m.t_ms>=tcut) mt[m.mmsi].push_back({(float)m.lat,(float)m.lon,m.t_ms}); }  // 10분 꼬리 점
             }
             for(AisGrp& G : g) if(G.auth_cnt) G.cnt=(int)G.auth_cnt;   // 요약 상태: 실제 누계로 표시/정렬 통일
             std::stable_sort(g.begin(),g.end(),[&](const AisGrp&a,const AisGrp&b){ int c=grp_cmp(sort_col<0?0:sort_col,a,b); return (sort_col<0?true:sort_asc)? c<0:c>0; });
-            grps.swap(g);
+            grps.swap(g); mlatest.swap(ml); mtrail.swap(mt);
             c_n=n_now; c_last=last_t; strncpy(c_filter,filter,sizeof(c_filter)-1); c_filter[sizeof(c_filter)-1]=0; c_sc=sort_col; c_asc=sort_asc; c_lo=lo_q; c_hi=hi_q;
             // Info 폭 = 실제 데이터 최대 길이에 맞춤 (헤더 글자폭 무시)
             float mw=8.f;
@@ -471,6 +363,58 @@ void draw_content(FFTViewer& v, bool just_opened){
                 if(inf[0]){ float w=ImGui::CalcTextSize(inf).x; if(w>mw) mw=w; } }
             info_w = mw + 10.f;
         }
+    }
+
+    // ── 지도 오버레이 빌드: grps(표)와 같은 필터/타임라인 윈도우 → 표에 뜬 배만 지도에 (100% 동기) ──
+    //    마커=mlatest[최신 위치], 꼬리=mtrail[최근10분 전점]. 선택 배는 log 전체(전 항적).
+    {
+        pts.clear(); trailbuf.clear(); tip1.clear(); tip2.clear();
+#ifdef BEWE_MODULE_GUARD
+        grings.clear();
+#endif
+        for(const AisGrp& G : grps){
+            auto lit = mlatest.find(G.mmsi);
+            if(lit==mlatest.end()) continue;                  // 최근 위치 없음(정적 only) → 마커 못 그림
+            const AisRecord& m = lit->second;
+            modview_map::MapPoint mpt;
+            mpt.lat=m.lat; mpt.lon=m.lon; mpt.id=G.mmsi;
+            mpt.heading = (m.cog>=0.f)? m.cog : (m.heading!=511? (float)m.heading : -1.f);
+            mpt.selected = (sel_mmsi==G.mmsi);
+            mpt.color = mpt.selected? IM_COL32(255,210,80,255) : type_color(G.ship_type);
+            mpt.label = G.name[0]? G.name : nullptr;
+            trailbuf.emplace_back();
+            if(sel_mmsi==G.mmsi){                             // 선택 배 = 전체 항적(윈도우 무시)
+                std::lock_guard<std::mutex> lk(mtx);
+                for(const AisRecord& r : log)
+                    if(r.mmsi==G.mmsi && r.has_pos){ trailbuf.back().push_back((float)r.lat); trailbuf.back().push_back((float)r.lon); }
+            } else {
+                auto tit = mtrail.find(G.mmsi);               // 최근 10분 연속 꼬리(전점)
+                if(tit!=mtrail.end()) for(const TrailPt& p : tit->second){ trailbuf.back().push_back(p.lat); trailbuf.back().push_back(p.lon); }
+            }
+            char b1[32],b2[96],sog[16],cog[16],hdg[16];
+            snprintf(b1,sizeof(b1),"%u",G.mmsi);
+            if(m.sog>=0) snprintf(sog,sizeof(sog),"%.1f kt",m.sog); else snprintf(sog,sizeof(sog),"-");
+            if(m.cog>=0) snprintf(cog,sizeof(cog),"%.1f°",m.cog); else snprintf(cog,sizeof(cog),"-");
+            if(m.heading!=511) snprintf(hdg,sizeof(hdg),"%d°",m.heading); else snprintf(hdg,sizeof(hdg),"-");
+            snprintf(b2,sizeof(b2),"SOG : %s\nCOG : %s\nHDG : %s",sog,cog,hdg);
+            tip1.emplace_back(b1); tip2.emplace_back(b2);
+#ifdef BEWE_MODULE_GUARD
+            { uint8_t gt, gs;                                   // 활성 경보 선박 → 펄스 링 대상
+              if(guard_mod::vessel_alert(G.mmsi, gt, gs)) grings.push_back({m.lat, m.lon, gt, gs}); }
+#endif
+            pts.push_back(mpt);
+        }
+        for(size_t i=0;i<pts.size();i++){
+            pts[i].trail   = trailbuf[i].empty()? nullptr : trailbuf[i].data();
+            pts[i].trail_n = (int)trailbuf[i].size()/2;
+            pts[i].tip_l1  = tip1[i].c_str();
+            pts[i].tip_l2  = tip2[i].empty()? nullptr : tip2[i].c_str();
+        }
+#ifdef BEWE_MODULE_GUARD
+        // 경보 선박 마커를 뒤로 정렬 → 밀집 해역에서도 경보 배가 위에 그려짐
+        std::stable_partition(pts.begin(), pts.end(), [](const modview_map::MapPoint& p){
+            uint8_t gt, gs; return !guard_mod::vessel_alert((uint32_t)p.id, gt, gs); });
+#endif
     }
 
     // ── 좌(표) | 우(지도) ──  (지도 크게보기 mv.big 면 표 숨기고 지도 전폭; mv 는 위에서 선언)
@@ -690,7 +634,37 @@ void draw_content(FFTViewer& v, bool just_opened){
     } else {
         ImGui::SetCursorPosX(x0);
     }
+#ifdef BEWE_MODULE_GUARD
+    ImVec2 map_p0 = ImGui::GetCursorScreenPos();   // draw_map 캔버스 좌상단 (투영 기준점)
+#endif
     auto mres = modview_map::draw_map("##ais_map", mv, pts, ImVec2(mapw, map_h), just_opened, &stns, &links);
+#ifdef BEWE_MODULE_GUARD
+    // ── GUARD 경보 펄스 링: 유형색 3겹 확장 링 (위상 1/3 어긋남 + 알파 페이드) ──
+    if(!grings.empty()){
+        ImDrawList* gdl = ImGui::GetWindowDrawList();
+        gdl->PushClipRect(map_p0, ImVec2(map_p0.x+mapw, map_p0.y+map_h), true);
+        auto ll2px=[&](double lat,double lon){                 // map_view.cpp 와 동일 등거리원통 투영
+            return ImVec2((float)(map_p0.x+(lon-mv.lon0)/(mv.lon1-mv.lon0)*mapw),
+                          (float)(map_p0.y+(mv.lat1-lat)/(mv.lat1-mv.lat0)*map_h)); };
+        float tnow=(float)ImGui::GetTime();
+        for(const auto& g : grings){
+            ImU32 base;                                        // guard_view 유형색과 동일 (알파 0)
+            switch(g.typ){ case 1: base=IM_COL32(255, 97, 82,0); break;   // 충돌 빨강
+                           case 2: base=IM_COL32(255,158, 64,0); break;   // 좌초 주황
+                           case 3: base=IM_COL32(242,217, 89,0); break;   // 이상항적 노랑
+                           case 4: base=IM_COL32(204,140,255,0); break;   // 위협 보라
+                           default:base=IM_COL32(115,179,255,0); break; } // 기타 파랑
+            ImVec2 c = ll2px(g.lat, g.lon);
+            float spd = g.sev>=3? 1.6f : 1.0f;                 // 긴급(sev3)은 빠른 펄스
+            for(int k=0;k<3;k++){
+                float ph = fmodf(tnow*spd + k/3.f, 1.f);       // 0→1 확장 위상
+                gdl->AddCircle(c, 7.f+ph*16.f, base | ((ImU32)((1.f-ph)*170.f)<<24), 0, 2.f);
+            }
+            gdl->AddCircle(c, 6.f, base | (200u<<24), 0, 1.5f);   // 고정 내륜 (위치 앵커)
+        }
+        gdl->PopClipRect();
+    }
+#endif
     if(mres.clicked_station>=0 && mres.clicked_station<(int)stn_names.size()){
         // 기지 아이콘 클릭 → 그 기지 수신선박 점선 토글
         const std::string& cs = stn_names[mres.clicked_station];

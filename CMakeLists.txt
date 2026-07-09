@@ -23,6 +23,12 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/src/modules/ais/ais_ai.cpp)
     add_compile_definitions(BEWE_MODULE_AIS_AI)
 endif()
 
+# ── GUARD (차세대 해양관제 플랫폼: 경보/의사결정지원) — 모듈 존재 시만 define ──
+# ais_view 오버레이·ais_module 데몬 연결부가 #ifdef 로 빠짐 → 폴더 제거 = 무영향.
+if(EXISTS ${CMAKE_SOURCE_DIR}/src/modules/guard/guard_module.cpp)
+    add_compile_definitions(BEWE_MODULE_GUARD)
+endif()
+
 # ── mbelib (DMR AMBE+2 음성 보코더, ISC) — DMR 모듈 있을 때만 컴파일 ──────────
 # 모듈 부재 = 흔적 없음 원칙 유지. libs/mbelib 는 C 소스.
 set(MBELIB_SRCS "")

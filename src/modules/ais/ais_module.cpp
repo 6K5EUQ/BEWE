@@ -16,6 +16,11 @@
 #include <vector>
 #include <sys/stat.h>
 
+#ifdef BEWE_MODULE_GUARD
+// 관제 플랫폼(guard) 데몬/경보 tail 자동시작 — AIS 디코드 시작 시 1회 확보 (guard_module.cpp)
+namespace guard_mod { void host_ensure(FFTViewer& v); }
+#endif
+
 namespace ais_mod {
 
 std::mutex             mtx;
@@ -48,6 +53,9 @@ static bool host_start(FFTViewer& v, int ch){
     if(!v.channels[ch].filter_active) return false;   // 복조 모드 무관 — 워커가 IQ ring 직접 탭
 #ifdef BEWE_MODULE_AIS_AI
     ai_ensure_daemon();   // 단일스레드(g_mgmt 락)에서 추론 데몬 확보 — 워커 fork 위험 회피
+#endif
+#ifdef BEWE_MODULE_GUARD
+    guard_mod::host_ensure(v);   // 관제 플랫폼: guard 데몬 fork + 경보 tail 시작 (동일 락 하)
 #endif
     w.stop.store(false);
     w.on.store(true);
