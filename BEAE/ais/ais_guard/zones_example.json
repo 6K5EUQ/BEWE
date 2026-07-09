@@ -1,20 +1,11 @@
 {
-  "_comment": "위험구역 정의 예시 — ~/BEWE/BEAE/ais/data/guard/zones.json 으로 복사 후 실제 좌표로 편집. type: reef(암초) | shallow(천수) | forbidden(진입금지). poly: [위도,경도] 시계/반시계 무관, 꼭짓점 3개 이상.",
+  "_comment": "Hazard zones - copy to ~/BEWE/BEAE/ais/data/guard/zones.json and edit. type: reef | shallow | forbidden. poly: [lat,lon] x3+. Names in ASCII (GUI font).",
   "zones": [
-    {
-      "name": "예시 암초 구역 (마산만 남측)",
-      "type": "reef",
-      "poly": [[35.100, 128.600], [35.100, 128.620], [35.080, 128.620], [35.080, 128.600]]
-    },
-    {
-      "name": "예시 천수 구역",
-      "type": "shallow",
-      "poly": [[35.140, 128.660], [35.145, 128.675], [35.135, 128.680], [35.130, 128.665]]
-    },
-    {
-      "name": "예시 진입금지 구역",
-      "type": "forbidden",
-      "poly": [[35.170, 128.690], [35.170, 128.710], [35.155, 128.710], [35.155, 128.690]]
-    }
+    { "name": "REEF-A",     "type": "reef",
+      "poly": [[35.055, 128.640], [35.055, 128.662], [35.070, 128.662], [35.070, 128.640]] },
+    { "name": "SHALLOW-B",  "type": "shallow",
+      "poly": [[35.125, 128.700], [35.125, 128.715], [35.135, 128.715], [35.135, 128.700]] },
+    { "name": "NO-ENTRY-C", "type": "forbidden",
+      "poly": [[35.130, 128.608], [35.130, 128.624], [35.142, 128.624], [35.142, 128.608]] }
   ]
 }

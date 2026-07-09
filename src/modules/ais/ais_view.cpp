@@ -310,6 +310,7 @@ void draw_content(FFTViewer& v, bool just_opened){
     static std::unordered_map<uint32_t, std::vector<TrailPt>> mtrail;   // MMSI별 최근10분 위치점(int64) — 연속 꼬리
     static std::vector<modview_map::MapPoint> pts;
     static std::vector<std::vector<float>>    trailbuf;
+    static std::vector<std::vector<int64_t>>  trailt;   // 선택 배 항적 점별 수신시각(ms) — hover 시각 툴팁
     static std::vector<std::string>           tip1, tip2;
     // (지도 pts 는 아래 grps/mlatest/mtrail 집계 직후 "지도 오버레이 빌드" 블록에서 채움)
 
@@ -369,7 +370,7 @@ void draw_content(FFTViewer& v, bool just_opened){
     // ── 지도 오버레이 빌드: grps(표)와 같은 필터/타임라인 윈도우 → 표에 뜬 배만 지도에 (100% 동기) ──
     //    마커=mlatest[최신 위치], 꼬리=mtrail[최근10분 전점]. 선택 배는 log 전체(전 항적).
     {
-        pts.clear(); trailbuf.clear(); tip1.clear(); tip2.clear();
+        pts.clear(); trailbuf.clear(); trailt.clear(); tip1.clear(); tip2.clear();
         for(const AisGrp& G : grps){
             auto lit = mlatest.find(G.mmsi);
             if(lit==mlatest.end()) continue;                  // 최근 위치 없음(정적 only) → 마커 못 그림
@@ -380,11 +381,11 @@ void draw_content(FFTViewer& v, bool just_opened){
             mpt.selected = (sel_mmsi==G.mmsi);
             mpt.color = mpt.selected? IM_COL32(255,210,80,255) : type_color(G.ship_type);
             mpt.label = G.name[0]? G.name : nullptr;
-            trailbuf.emplace_back();
-            if(sel_mmsi==G.mmsi){                             // 선택 배 = 전체 항적(윈도우 무시)
+            trailbuf.emplace_back(); trailt.emplace_back();
+            if(sel_mmsi==G.mmsi){                             // 선택 배 = 전체 항적(윈도우 무시) + 점별 수신시각
                 std::lock_guard<std::mutex> lk(mtx);
                 for(const AisRecord& r : log)
-                    if(r.mmsi==G.mmsi && r.has_pos){ trailbuf.back().push_back((float)r.lat); trailbuf.back().push_back((float)r.lon); }
+                    if(r.mmsi==G.mmsi && r.has_pos){ trailbuf.back().push_back((float)r.lat); trailbuf.back().push_back((float)r.lon); trailt.back().push_back(r.t_ms); }
             } else {
                 auto tit = mtrail.find(G.mmsi);               // 최근 10분 연속 꼬리(전점)
                 if(tit!=mtrail.end()) for(const TrailPt& p : tit->second){ trailbuf.back().push_back(p.lat); trailbuf.back().push_back(p.lon); }
@@ -401,6 +402,7 @@ void draw_content(FFTViewer& v, bool just_opened){
         for(size_t i=0;i<pts.size();i++){
             pts[i].trail   = trailbuf[i].empty()? nullptr : trailbuf[i].data();
             pts[i].trail_n = (int)trailbuf[i].size()/2;
+            pts[i].trail_t = trailt[i].empty()? nullptr : trailt[i].data();
             pts[i].tip_l1  = tip1[i].c_str();
             pts[i].tip_l2  = tip2[i].empty()? nullptr : tip2[i].c_str();
         }
@@ -742,7 +744,7 @@ void draw_content(FFTViewer& v, bool just_opened){
         float cx=map_p0.x+8.f, cy=map_p0.y+34.f;               // ⛶(6..26) 아래부터
         int shown=0;
         for(const guard_mod::AlertRow* pr : act){
-            if(shown>=5){ char more[24]; snprintf(more,sizeof(more),"+%d건", (int)act.size()-shown);
+            if(shown>=5){ char more[24]; snprintf(more,sizeof(more),"+%d more", (int)act.size()-shown);
                 gdl->AddText(ImVec2(cx+4,cy+2), IM_COL32(180,190,205,200), more); break; }
             const GuardAlert& a=pr->a;
             ImVec2 p0c(cx,cy), p1c(cx+CW, cy+CH);
@@ -761,15 +763,15 @@ void draw_content(FFTViewer& v, bool just_opened){
             gdl->PopClipRect();
             if(hov){
                 ImGui::BeginTooltip();                          // 상세: 필요한 정보만 (의사결정 지원)
-                ImGui::TextColored(ImVec4(0.95f,0.75f,0.35f,1.f), "%s · %s", guard_typ_name(a.typ), sv);
+                ImGui::TextColored(ImVec4(0.95f,0.75f,0.35f,1.f), "%s  %s", guard_typ_name(a.typ), sv);
                 ImGui::TextUnformatted(a.msg);
-                if(a.score>0)   ImGui::Text("위험도 %.0f", a.score);
+                if(a.score>0)   ImGui::Text("Risk %.0f", a.score);
                 if(a.cpa_m>=0)  ImGui::Text("CPA %.0f m", a.cpa_m);
                 if(a.tcpa_s>=0) ImGui::Text("TCPA %.0f s", a.tcpa_s);
-                if(a.mmsi2)     ImGui::Text("상대선박 %u", a.mmsi2);
+                if(a.mmsi2)     ImGui::Text("Target %u", a.mmsi2);
                 if(a.reco[0]){ ImGui::Separator();
                     ImGui::PushTextWrapPos(320.f);
-                    ImGui::TextColored(ImVec4(0.62f,0.85f,0.62f,1.f), "권고: %s", a.reco);
+                    ImGui::TextColored(ImVec4(0.62f,0.85f,0.62f,1.f), "%s", a.reco);
                     ImGui::PopTextWrapPos(); }
                 ImGui::EndTooltip();
                 if(ImGui::IsMouseClicked(ImGuiMouseButton_Left) && a.mmsi){
@@ -838,9 +840,9 @@ void draw_content(FFTViewer& v, bool just_opened){
         for(const auto& r : galerts){
             if(!r.active || r.a.typ>=5 || (r.a.mmsi!=focus.mmsi && r.a.mmsi2!=focus.mmsi)) continue;
             ImGui::Separator();
-            ImGui::TextColored(ImVec4(0.95f,0.62f,0.45f,1.f), "%s · %s",
+            ImGui::TextColored(ImVec4(0.95f,0.62f,0.45f,1.f), "%s  %s",
                                guard_typ_name(r.a.typ), guard_sev_name(r.a.sev));
-            if(r.a.score>0){ char s[16]; snprintf(s,sizeof(s),"%.0f",r.a.score); row("위험도", s, V); }
+            if(r.a.score>0){ char s[16]; snprintf(s,sizeof(s),"%.0f",r.a.score); row("Risk", s, V); }
             if(r.a.cpa_m>=0){ char s[20]; snprintf(s,sizeof(s),"%.0f m",r.a.cpa_m); row("CPA", s, V); }
             if(r.a.tcpa_s>=0){ char s[20]; snprintf(s,sizeof(s),"%.0f s",r.a.tcpa_s); row("TCPA", s, V); }
             if(r.a.reco[0]){

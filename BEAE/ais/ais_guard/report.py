@@ -90,8 +90,8 @@ def generate(cfg, day: str | None = None, emit: bool = True) -> str:
     os.replace(tmp, path)
 
     if emit:
-        msg = (f"{d} 일일요약: 경보 {len(news)}건 "
-               f"(심각 {by_sev.get(3, 0)}/경고 {by_sev.get(2, 0)}), 선박 {len(ships)}척")
+        msg = (f"Daily {d}: {len(news)} alerts "
+               f"(crit {by_sev.get(3, 0)}/warn {by_sev.get(2, 0)}), {len(ships)} ships")
         doc = make_doc(int(time.time() * 1000), make_aid(TYP_REPORT, int(day), 0),
                        TYP_REPORT, 1, ST_NEW, 0, 0, 0.0, 0.0,
                        float(len(news)), -1.0, -1.0, msg, path)

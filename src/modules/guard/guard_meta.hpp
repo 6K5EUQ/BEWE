@@ -51,23 +51,24 @@ inline void guard_wire_to_msg(const GuardWireMsg& w, GuardAlert& a){
 }
 
 // ── 경보 유형/심각도 라벨 (한국어; 뷰/오버레이 공용) ────────────────────────
+// 라벨은 영어 고정 — ImGui 기본 폰트에 한글 글리프 없음 (지도 오버레이에서 깨짐)
 inline const char* guard_typ_name(uint8_t t){
     switch(t){
-        case 1: return "충돌위험";
-        case 2: return "좌초위험";
-        case 3: return "이상항적";
-        case 4: return "위협선박";
-        case 5: return "일일보고";
-        case 6: return "위험구역";   // 보조 레코드: zones.json 폴리곤 (경보 아님)
-        case 7: return "항적";       // 보조 레코드: 데모/가상 선박 경로 (경보 아님)
+        case 1: return "COLLISION";
+        case 2: return "GROUNDING";
+        case 3: return "ANOMALY";
+        case 4: return "SPOOF";
+        case 5: return "REPORT";
+        case 6: return "ZONE";       // 보조 레코드: zones.json 폴리곤 (경보 아님)
+        case 7: return "PATH";       // 보조 레코드: 데모/가상 선박 경로 (경보 아님)
         default: return "";
     }
 }
 inline const char* guard_sev_name(uint8_t s){
     switch(s){
-        case 1: return "주의";
-        case 2: return "경고";
-        case 3: return "긴급";
+        case 1: return "LOW";
+        case 2: return "WARN";
+        case 3: return "CRIT";
         default: return "";
     }
 }

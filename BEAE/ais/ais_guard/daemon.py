@@ -71,7 +71,7 @@ def _ship(tr) -> str:
 
 
 def _tcpa_txt(tcpa_s: float) -> str:
-    return f"{tcpa_s / 60:.1f}분 후" if tcpa_s >= 0 else "근접 중"
+    return f"in {tcpa_s / 60:.1f} min" if tcpa_s >= 0 else "closing"
 
 
 def _evaluate(cfg, tracker, book, zones, scorer_fn, predict_fn, now_ms):
@@ -84,8 +84,8 @@ def _evaluate(cfg, tracker, book, zones, scorer_fn, predict_fn, now_ms):
         prox = max(0.0, 1.0 - cpa / cfg.cpa_warn_m)
         tfac = max(0.0, 1.0 - max(tcpa, 0.0) / cfg.tcpa_max_s)
         score = min(100.0, 100.0 * (0.6 * prox + 0.4 * tfac))
-        msg = f"충돌 위험: {_ship(a)}·{_ship(b)} CPA {cpa:.0f}m, {_tcpa_txt(tcpa)}"
-        reco = "양 선박 VHF 16번 호출, 침로·속력 변경 지시 및 최근접 통과 확인"
+        msg = f"CPA {cpa:.0f}m {_tcpa_txt(tcpa)}: {_ship(a)} x {_ship(b)}"
+        reco = "Call both on VHF16. Order course/speed change."
         book.observe(TYP_COLLISION, sev, m1, m2, lat, lon, score, cpa, tcpa, msg, reco)
 
     # 2) 위험구역 진입/접근 (좌초)
@@ -93,9 +93,9 @@ def _evaluate(cfg, tracker, book, zones, scorer_fn, predict_fn, now_ms):
         inside = eta <= 0.0
         sev = 3 if inside else 2
         score = 100.0 if inside else min(100.0, 100.0 * (1.0 - eta / cfg.zone_horizon_s))
-        what = "진입" if inside else f"{eta / 60:.0f}분 내 진입 예상"
-        msg = f"위험구역 {what}: {_ship(tr)} — {z['name']}"
-        reco = "즉시 침로 변경 지시, 구역 이탈 유도 및 위치 재확인"
+        what = "inside" if inside else f"entry in {eta / 60:.0f} min"
+        msg = f"{z['name']} {what}: {_ship(tr)}"
+        reco = "Order immediate course change away from zone."
         book.observe(TYP_GROUNDING, sev, tr.mmsi, 0, lat, lon, score, -1.0,
                      0.0 if inside else eta, msg, reco)
 
@@ -107,9 +107,9 @@ def _evaluate(cfg, tracker, book, zones, scorer_fn, predict_fn, now_ms):
         score, n_mis, n_tot, aim_top, n_jump = r
         sev = 3 if n_mis / n_tot >= cfg.threat_crit_ratio else 2
         latest = tr.latest()
-        extra = f", RF점프 {n_jump}회" if n_jump else ""
-        msg = f"위협 의심: {_ship(tr)} 지문 불일치 {n_mis}/{n_tot}회 (추정 {aim_top}){extra}"
-        reco = "MMSI 위장 가능성 — VHF 호출 응답·레이더 대조 확인, 항적 집중 감시"
+        extra = f", RF jump x{n_jump}" if n_jump else ""
+        msg = f"RF mismatch {n_mis}/{n_tot} (likely {aim_top}){extra}: {_ship(tr)}"
+        reco = "Possible spoofed MMSI. Verify by VHF/radar. Watch closely."
         book.observe(TYP_THREAT, sev, tr.mmsi, aim_top, latest[1], latest[2],
                      score, -1.0, -1.0, msg, reco)
 
@@ -128,8 +128,8 @@ def _evaluate(cfg, tracker, book, zones, scorer_fn, predict_fn, now_ms):
                 continue
             sev = 3 if score >= cfg.anom_score_crit else 2
             latest = tr.latest()
-            msg = f"이상 항적: {_ship(tr)} 점수 {score:.0f} — {why}"
-            reco = "항적 감시 강화, 필요시 VHF 호출로 의도 확인"
+            msg = f"Abnormal track {score:.0f}: {_ship(tr)} — {why}"
+            reco = "Watch track. Call on VHF if it continues."
             book.observe(TYP_ANOMALY, sev, tr.mmsi, 0, latest[1], latest[2],
                          score, -1.0, -1.0, msg, reco)
 
