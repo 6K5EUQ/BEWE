@@ -257,6 +257,32 @@ MapResult draw_map(const char* id, MapView& v, const std::vector<MapPoint>& pts,
         }
     }
 
+    // ── 주요 항구 지명 오버레이 (KR_PORTS; 앵커 아이콘 + 영문 이름) ──
+    // 정적 데이터, 클릭 대상 아님(순수 배경 오버레이). 배 마커보다 먼저 그려 배가 위에 뜨게.
+    if(v.show_ports){
+        ImU32 pc=IM_COL32(255,215,0,255), sh=IM_COL32(0,0,0,180);   // 찐한 노랑(gold) — 잘 보이게
+        for(size_t i=0;i<KR_PORTS_COUNT;i++){
+            const PlaceLabel& pl=KR_PORTS[i];
+            ImVec2 s=LL2PX(pl.lat, pl.lon);
+            if(s.x<p0.x||s.x>p1.x||s.y<p0.y||s.y>p1.y) continue;   // 화면밖 컬링
+            // 좌표점(s)이 정확한 항만 위치 — 앵커를 그 위로 얹어(핀처럼 하단이 s) 정확히 가리키게.
+            // 앵커 도형은 위(고리)~아래(갈고리)로 총 ~15px, 하단 끝이 s 에 오도록 전체를 위로 올림.
+            dl->AddCircleFilled(s, 1.6f, pc, 8);            // 정확 위치 점(dot)
+            float ay=s.y-15.f;                              // 앵커 상단 y (하단 갈고리가 s 근처)
+            float r0=2.2f;                                  // 상단 고리 반경
+            ImVec2 top(s.x, ay);                             // 고리 중심
+            dl->AddCircle(top, r0, pc, 10, 1.4f);           // 고리
+            dl->AddLine(ImVec2(s.x, ay+r0), ImVec2(s.x, s.y-1.f), pc, 1.4f);     // 수직대(끝이 s 바로 위)
+            dl->AddLine(ImVec2(s.x-3.5f, ay+6.f), ImVec2(s.x+3.5f, ay+6.f), pc, 1.4f); // 스톡(가로대)
+            dl->PathArcTo(ImVec2(s.x, ay+4.5f), 4.0f, 0.30f, 2.84f, 12);         // 아래 갈고리 호
+            dl->PathStroke(pc, 0, 1.4f);
+            // 이름 — 앵커 우측, 그림자 후 본문
+            ImVec2 lp(s.x+6.f, ay-3.f);
+            dl->AddText(ImVec2(lp.x+1,lp.y+1), sh, pl.name);
+            dl->AddText(lp, pc, pl.name);
+        }
+    }
+
     // ── 항적 + 마커 ── (최근접 마커 추적 → hover/click)
     int best=-1; float bestd=1e9f; ImVec2 mp=io.MousePos;
     bool any_sel=false; for(const auto& p : pts) if(p.selected){ any_sel=true; break; }  // 선택 배 있으면 그 배만 꼬리
