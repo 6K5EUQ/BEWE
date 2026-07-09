@@ -99,6 +99,28 @@ struct OverlayPath {
 };
 std::vector<OverlayPath> overlays();   // 조립 완료 스냅샷 (지도 오버레이용)
 
+// ── 뷰어 로컬 기능 (wire 안 탐 — 이 PC 화면에서만) ─────────────────────────
+// 로컬 주입: G키 데모·로컬 구역 경보를 같은 경보 파이프(카드/링/행강조)로 표시
+void upsert_local(const GuardAlert& a);
+
+// G키 데모: 예시 4종 + 가상 항적 5개 토글 (기본 OFF)
+bool demo_on();
+void demo_toggle();
+
+// 로컬 위험구역 (우클릭 드래그 등록, 파일 영속: data_dir/guard_zones_local.json)
+struct LocalZone {
+    char    name[48] = {};           // UTF-8 (한글 가능)
+    uint8_t kind = 2;                // 1=주의(노랑) 2=경고(주황) 3=금지(빨강)
+    double  lat0=0, lat1=0, lon0=0, lon1=0;   // 정규화된 박스 (lat0<lat1, lon0<lon1)
+};
+std::vector<LocalZone> local_zones();
+void add_local_zone(const char* name, uint8_t kind, double la0,double la1,double lo0,double lo1);
+bool del_local_zone(uint32_t idx);
+
+// 진입/진입예정 판정 (뷰어 ~1초 주기 호출; dead-reckon 10분 투영 → 경보 발화/해제)
+struct VesselSnap { uint32_t mmsi; double lat, lon; float sog, cog; };
+void eval_local_zones(const std::vector<VesselSnap>& vs, int64_t now_ms);
+
 // HOST: ais_guard 데몬 확보 + alerts_live.jsonl tail 시작 (idempotent).
 // 반드시 단일스레드 시점(ais host_start 의 g_mgmt 락 내부)에서 호출 — fork 안전.
 void host_ensure(FFTViewer& v);

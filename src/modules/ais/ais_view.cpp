@@ -39,6 +39,12 @@
 namespace ais_mod {
 
 namespace {
+#ifdef BEWE_MODULE_GUARD
+inline int64_t wall_now_ms(){
+    return (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+#endif
 void hms(int64_t ms, char* o){
     time_t t=(time_t)(ms/1000); struct tm tv; KST::to_tm(t,tv);
     strftime(o,12,"%H:%M:%S",&tv);
@@ -146,15 +152,16 @@ void draw_content(FFTViewer& v, bool just_opened){
     ImGuiIO& io = ImGui::GetIO();
     bool remote = bewe_mod_my_station()[0] != 0;
     if(just_opened && !remote) local_load_today(v);
-#ifdef BEWE_MODULE_GUARD
-    // guard 자동구독: AIS 구독 중이면 경보 스트림도 따라 켬 — GUARD 탭 안 열어도
-    // 지도 카드/링/행 강조가 AIS 창에서 바로 뜬다 (해제는 안 따라감: 무해).
-    if(remote && bewe_mod_recv("ais") && !bewe_mod_recv("guard")) bewe_mod_set_recv(v, "guard", true);
-#endif
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     float W=avail.x, H=avail.y, x0=ImGui::GetCursorPosX(), y0=ImGui::GetCursorPosY();
     bool win_focus = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+#ifdef BEWE_MODULE_GUARD
+    // guard 자동구독: AIS 구독 중이면 경보 스트림도 따라 켬 — 지도 카드/링/행 강조가 바로 뜬다.
+    if(remote && bewe_mod_recv("ais") && !bewe_mod_recv("guard")) bewe_mod_set_recv(v, "guard", true);
+    // G키: 데모 온/오프 토글 (창 포커스 + 텍스트입력 아님; 기본 OFF)
+    if(win_focus && !io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_G,false)) guard_mod::demo_toggle();
+#endif
 
     static std::set<std::string> sel; static std::string anchor;
     static AisRecord focus{}; static bool has_focus=false;
@@ -218,8 +225,10 @@ void draw_content(FFTViewer& v, bool just_opened){
 
     // ── 타임라인 스크러버 + 재생 (00~24시 하루축, 구간 A/B, Play) ────────────
     const float TL_H = 34.f;
+    const float TL_SPD_H = 26.f;    // 재생버튼 밑 배속(1초당 분) 입력칸 세로 공간
     static float tl_a=0.f, tl_b=1440.f, tl_head=0.f;   // 분(0~1440)
     static bool  tl_play=false;
+    static int   tl_spd=1;          // 재생 배속: 실1초당 진행할 데이터 분(min). 기본 1m, 정수·≥1
     // 하루 기준점: DB(과거)모드=그 날짜 / 라이브=오늘, KST 자정 epoch ms
     int64_t day_base;
     {
@@ -238,14 +247,14 @@ void draw_content(FFTViewer& v, bool just_opened){
     // 기준일 변경 시 리셋 — 단 재생 중이면 진행 보존(자정 넘어가도 replay 안 끊김)
     { static int64_t prev_base=-1; if(day_base!=prev_base){ prev_base=day_base; if(!tl_play){ tl_a=0.f;tl_b=1440.f;tl_head=0.f; } } }
     if(!tl_show){ tl_play=false; tl_a=0.f; tl_b=1440.f; tl_head=0.f; }   // 플레이백 꺼짐 → 재생/구간 무효
-    if(tl_play){ tl_head += io.DeltaTime * 1.0f; if(tl_head>=tl_b){ tl_head=tl_b; tl_play=false; } }   // 실1초=데이터1분
+    if(tl_play){ tl_head += io.DeltaTime * (float)tl_spd; if(tl_head>=tl_b){ tl_head=tl_b; tl_play=false; } }   // 실1초=데이터 tl_spd분
     // 지도 카메라/크게보기 상태 (아래 지도 렌더에서도 사용). big 여부가 body_h 배분에 필요.
     static modview_map::MapView mv;
     mv.show_all_trails = true;   // AIS: 선택 배가 있어도 전 선박 10분 꼬리 상시 표시
     // 표/지도 세로 배분: 헤더(32) 아래부터. 플레이백 켜지면 하단 TL_H 만큼 비워 타임라인 자리 확보.
     // 크게보기(big)면 하단 여백(4px) 제거 → 지도가 패널 맨 아래까지 꽉 참 (표는 숨겨져 영향 없음).
     float bot = mv.big ? 32.f : 36.f;
-    float body_h = tl_show ? (H-bot-TL_H) : (H-bot); if(body_h<80) body_h=80;
+    float body_h = tl_show ? (H-bot-TL_H-TL_SPD_H) : (H-bot); if(body_h<80) body_h=80;
     // 타임라인 바 UI — 지도/데이터 아래(하단바 바로 위)에 그린다. 켜졌을 때만.
     if(tl_show){
         const float PAD=12.f;     // 좌우 대칭 여백 (버튼 왼쪽 = 눈금 오른쪽)
@@ -289,6 +298,13 @@ void draw_content(FFTViewer& v, bool just_opened){
         handle("##tlA",tl_a, 0.f, tl_b);   handle("##tlB",tl_b, tl_a, 1440.f);   // A≤B 유지
         if(tl_head<tl_a)tl_head=tl_a; if(tl_head>tl_b)tl_head=tl_b;
         if(tl_play){ float hx=m2x(tl_head); dl->AddLine(ImVec2(hx,ty-13),ImVec2(hx,ty+13),IM_COL32(255,120,90,255),2.f); }
+        // ── 재생버튼 밑: 배속 입력칸 (실1초당 진행 데이터 분, 정수·기본 1m) ──
+        ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y+BH+6.f));
+        ImGui::SetNextItemWidth(PB+18.f);
+        if(ImGui::InputInt("##tlspd", &tl_spd, 0, 0)){ if(tl_spd<1) tl_spd=1; if(tl_spd>1440) tl_spd=1440; }
+        ImGui::SameLine(0.f, 6.f);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(ImVec4(0.55f,0.62f,0.72f,1.f), "min / sec");   // "1초당 N분"
     }
     // 표/지도는 헤더 바로 아래(y0+32)부터 그린다 — 타임라인은 이 아래(하단)에 그려짐
     ImGui::SetCursorPos(ImVec2(x0, y0+32.f));
@@ -651,13 +667,70 @@ void draw_content(FFTViewer& v, bool just_opened){
                    default:return IM_COL32(115,179,255,0); } };
     static std::vector<guard_mod::AlertRow> galerts;   // 이번 프레임 경보 스냅샷 (카드/링/상세 공용)
     galerts = guard_mod::snapshot();
+    // 로컬 위험구역 진입/예정 평가 (1초 주기; 지도에 뜬 최신위치 기준 dead-reckon)
+    {
+        static int64_t last_eval=0; int64_t nowm=(int64_t)(ImGui::GetTime()*1000);
+        if(nowm-last_eval>=1000){
+            last_eval=nowm;
+            std::vector<guard_mod::VesselSnap> vs; vs.reserve(pts.size());
+            for(const auto& mp : pts) vs.push_back({(uint32_t)mp.id, mp.lat, mp.lon,
+                                                    mp.heading, mp.heading});   // sog 근사 아래서 보정
+            { std::lock_guard<std::mutex> lk(mtx);                              // 정확한 sog/cog 채움
+              for(auto& s : vs){ for(auto it=log.rbegin(); it!=log.rend(); ++it)
+                    if(it->mmsi==s.mmsi){ s.sog=it->sog; s.cog=it->cog; break; } } }
+            guard_mod::eval_local_zones(vs, wall_now_ms());
+        }
+    }
     {
         ImDrawList* gdl = ImGui::GetWindowDrawList();
         gdl->PushClipRect(map_p0, ImVec2(map_p0.x+mapw, map_p0.y+map_h), true);
         auto ll2px=[&](double lat,double lon){                 // map_view.cpp 와 동일 등거리원통 투영
             return ImVec2((float)(map_p0.x+(lon-mv.lon0)/(mv.lon1-mv.lon0)*mapw),
                           (float)(map_p0.y+(mv.lat1-lat)/(mv.lat1-mv.lat0)*map_h)); };
+        auto px2ll=[&](ImVec2 p, double& lat, double& lon){
+            lon = mv.lon0 + (double)(p.x-map_p0.x)/mapw*(mv.lon1-mv.lon0);
+            lat = mv.lat1 - (double)(p.y-map_p0.y)/map_h*(mv.lat1-mv.lat0); };
         float tnow=(float)ImGui::GetTime();
+        auto kind_col=[](uint8_t k)->ImU32{                    // 위험수준 색 (구역 공용)
+            return k>=3? IM_COL32(255, 80, 70,0) : k==2? IM_COL32(255,158, 64,0)
+                                                        : IM_COL32(242,217, 89,0); };
+        // ── 로컬 위험구역 렌더 (박스 채움+외곽+이름) + 삭제 hover ──
+        static int lz_del=-1; lz_del=-1;
+        { auto lzs=guard_mod::local_zones();
+          for(size_t i=0;i<lzs.size();i++){
+            const auto& z=lzs[i]; ImU32 zc=kind_col(z.kind);
+            ImVec2 a=ll2px(z.lat1,z.lon0), b=ll2px(z.lat0,z.lon1);   // 좌상~우하
+            gdl->AddRectFilled(a,b, zc|(30u<<24), 0);
+            gdl->AddRect(a,b, zc|(210u<<24), 0, 0, 1.8f);
+            gdl->AddText(ImVec2(a.x+5,a.y+4), zc|(235u<<24), z.name);
+            bool hov = io.MousePos.x>=a.x&&io.MousePos.x<=b.x&&io.MousePos.y>=a.y&&io.MousePos.y<=b.y;
+            if(hov){                                            // 우상단 [x] 삭제
+                ImVec2 xc(b.x-11,a.y+9);
+                gdl->AddText(ImVec2(xc.x-3,xc.y-7), IM_COL32(255,120,120,255), "x");
+                if(io.MousePos.x>=xc.x-8&&io.MousePos.x<=xc.x+8&&io.MousePos.y>=xc.y-8&&io.MousePos.y<=xc.y+8
+                   && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) lz_del=(int)i;
+            }
+          }
+          if(lz_del>=0) guard_mod::del_local_zone((uint32_t)lz_del);
+        }
+        // ── 우클릭 드래그 → 신규 구역 박스 (놓으면 이름·색 입력 팝업) ──
+        static bool drag=false; static ImVec2 dstart;
+        static double nz_la0,nz_la1,nz_lo0,nz_lo1; static bool open_zone_popup=false;
+        bool over_map = io.MousePos.x>=map_p0.x&&io.MousePos.x<=map_p0.x+mapw
+                     && io.MousePos.y>=map_p0.y&&io.MousePos.y<=map_p0.y+map_h;
+        if(over_map && ImGui::IsMouseClicked(ImGuiMouseButton_Right)){ drag=true; dstart=io.MousePos; }
+        if(drag){
+            ImVec2 cur=io.MousePos;
+            gdl->AddRectFilled(dstart,cur, IM_COL32(255,158,64,36), 0);
+            gdl->AddRect(dstart,cur, IM_COL32(255,158,64,220), 0, 0, 1.8f);
+            if(ImGui::IsMouseReleased(ImGuiMouseButton_Right)){
+                drag=false;
+                if(fabsf(cur.x-dstart.x)>6 && fabsf(cur.y-dstart.y)>6){
+                    px2ll(dstart,nz_la0,nz_lo0); px2ll(cur,nz_la1,nz_lo1);
+                    open_zone_popup=true;
+                }
+            }
+        }
         auto dash=[&](ImVec2 a, ImVec2 b, ImU32 col, float th){   // 8px 대시 점선
             float dx=b.x-a.x, dy=b.y-a.y, len=sqrtf(dx*dx+dy*dy);
             int nseg=(int)(len/8.f)+1;
@@ -724,6 +797,41 @@ void draw_content(FFTViewer& v, bool just_opened){
             }
         }
         gdl->PopClipRect();
+
+        // ── 신규 구역 입력 팝업 (이름 한글 가능 + 위험수준 색 선택) ──
+        if(open_zone_popup){ ImGui::OpenPopup("위험구역 등록##guardzone"); open_zone_popup=false; }
+        ImVec2 vc=ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(vc, ImGuiCond_Appearing, ImVec2(0.5f,0.5f));
+        if(ImGui::BeginPopupModal("위험구역 등록##guardzone", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+            static char zname[48]=""; static int zkind=2;
+            static bool init=false; if(!init){ init=true; }
+            ImGui::TextUnformatted("구역 이름 (한글 가능)");
+            ImGui::SetNextItemWidth(240);
+            ImGui::InputText("##zname", zname, sizeof(zname));
+            ImGui::Dummy(ImVec2(0,4)); ImGui::TextUnformatted("위험 수준");
+            struct KOpt{ int k; const char* t; ImU32 c; };
+            static const KOpt ko[3]={{1,"주의",IM_COL32(242,217,89,255)},
+                                     {2,"경고",IM_COL32(255,158,64,255)},
+                                     {3,"금지",IM_COL32(255,80,70,255)}};
+            for(int i=0;i<3;i++){
+                if(i) ImGui::SameLine();
+                bool sel=(zkind==ko[i].k);
+                ImGui::PushStyleColor(ImGuiCol_Button, ko[i].c & (sel?0xFFFFFFFFu:0x66FFFFFFu));
+                ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(20,20,20,255));
+                if(ImGui::Button(ko[i].t, ImVec2(72,0))) zkind=ko[i].k;
+                ImGui::PopStyleColor(2);
+            }
+            ImGui::Dummy(ImVec2(0,6));
+            ImGui::BeginDisabled(zname[0]==0);
+            if(ImGui::Button("등록", ImVec2(115,0))){
+                guard_mod::add_local_zone(zname, (uint8_t)zkind, nz_la0,nz_la1,nz_lo0,nz_lo1);
+                zname[0]=0; ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if(ImGui::Button("취소", ImVec2(115,0))){ zname[0]=0; ImGui::CloseCurrentPopup(); }
+            ImGui::EndPopup();
+        }
     }
 #endif
     if(mres.clicked_station>=0 && mres.clicked_station<(int)stn_names.size()){

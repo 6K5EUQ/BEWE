@@ -8,7 +8,9 @@
 #include "bewe_paths.hpp"
 #include "kst_time.hpp"
 #include <atomic>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -182,6 +184,173 @@ std::vector<OverlayPath> overlays(){
     std::vector<OverlayPath> out; out.reserve(g_overlays.size());
     for(const auto& kv : g_overlays) out.push_back(kv.second);
     return out;
+}
+
+// ── 로컬 주입 (뷰어 자체 생성: G키 데모 / 로컬 구역 경보 — wire 안 탐) ────────
+void upsert_local(const GuardAlert& a0){
+    GuardAlert a=a0;
+    strncpy(a.station,"LOCAL",sizeof(a.station)-1);
+    if(a.typ>=6) overlay_ingest(a); else upsert(a);
+}
+
+static uint32_t fnv32(const char* s){                 // 로컬 aid 용 (zlib 불필요)
+    uint32_t h=2166136261u; for(;*s;++s){ h^=(uint8_t)*s; h*=16777619u; } return h;
+}
+static int64_t wall_ms(){
+    return (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// ── G키 데모: 탐지 유형별 예시 4종 + 가상 항적 5개 (전부 로컬 — 기본 OFF) ─────
+// 좌표는 OSM 해안선 수역 검증분(overlay.py 와 동일). 선명은 실제 AIS 관례(로마자).
+static bool g_demo_on=false;
+bool demo_on(){ return g_demo_on; }
+
+static void demo_path(uint32_t aid, uint32_t mmsi, const char* name,
+                      const float* ll, int n, bool on){
+    if(!on){ std::lock_guard<std::mutex> lk(g_mtx);
+             g_overlays.erase(aid); return; }
+    OverlayPath p; p.aid=aid; p.typ=7; p.kind=1; p.mmsi=mmsi;
+    strncpy(p.name,name,sizeof(p.name)-1);
+    p.ll.assign(ll, ll+n*2);
+    std::lock_guard<std::mutex> lk(g_mtx);
+    g_overlays[aid]=std::move(p);
+}
+static void demo_alert(uint8_t typ, uint8_t sev, uint32_t m1, uint32_t m2,
+                       float lat, float lon, float score, float cpa, float tcpa,
+                       const char* msg, const char* reco, bool on){
+    GuardAlert a; a.t_ms=wall_ms();
+    char k[24]; snprintf(k,sizeof(k),"GD:%u:%u",typ,m1); a.aid=fnv32(k);
+    a.typ=typ; a.sev=sev; a.state= on?1:3; a.mmsi=m1; a.mmsi2=m2;
+    a.lat=lat; a.lon=lon; a.score=score; a.cpa_m=cpa; a.tcpa_s=tcpa;
+    if(on){ strncpy(a.msg,msg,sizeof(a.msg)-1); strncpy(a.reco,reco,sizeof(a.reco)-1); }
+    upsert_local(a);
+}
+void demo_toggle(){
+    bool on = !g_demo_on; g_demo_on=on;
+    static const float A[]={35.1075f,128.6100f,35.1082f,128.6140f,35.1086f,128.6180f,
+        35.1092f,128.6222f,35.1095f,128.6262f,35.1100f,128.6300f,35.1102f,128.6335f};
+    static const float B[]={35.1130f,128.6740f,35.1126f,128.6700f,35.1124f,128.6655f,
+        35.1119f,128.6610f,35.1117f,128.6565f,35.1113f,128.6520f,35.1110f,128.6480f};
+    static const float C[]={35.0650f,128.7030f,35.0650f,128.6964f,35.0650f,128.6898f,
+        35.0650f,128.6832f,35.0650f,128.6766f,35.0650f,128.6700f};
+    static const float D[]={35.0200f,128.5850f,35.0225f,128.5890f,35.0250f,128.5930f,
+        35.0275f,128.5970f,35.0295f,128.6015f,35.0310f,128.6070f,35.0332f,128.6106f,
+        35.0361f,128.6095f,35.0385f,128.6119f,35.0382f,128.6158f,35.0355f,128.6176f,
+        35.0328f,128.6158f,35.0325f,128.6119f,35.0349f,128.6095f,35.0378f,128.6106f};
+    static const float E[]={34.9800f,128.8300f,34.9824f,128.8240f,34.9848f,128.8180f,
+        34.9872f,128.8120f,34.9896f,128.8060f,34.9920f,128.8000f};
+    demo_path(0xD0000001u, 999000001u, "HAEJIN NO.7",  A, 7, on);
+    demo_path(0xD0000002u, 999000002u, "SEONGWOO 3",   B, 7, on);
+    demo_path(0xD0000003u, 999000003u, "DAEYANG 21",   C, 6, on);
+    demo_path(0xD0000004u, 999000004u, "GEUMRYONG HO", D,15, on);
+    demo_path(0xD0000005u, 999000005u, "MYEONGSUNG 5", E, 6, on);
+    demo_alert(1,3, 999000001u,999000002u, 35.1107f,128.6430f, 92.f,140.f,210.f,
+               "CPA 140m 3.5분 후: HAEJIN NO.7 x SEONGWOO 3", "양 선박 VHF16 호출, 우현 변침 지시", on);
+    demo_alert(2,2, 999000003u,0, 35.0650f,128.6622f, 78.f,-1.f,300.f,
+               "REEF-A 5분 내 진입: DAEYANG 21", "즉시 변침 지시, 암초 회피", on);
+    demo_alert(3,2, 999000004u,0, 35.0378f,128.6106f, 88.f,-1.f,-1.f,
+               "이상항적 88점: GEUMRYONG HO", "항적 감시, VHF 호출", on);
+    demo_alert(4,3, 999000005u,0, 34.9920f,128.8000f, 95.f,-1.f,-1.f,
+               "RF지문 불일치 6/6: MYEONGSUNG 5", "MMSI 위장 의심 — VHF·레이더 확인", on);
+}
+
+// ── 로컬 위험구역 (우클릭 드래그 등록; 뷰어 파일 영속 + 진입/예정 경보) ────────
+static std::vector<LocalZone> g_lz;
+static bool g_lz_loaded=false;
+static std::string lz_path(){ return BEWEPaths::data_dir()+"/guard_zones_local.json"; }
+
+static void lz_save(){
+    FILE* f=fopen(lz_path().c_str(),"wb"); if(!f) return;
+    fprintf(f,"{\"zones\":[\n");
+    for(size_t i=0;i<g_lz.size();i++){
+        char nm[112]; json_escape(g_lz[i].name,nm,sizeof(nm));
+        fprintf(f," {\"name\":\"%s\",\"kind\":%u,\"lat0\":%.6f,\"lat1\":%.6f,\"lon0\":%.6f,\"lon1\":%.6f}%s\n",
+                nm,(unsigned)g_lz[i].kind,g_lz[i].lat0,g_lz[i].lat1,g_lz[i].lon0,g_lz[i].lon1,
+                i+1<g_lz.size()? ",":"");
+    }
+    fprintf(f,"]}\n"); fclose(f);
+}
+static void lz_load(){
+    if(g_lz_loaded) return; g_lz_loaded=true;
+    FILE* f=fopen(lz_path().c_str(),"rb"); if(!f) return;
+    std::string s; char buf[4096]; size_t r;
+    while((r=fread(buf,1,sizeof(buf),f))>0) s.append(buf,r);
+    fclose(f);
+    const char* p=s.c_str();
+    while((p=strstr(p,"\"name\":\""))!=nullptr){
+        LocalZone z{};
+        jstr(p,"\"name\":\"",z.name,sizeof(z.name));
+        z.kind=(uint8_t)jll(p,"\"kind\":");
+        z.lat0=jf(p,"\"lat0\":"); z.lat1=jf(p,"\"lat1\":");
+        z.lon0=jf(p,"\"lon0\":"); z.lon1=jf(p,"\"lon1\":");
+        if(z.kind>=1 && z.kind<=3 && z.lat1>z.lat0 && z.lon1>z.lon0) g_lz.push_back(z);
+        p+=8;
+    }
+}
+std::vector<LocalZone> local_zones(){
+    std::lock_guard<std::mutex> lk(g_mtx); lz_load(); return g_lz;
+}
+void add_local_zone(const char* name, uint8_t kind, double la0,double la1,double lo0,double lo1){
+    std::lock_guard<std::mutex> lk(g_mtx); lz_load();
+    LocalZone z{}; strncpy(z.name,name,sizeof(z.name)-1); z.kind=kind;
+    z.lat0=std::min(la0,la1); z.lat1=std::max(la0,la1);
+    z.lon0=std::min(lo0,lo1); z.lon1=std::max(lo0,lo1);
+    g_lz.push_back(z); lz_save();
+}
+bool del_local_zone(uint32_t idx){
+    std::lock_guard<std::mutex> lk(g_mtx); lz_load();
+    if(idx>=g_lz.size()) return false;
+    g_lz.erase(g_lz.begin()+idx); lz_save(); return true;
+}
+
+// 진입/예정 판정 (뷰어 1초 주기 호출). dead-reckon: 현재 침로·속력 유지 가정 10분.
+void eval_local_zones(const std::vector<VesselSnap>& vs, int64_t now_ms){
+    std::vector<LocalZone> zs = local_zones();
+    static std::map<uint32_t,int64_t> live;             // aid → 마지막 조건 참 시각
+    auto inbox=[](const LocalZone& z,double la,double lo){
+        return la>=z.lat0&&la<=z.lat1&&lo>=z.lon0&&lo<=z.lon1; };
+    for(const auto& v : vs){
+        for(const auto& z : zs){
+            char k[80]; snprintf(k,sizeof(k),"LZ:%s:%u",z.name,v.mmsi);
+            uint32_t aid=fnv32(k);
+            bool in = inbox(z,v.lat,v.lon);
+            double eta=-1;
+            if(!in && v.sog>0.5f && v.cog>=0){           // 예정: 30초 간격 10분 투영
+                double mlat=v.sog*0.514444/111320.0;     // deg/s (위도)
+                double mlon=mlat/std::cos(v.lat*M_PI/180.0);
+                double s=sin(v.cog*M_PI/180.0), c=cos(v.cog*M_PI/180.0);
+                for(int t=30;t<=600;t+=30){
+                    if(inbox(z, v.lat+c*mlat*t, v.lon+s*mlon*t)){ eta=t; break; }
+                }
+            }
+            if(in || eta>=0){
+                auto it=live.find(aid);
+                bool first = (it==live.end());
+                if(first || now_ms-it->second>=10000){   // NEW 후 10초마다 UPDATE
+                    GuardAlert a; a.t_ms=now_ms; a.aid=aid; a.typ=2;
+                    a.sev = in? z.kind : (uint8_t)std::max(1, z.kind-1);
+                    a.state = first?1:2; a.mmsi=v.mmsi;
+                    a.lat=(float)v.lat; a.lon=(float)v.lon;
+                    a.score = in?100.f:(float)(100.0*(1.0-eta/600.0));
+                    a.cpa_m=-1.f; a.tcpa_s = in?0.f:(float)eta;
+                    if(in) snprintf(a.msg,sizeof(a.msg),"%s 진입: %u", z.name, v.mmsi);
+                    else   snprintf(a.msg,sizeof(a.msg),"%s %.0f분 내 진입 예상: %u", z.name, eta/60.0, v.mmsi);
+                    snprintf(a.reco,sizeof(a.reco),"침로 변경 지시, 구역 이탈 유도");
+                    upsert_local(a);
+                }
+                if(first) live[aid]=now_ms; else it->second = (in||eta>=0)? now_ms : it->second;
+                live[aid]=now_ms;
+            }
+        }
+    }
+    for(auto it=live.begin(); it!=live.end(); ){         // 5초 미관측 → CLEAR
+        if(now_ms - it->second > 5000){
+            GuardAlert a; a.t_ms=now_ms; a.aid=it->first; a.typ=2; a.sev=1; a.state=3;
+            upsert_local(a);
+            it=live.erase(it);
+        } else ++it;
+    }
 }
 
 // ── JOIN/뷰어: 데이터 수신 → upsert ─────────────────────────────────────────
