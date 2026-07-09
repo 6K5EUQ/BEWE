@@ -84,6 +84,7 @@ Thumbs.db
 
 # HOST 세션상태 (런타임, 머신별)
 host_state_*.json
+guard_zones_local.json
 # BEAE AI 모듈 (venv 6.9GB torch — 코드만 추적)
 BEAE/ais/.venv/
 BEAE/ais/**/__pycache__/
