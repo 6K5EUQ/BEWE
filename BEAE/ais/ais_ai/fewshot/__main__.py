@@ -1,9 +1,9 @@
 """CLI for the experimental residual+prototypical model (isolated from `ais_ai`).
 
-  python -m ais_ai.proto eval       # train in-memory + full report, NO publish
-  python -m ais_ai.proto train      # train + publish to data/ai_model_proto/
-  python -m ais_ai.proto autotrain  # train+publish only once enough data accumulated
-  python -m ais_ai.proto status     # current proto model + kept versions (rollback)
+  python -m ais_ai.fewshot eval       # train in-memory + full report, NO publish
+  python -m ais_ai.fewshot train      # train + publish to data/ai_model_proto/
+  python -m ais_ai.fewshot autotrain  # train+publish only once enough data accumulated
+  python -m ais_ai.fewshot status     # current proto model + kept versions (rollback)
 
 Never touches data/ai_model/ (deployed IQResNet1D) or the live UDS daemon.
 """
@@ -14,7 +14,7 @@ from . import pipeline
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="ais_ai.proto")
+    ap = argparse.ArgumentParser(prog="ais_ai.fewshot")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("train", "eval"):
         p = sub.add_parser(name)

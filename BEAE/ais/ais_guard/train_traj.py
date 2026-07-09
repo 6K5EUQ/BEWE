@@ -1,6 +1,6 @@
 """TrajNet 학습 — 아카이브 ais_*.jsonl → 항적 윈도우(16+8) → GRU 학습 → publish.
 
-publish는 ais_ai/proto/pipeline.py 패턴: data/guard/model/traj_vNNNN.pt +
+publish는 ais_ai/fewshot/pipeline.py 패턴: data/guard/model/traj_vNNNN.pt +
 current.json (버전+1, 최근 5개 보존). 같은 기간의 GridStats도 grid.npz로 갱신.
 
 CLI: python -m ais_guard.train_traj --days N
