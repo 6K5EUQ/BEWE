@@ -17,17 +17,10 @@ def main():
     sp = sub.add_parser("status", help="guard_status.json 표시")
     sp.add_argument("--json", action="store_true", help="원본 JSON 그대로")
 
-    dp = sub.add_parser("demo", help="탐지 유형별 예시 상황 4종을 지도에 발행")
-    dp.add_argument("--clear", action="store_true", help="예시 전부 제거")
 
     a = ap.parse_args()
     cfg = GuardConfig()
 
-    if a.cmd == "demo":
-        from .overlay import demo
-        n = demo(cfg, clear=a.clear)
-        print(f"예시 {'제거' if a.clear else '발행'}: {n}건 (항적 5 + 경보 4)")
-        return
     if a.cmd == "daemon":
         from .daemon import run
         run(cfg)
