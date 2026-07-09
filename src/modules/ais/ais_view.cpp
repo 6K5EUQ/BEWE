@@ -658,8 +658,18 @@ void draw_content(FFTViewer& v, bool just_opened){
             return ImVec2((float)(map_p0.x+(lon-mv.lon0)/(mv.lon1-mv.lon0)*mapw),
                           (float)(map_p0.y+(mv.lat1-lat)/(mv.lat1-mv.lat0)*map_h)); };
         float tnow=(float)ImGui::GetTime();
-        // 1) 위험구역(typ6, 닫힌 폴리곤) + 데모항적(typ7, 폴리라인) — 마커 아래 느낌의 저알파
+        auto dash=[&](ImVec2 a, ImVec2 b, ImU32 col, float th){   // 8px 대시 점선
+            float dx=b.x-a.x, dy=b.y-a.y, len=sqrtf(dx*dx+dy*dy);
+            int nseg=(int)(len/8.f)+1;
+            for(int k=0;k<nseg;k+=2){
+                float t0=(float)k/nseg, t1=std::min(1.f,(float)(k+1)/nseg);
+                gdl->AddLine(ImVec2(a.x+dx*t0,a.y+dy*t0), ImVec2(a.x+dx*t1,a.y+dy*t1), col, th);
+            }
+        };
+        // 1) 위험구역(typ6, 닫힌 폴리곤) + 항적(typ7) — 머리 위치는 경보 투영선 앵커로 기억
         static std::vector<ImVec2> ppx;
+        struct GHead { uint32_t mmsi; ImVec2 px; };
+        static std::vector<GHead> gheads; gheads.clear();
         for(const auto& ov : guard_mod::overlays()){
             ppx.clear();
             for(size_t i=0;i+1<ov.ll.size(); i+=2) ppx.push_back(ll2px(ov.ll[i], ov.ll[i+1]));
@@ -673,34 +683,45 @@ void draw_content(FFTViewer& v, bool just_opened){
                 ctr.x/=ppx.size(); ctr.y/=ppx.size();
                 ImVec2 ts=ImGui::CalcTextSize(ov.name);
                 gdl->AddText(ImVec2(ctr.x-ts.x*0.5f, ctr.y-ts.y*0.5f), zc | (210u<<24), ov.name);
-            } else {                                           // 데모항적: 점선 꼬리 + 머리 + 라벨
+            } else {                                           // 항적: 점선 + 위치보고 fix 점 + 머리
                 ImU32 dc = IM_COL32(150,210,255,0);
-                for(size_t i=0;i+1<ppx.size(); i++){           // 점선: 세그먼트를 8px 대시로 분할
-                    ImVec2 a=ppx[i], b=ppx[i+1];
-                    float dx=b.x-a.x, dy=b.y-a.y, len=sqrtf(dx*dx+dy*dy);
-                    int nseg=(int)(len/8.f)+1;
-                    for(int k=0;k<nseg;k+=2){
-                        float t0=(float)k/nseg, t1=std::min(1.f,(float)(k+1)/nseg);
-                        gdl->AddLine(ImVec2(a.x+dx*t0,a.y+dy*t0), ImVec2(a.x+dx*t1,a.y+dy*t1),
-                                     dc | (140u<<24), 1.4f);
-                    }
-                }
+                for(size_t i=0;i+1<ppx.size(); i++) dash(ppx[i], ppx[i+1], dc | (115u<<24), 1.3f);
+                for(const auto& p : ppx) gdl->AddCircleFilled(p, 1.8f, dc | (190u<<24));  // fix 점
                 ImVec2 hd=ppx.back();
-                gdl->AddCircle(hd, 5.f, dc | (230u<<24), 0, 2.f);          // 머리(현재 위치)
+                gdl->AddCircleFilled(hd, 2.6f, dc | (255u<<24));           // 머리(현재 위치)
+                gdl->AddCircle(hd, 5.5f, dc | (200u<<24), 0, 1.6f);
                 gdl->AddText(ImVec2(hd.x+8, hd.y-7), dc | (220u<<24), ov.name);
+                if(ov.mmsi) gheads.push_back({ov.mmsi, hd});
             }
         }
-        // 2) 경보 펄스 링 — 경보 자체 좌표 기준 (가상/실선박 공통, UPDATE 마다 위치 따라감)
+        // 선박 머리 조회: typ7 항적 우선, 없으면 실선박 지도 마커 위치
+        auto head_of=[&](uint32_t mm, ImVec2& out)->bool{
+            if(!mm) return false;
+            for(const auto& h : gheads) if(h.mmsi==mm){ out=h.px; return true; }
+            for(const auto& mp : pts) if((uint32_t)mp.id==mm){ out=ll2px(mp.lat,mp.lon); return true; }
+            return false;
+        };
+        // 2) 경보 — 예측 이벤트 지점(경보 좌표)에 정밀 마커 + 선박 머리→지점 점선 투영
         for(const auto& r : galerts){
             if(!r.active || r.a.typ>=5) continue;
             ImU32 base = guard_typ_col(r.a.typ);
             ImVec2 c = ll2px(r.a.lat, r.a.lon);
+            ImVec2 hp;                                          // 경로 고려 접근 시각화
+            if(head_of(r.a.mmsi,  hp)) dash(hp, c, base | (150u<<24), 1.2f);
+            if(head_of(r.a.mmsi2, hp)) dash(hp, c, base | (150u<<24), 1.2f);
             float spd = r.a.sev>=3? 1.6f : 1.0f;               // 긴급(sev3)은 빠른 펄스
             for(int k=0;k<3;k++){
-                float ph = fmodf(tnow*spd + k/3.f, 1.f);       // 0→1 확장 위상
-                gdl->AddCircle(c, 7.f+ph*16.f, base | ((ImU32)((1.f-ph)*170.f)<<24), 0, 2.f);
+                float ph = fmodf(tnow*spd + k/3.f, 1.f);       // 0→1 확장 위상 (은은하게)
+                gdl->AddCircle(c, 8.f+ph*14.f, base | ((ImU32)((1.f-ph)*110.f)<<24), 0, 1.6f);
             }
-            gdl->AddCircle(c, 6.f, base | (200u<<24), 0, 1.5f);   // 고정 내륜 (위치 앵커)
+            // 정밀 이벤트 마커: 중심 점 + 얇은 링 + 십자 틱 (화면고정 크기 — 줌 시 점처럼 정확)
+            gdl->AddCircleFilled(c, 2.4f, base | (255u<<24));
+            gdl->AddCircle(c, 6.5f, base | (220u<<24), 0, 1.3f);
+            for(int k=0;k<4;k++){
+                float ax = (float)((k==0)-(k==1)), ay = (float)((k==2)-(k==3));
+                gdl->AddLine(ImVec2(c.x+ax*8.5f, c.y+ay*8.5f), ImVec2(c.x+ax*13.f, c.y+ay*13.f),
+                             base | (230u<<24), 1.3f);
+            }
         }
         gdl->PopClipRect();
     }

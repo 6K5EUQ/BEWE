@@ -22,8 +22,9 @@ def _now_ms():
     return int(time.time() * 1000)
 
 
-def emit_path(cfg, aid, typ, kind, name, pts, clear=False):
-    """경로 1개를 청크 분할 발행. pts=[(lat,lon),...]. clear=True 면 제거만."""
+def emit_path(cfg, aid, typ, kind, name, pts, clear=False, vmmsi=0):
+    """경로 1개를 청크 분할 발행. pts=[(lat,lon),...]. clear=True 면 제거만.
+    vmmsi: 항적 소유 (가상)MMSI — 청크0 선두 "M<mmsi>;" 토큰 (경보↔항적 연결)."""
     t = _now_ms()
     if clear:
         append_alert(cfg, make_doc(t, aid, typ, kind, 3, 0, 1, 0, 0, 0, -1, -1, "", ""))
@@ -31,6 +32,8 @@ def emit_path(cfg, aid, typ, kind, name, pts, clear=False):
     chunks = [pts[i:i + _PTS_PER_CHUNK] for i in range(0, len(pts), _PTS_PER_CHUNK)]
     for i, ch in enumerate(chunks):
         packed = ";".join(f"{la:.5f},{lo:.5f}" for la, lo in ch)
+        if i == 0 and vmmsi:
+            packed = f"M{vmmsi};" + packed
         append_alert(cfg, make_doc(t, aid, typ, kind, 1, i, len(chunks),
                                    ch[0][0], ch[0][1], 0, -1, -1,
                                    trunc_utf8(name, 38) if i == 0 else "", packed))
@@ -52,17 +55,17 @@ def publish_zones(cfg, log=None):
 # 가상 MMSI 999xxxxxx. 라벨/문구는 짧은 영어 (GUI 폰트에 한글 글리프 없음).
 def _demo_items(cfg):
     it = []
-    # 1) COLLISION: 진해만 중앙(35.12N 128.65E)으로 두 배 수렴
-    a = [(35.096 + 0.005 * i, 128.612 + 0.0086 * i) for i in range(6)]   # NE 진행
+    # 1) COLLISION: 두 항로 연장선 교점 = (35.1200, 128.6533) — 머리들은 교점 못미침
+    a = [(35.096 + 0.005 * i, 128.612 + 0.0086 * i) for i in range(5)]   # NE 진행
     b = [(35.150 - 0.0055 * i, 128.625 + 0.0052 * i) for i in range(6)]  # SE 진행
     it.append(("path", 999000001, "DEMO-A", a))
     it.append(("path", 999000002, "DEMO-B", b))
-    it.append(("alert", 1, 3, 999000001, 999000002, 35.1225, 128.6525, 92.0, 140.0, 210.0,
+    it.append(("alert", 1, 3, 999000001, 999000002, 35.1200, 128.6533, 92.0, 140.0, 210.0,
                "CPA 140m in 3.5 min: DEMO-A x DEMO-B", "Call both on VHF16. Order starboard turn."))
     # 2) GROUNDING: REEF-A(35.055~070N 128.640~662E, 진해만 남측 수역)로 남진
     c = [(35.108 - 0.006 * i, 128.648) for i in range(6)]
     it.append(("path", 999000003, "DEMO-C", c))
-    it.append(("alert", 2, 2, 999000003, 0, c[-1][0], c[-1][1], 78.0, -1.0, 300.0,
+    it.append(("alert", 2, 2, 999000003, 0, 35.070, 128.648, 78.0, -1.0, 300.0,
                "REEF-A entry in 5 min: DEMO-C", "Order course change away from reef."))
     # 3) ANOMALY: 가덕 서측 수역(35.10N 128.74E) 갈지자
     d = [(35.093, 128.735), (35.100, 128.744), (35.091, 128.750), (35.101, 128.757),
@@ -89,7 +92,7 @@ def demo(cfg, clear=False):
     for item in _demo_items(cfg):
         if item[0] == "path":
             _, mmsi, name, pts = item
-            emit_path(cfg, _demo_aid("P", mmsi), TYP_PATH, 1, name, pts, clear=clear)
+            emit_path(cfg, _demo_aid("P", mmsi), TYP_PATH, 1, name, pts, clear=clear, vmmsi=mmsi)
             n += 1
         else:
             _, typ, sev, mmsi, mmsi2, lat, lon, score, cpa, tcpa, msg, reco = item

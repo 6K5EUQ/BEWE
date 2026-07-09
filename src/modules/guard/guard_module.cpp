@@ -124,6 +124,10 @@ static void overlay_ingest(const GuardAlert& a){
     for(uint32_t i=0;i<total;i++){
         auto it=g_ovchunks[a.aid].find(i); if(it==g_ovchunks[a.aid].end()) return;
         const char* s=it->second.c_str();
+        if(*s=='M'){                                          // "M<mmsi>;" — 항적 소유 MMSI (경보 연결)
+            p.mmsi=(uint32_t)strtoul(s+1,nullptr,10);
+            const char* sc=strchr(s,';'); s = sc? sc+1 : s+strlen(s);
+        }
         while(*s){
             char* e=nullptr;
             float la=strtof(s,&e); if(e==s||*e!=',') break;
