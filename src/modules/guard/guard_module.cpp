@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <ctime>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -60,7 +61,7 @@ static bool parse_alert_line(const char* l, GuardAlert& a){
     if(strstr(l,"\"tcpa\":")) a.tcpa_s=(float)jf(l,"\"tcpa\":");
     jstr(l,"\"msg\":\"",a.msg,sizeof(a.msg));
     jstr(l,"\"reco\":\"",a.reco,sizeof(a.reco));
-    return a.t_ms>0 && a.aid!=0 && a.typ>=1 && a.typ<=5
+    return a.t_ms>0 && a.aid!=0 && a.typ>=1 && a.typ<=7   // 6=위험구역 7=데모항적 (보조)
         && a.sev>=1 && a.sev<=3 && a.state>=1 && a.state<=3;
 }
 
@@ -102,6 +103,39 @@ static void store_append(const GuardAlert& a){
     fclose(f);
 }
 
+// ── 보조 오버레이 조립 (typ=6 폴리곤 / typ=7 항적) ───────────────────────────
+// 꼭짓점은 reco 에 "lat,lon;lat,lon;..." 텍스트 패킹. 긴 경로는 청크 분할:
+// mmsi=청크 idx, mmsi2=총 청크 수, 이름(msg)은 청크 0 에만. state=3(CLEAR)=제거.
+static std::map<uint32_t, guard_mod::OverlayPath>            g_overlays;   // 조립 완료 (aid 키)
+static std::map<uint32_t, std::map<uint32_t,std::string>>   g_ovchunks;   // aid → idx → 꼭짓점 텍스트
+static std::map<uint32_t, guard_mod::OverlayPath>            g_ovmeta;     // aid → 메타(typ/kind/name)
+
+static void overlay_ingest(const GuardAlert& a){
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if(a.state==3){ g_overlays.erase(a.aid); g_ovchunks.erase(a.aid); g_ovmeta.erase(a.aid); return; }
+    uint32_t idx=a.mmsi, total=a.mmsi2? a.mmsi2 : 1;
+    auto& meta = g_ovmeta[a.aid];
+    meta.aid=a.aid; meta.typ=a.typ; meta.kind=a.sev;
+    if(idx==0 && a.msg[0]){ strncpy(meta.name, a.msg, sizeof(meta.name)-1); meta.name[sizeof(meta.name)-1]=0; }
+    g_ovchunks[a.aid][idx] = a.reco;
+    if(g_ovchunks[a.aid].size() < total) return;          // 청크 미완 — 대기
+    // 전 청크 도착 → idx 순 이어붙여 파싱
+    guard_mod::OverlayPath p = meta;
+    for(uint32_t i=0;i<total;i++){
+        auto it=g_ovchunks[a.aid].find(i); if(it==g_ovchunks[a.aid].end()) return;
+        const char* s=it->second.c_str();
+        while(*s){
+            char* e=nullptr;
+            float la=strtof(s,&e); if(e==s||*e!=',') break;
+            s=e+1; float lo=strtof(s,&e); if(e==s) break;
+            p.ll.push_back(la); p.ll.push_back(lo);
+            s = (*e==';')? e+1 : e;
+        }
+    }
+    if(p.ll.size()>=4) g_overlays[a.aid]=std::move(p);    // 최소 2점
+    g_ovchunks.erase(a.aid);
+}
+
 // ── 내부 log upsert (aid 기준; CLEAR 는 active=false 마킹, 기록 보존) ─────────
 static void upsert(const GuardAlert& a){
     std::lock_guard<std::mutex> lk(g_mtx);
@@ -124,7 +158,7 @@ int active_count(){
     std::lock_guard<std::mutex> lk(g_mtx);
     int n=0;
     for(const auto& r : g_log)
-        if(r.active && r.a.typ!=5) n++;             // 일일보고(5)는 경보 아님
+        if(r.active && r.a.typ<5) n++;              // 보고(5)/보조(6,7)는 경보 아님
     return n;
 }
 bool vessel_alert(uint32_t mmsi, uint8_t& typ, uint8_t& sev){
@@ -132,12 +166,18 @@ bool vessel_alert(uint32_t mmsi, uint8_t& typ, uint8_t& sev){
     std::lock_guard<std::mutex> lk(g_mtx);
     bool found=false; uint8_t bt=0, bs=0;
     for(const auto& r : g_log){
-        if(!r.active || r.a.typ==5) continue;
+        if(!r.active || r.a.typ>=5) continue;
         if(r.a.mmsi!=mmsi && r.a.mmsi2!=mmsi) continue;
         if(!found || r.a.sev>bs){ bt=r.a.typ; bs=r.a.sev; found=true; }
     }
     if(found){ typ=bt; sev=bs; }
     return found;
+}
+std::vector<OverlayPath> overlays(){
+    std::lock_guard<std::mutex> lk(g_mtx);
+    std::vector<OverlayPath> out; out.reserve(g_overlays.size());
+    for(const auto& kv : g_overlays) out.push_back(kv.second);
+    return out;
 }
 
 // ── JOIN/뷰어: 데이터 수신 → upsert ─────────────────────────────────────────
@@ -148,7 +188,8 @@ static void on_data(FFTViewer& v, const char* station, const uint8_t* d, size_t 
     GuardAlert a; guard_wire_to_msg(w, a);
     bewe_mod_stat_bump("guard", station, 0, a.t_ms);   // 채널 없음 → ch 0 고정
     station_disp(station, a.station, sizeof(a.station));
-    upsert(a);
+    if(a.typ>=6) overlay_ingest(a);                    // 위험구역/데모항적 → 오버레이 조립
+    else         upsert(a);                            // 경보/보고 → log
 }
 
 // ── HOST: ais_guard 데몬 확보 (ais_ai.cpp ai_ensure_daemon 패턴) ─────────────
@@ -220,7 +261,7 @@ static void tail_loop(){
             if(line.size()<8) continue;
             GuardAlert a;
             if(!parse_alert_line(line.c_str(), a)) continue;
-            store_append(a);                 // 일 단위 아카이브 (Central push 대상)
+            if(a.typ<=5) store_append(a);    // 경보/보고만 일 아카이브 (보조 6/7 은 재발행성 — 제외)
             GuardWireMsg w; guard_msg_to_wire(a, w);
             if(g_v) bewe_mod_emit(*g_v, "guard", &w, sizeof(w));   // 로컬 뷰는 on_data 로 반영
         }
@@ -250,9 +291,7 @@ static bool s_registered = [](){
     m.label = "GUARD";
     m.planned = false;
     m.target_modes = 0;                      // 채널 타깃형 아님 (AIS 디코드에 편승)
-#ifndef BEWE_HEADLESS
-    m.draw_content = &draw_content;
-#endif
+    // draw_content 없음 — 별도 탭 대신 모든 경보/구역/항적을 AIS 지도에 오버레이
     m.on_data = &on_data;
     bewe_register_module(m);
     return true;

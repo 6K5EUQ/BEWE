@@ -58,6 +58,8 @@ inline const char* guard_typ_name(uint8_t t){
         case 3: return "이상항적";
         case 4: return "위협선박";
         case 5: return "일일보고";
+        case 6: return "위험구역";   // 보조 레코드: zones.json 폴리곤 (경보 아님)
+        case 7: return "항적";       // 보조 레코드: 데모/가상 선박 경로 (경보 아님)
         default: return "";
     }
 }
@@ -79,17 +81,25 @@ struct AlertRow {
     bool       active = true;
 };
 
-std::vector<AlertRow> snapshot();   // 내부 log 사본 (aid 별 최신상태, 시간순)
-int  active_count();                // 활성 경보 수 (일일보고 typ=5 제외)
-// mmsi 가 관련된 활성 경보 중 최고 sev 1건 → typ/sev 채움 (ais_view 오버레이용)
+std::vector<AlertRow> snapshot();   // 내부 log 사본 (aid 별 최신상태, 시간순; typ 1~5)
+int  active_count();                // 활성 경보 수 (보조 typ>=5 제외)
+// mmsi 가 관련된 활성 경보 중 최고 sev 1건 → typ/sev 채움 (ais_view 행 강조용)
 bool vessel_alert(uint32_t mmsi, uint8_t& typ, uint8_t& sev);
+
+// 보조 오버레이 (typ=6 위험구역 / typ=7 데모 항적) — reco/msg 텍스트에
+// "lat,lon;lat,lon;..." 꼭짓점 패킹, 청크(mmsi=idx, mmsi2=총수) 조립 완료분만 반환.
+struct OverlayPath {
+    uint32_t aid = 0;
+    uint8_t  typ = 0;                // 6=폴리곤(닫힘) 7=폴리라인(항적, 끝점=현재)
+    uint8_t  kind = 0;               // sev 필드 재활용 (구역 종류/데모 심각도)
+    uint32_t mmsi = 0;               // typ=7: 가상 MMSI (라벨용)
+    char     name[40] = {};          // 구역명 / "[예시] 선명"
+    std::vector<float> ll;           // lat,lon 인터리브
+};
+std::vector<OverlayPath> overlays();   // 조립 완료 스냅샷 (지도 오버레이용)
 
 // HOST: ais_guard 데몬 확보 + alerts_live.jsonl tail 시작 (idempotent).
 // 반드시 단일스레드 시점(ais host_start 의 g_mgmt 락 내부)에서 호출 — fork 안전.
 void host_ensure(FFTViewer& v);
-
-#ifndef BEWE_HEADLESS
-void draw_content(FFTViewer& v, bool just_opened);   // guard_view.cpp (별도 작성)
-#endif
 
 } // namespace guard_mod

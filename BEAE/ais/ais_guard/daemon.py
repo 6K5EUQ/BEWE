@@ -14,7 +14,7 @@ from .alerts import (TYP_ANOMALY, TYP_COLLISION, TYP_GROUNDING, TYP_THREAT, Aler
 from .collision import check_pairs, check_zones, load_zones
 from .config import GuardConfig
 from .tracker import TrackStore, kst_day
-from . import report, threat
+from . import overlay, report, threat
 
 
 def _setup_logging(cfg):
@@ -161,6 +161,10 @@ def run(cfg: GuardConfig | None = None, scorer_fn=None, predict_fn=None):
     zones = load_zones(cfg.zones_path)
     log.info("guard daemon start (ais_dir=%s zones=%d scorer=%s predict=%s)",
              cfg.ais_dir, len(zones), scorer_fn is not None, predict_fn is not None)
+    try:
+        overlay.publish_zones(cfg, log)                 # 위험구역 폴리곤 → 지도 오버레이 전파
+    except Exception:
+        log.exception("zone publish failed")
 
     day = kst_day()
     next_tick = next_status = 0.0
@@ -198,6 +202,10 @@ def run(cfg: GuardConfig | None = None, scorer_fn=None, predict_fn=None):
                 log.exception("daily report failed")
             day = cur
             zones = load_zones(cfg.zones_path)          # 구역 정의 하루 1회 재적재
+            try:
+                overlay.publish_zones(cfg, log)         # 재적재분 오버레이 재전파
+            except Exception:
+                log.exception("zone publish failed")
         time.sleep(0.2)
 
     log.info("guard daemon stopping")

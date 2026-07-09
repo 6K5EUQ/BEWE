@@ -146,6 +146,11 @@ void draw_content(FFTViewer& v, bool just_opened){
     ImGuiIO& io = ImGui::GetIO();
     bool remote = bewe_mod_my_station()[0] != 0;
     if(just_opened && !remote) local_load_today(v);
+#ifdef BEWE_MODULE_GUARD
+    // guard 자동구독: AIS 구독 중이면 경보 스트림도 따라 켬 — GUARD 탭 안 열어도
+    // 지도 카드/링/행 강조가 AIS 창에서 바로 뜬다 (해제는 안 따라감: 무해).
+    if(remote && bewe_mod_recv("ais") && !bewe_mod_recv("guard")) bewe_mod_set_recv(v, "guard", true);
+#endif
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     float W=avail.x, H=avail.y, x0=ImGui::GetCursorPosX(), y0=ImGui::GetCursorPosY();
@@ -306,10 +311,6 @@ void draw_content(FFTViewer& v, bool just_opened){
     static std::vector<modview_map::MapPoint> pts;
     static std::vector<std::vector<float>>    trailbuf;
     static std::vector<std::string>           tip1, tip2;
-#ifdef BEWE_MODULE_GUARD
-    struct GuardRing { double lat, lon; uint8_t typ, sev; };   // 경보 선박 위치+유형 (펄스 링용)
-    static std::vector<GuardRing> grings;
-#endif
     // (지도 pts 는 아래 grps/mlatest/mtrail 집계 직후 "지도 오버레이 빌드" 블록에서 채움)
 
     // ── MMSI 그룹 집계 (표: 동일 MMSI 묶음, Up/Down/Cnt + 최신값. 캐시 게이팅) ──
@@ -369,9 +370,6 @@ void draw_content(FFTViewer& v, bool just_opened){
     //    마커=mlatest[최신 위치], 꼬리=mtrail[최근10분 전점]. 선택 배는 log 전체(전 항적).
     {
         pts.clear(); trailbuf.clear(); tip1.clear(); tip2.clear();
-#ifdef BEWE_MODULE_GUARD
-        grings.clear();
-#endif
         for(const AisGrp& G : grps){
             auto lit = mlatest.find(G.mmsi);
             if(lit==mlatest.end()) continue;                  // 최근 위치 없음(정적 only) → 마커 못 그림
@@ -398,10 +396,6 @@ void draw_content(FFTViewer& v, bool just_opened){
             if(m.heading!=511) snprintf(hdg,sizeof(hdg),"%d°",m.heading); else snprintf(hdg,sizeof(hdg),"-");
             snprintf(b2,sizeof(b2),"SOG : %s\nCOG : %s\nHDG : %s",sog,cog,hdg);
             tip1.emplace_back(b1); tip2.emplace_back(b2);
-#ifdef BEWE_MODULE_GUARD
-            { uint8_t gt, gs;                                   // 활성 경보 선박 → 펄스 링 대상
-              if(guard_mod::vessel_alert(G.mmsi, gt, gs)) grings.push_back({m.lat, m.lon, gt, gs}); }
-#endif
             pts.push_back(mpt);
         }
         for(size_t i=0;i<pts.size();i++){
@@ -464,6 +458,12 @@ void draw_content(FFTViewer& v, bool just_opened){
             const AisGrp& G=grps[r];
             const AisRecord& m=G.latest;
             ImGui::TableNextRow();
+#ifdef BEWE_MODULE_GUARD
+            { uint8_t gt,gs;                                     // 경보 선박 행 강조 (sev 색)
+              if(guard_mod::vessel_alert(G.mmsi,gt,gs))
+                  ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
+                      gs>=3? IM_COL32(120,32,26,95) : gs==2? IM_COL32(115,78,22,85) : IM_COL32(105,96,26,70)); }
+#endif
             char up[12]; hms(G.first,up);
             bool selrow = (sel_mmsi==G.mmsi);
             if(modview::row_col0(r, selrow, up)){               // col0 = Up time
@@ -639,23 +639,61 @@ void draw_content(FFTViewer& v, bool just_opened){
 #endif
     auto mres = modview_map::draw_map("##ais_map", mv, pts, ImVec2(mapw, map_h), just_opened, &stns, &links);
 #ifdef BEWE_MODULE_GUARD
-    // ── GUARD 경보 펄스 링: 유형색 3겹 확장 링 (위상 1/3 어긋남 + 알파 페이드) ──
-    if(!grings.empty()){
+    // ── GUARD 오버레이: 위험구역 폴리곤 + 데모항적 + 경보 펄스 링 (전부 지도 위) ──
+    // 유형색: 충돌=빨강 좌초=주황 이상항적=노랑 위협=보라 (카드/링/구역 공용)
+    auto guard_typ_col=[](uint8_t t)->ImU32{
+        switch(t){ case 1: return IM_COL32(255, 97, 82,0);
+                   case 2: return IM_COL32(255,158, 64,0);
+                   case 3: return IM_COL32(242,217, 89,0);
+                   case 4: return IM_COL32(204,140,255,0);
+                   default:return IM_COL32(115,179,255,0); } };
+    static std::vector<guard_mod::AlertRow> galerts;   // 이번 프레임 경보 스냅샷 (카드/링/상세 공용)
+    galerts = guard_mod::snapshot();
+    {
         ImDrawList* gdl = ImGui::GetWindowDrawList();
         gdl->PushClipRect(map_p0, ImVec2(map_p0.x+mapw, map_p0.y+map_h), true);
         auto ll2px=[&](double lat,double lon){                 // map_view.cpp 와 동일 등거리원통 투영
             return ImVec2((float)(map_p0.x+(lon-mv.lon0)/(mv.lon1-mv.lon0)*mapw),
                           (float)(map_p0.y+(mv.lat1-lat)/(mv.lat1-mv.lat0)*map_h)); };
         float tnow=(float)ImGui::GetTime();
-        for(const auto& g : grings){
-            ImU32 base;                                        // guard_view 유형색과 동일 (알파 0)
-            switch(g.typ){ case 1: base=IM_COL32(255, 97, 82,0); break;   // 충돌 빨강
-                           case 2: base=IM_COL32(255,158, 64,0); break;   // 좌초 주황
-                           case 3: base=IM_COL32(242,217, 89,0); break;   // 이상항적 노랑
-                           case 4: base=IM_COL32(204,140,255,0); break;   // 위협 보라
-                           default:base=IM_COL32(115,179,255,0); break; } // 기타 파랑
-            ImVec2 c = ll2px(g.lat, g.lon);
-            float spd = g.sev>=3? 1.6f : 1.0f;                 // 긴급(sev3)은 빠른 펄스
+        // 1) 위험구역(typ6, 닫힌 폴리곤) + 데모항적(typ7, 폴리라인) — 마커 아래 느낌의 저알파
+        static std::vector<ImVec2> ppx;
+        for(const auto& ov : guard_mod::overlays()){
+            ppx.clear();
+            for(size_t i=0;i+1<ov.ll.size(); i+=2) ppx.push_back(ll2px(ov.ll[i], ov.ll[i+1]));
+            if(ppx.size()<2) continue;
+            if(ov.typ==6){                                     // 위험구역: 채움+외곽+이름
+                ImU32 zc = ov.kind>=3? IM_COL32(255, 90, 80,0) :
+                           ov.kind==2? IM_COL32(255,158, 64,0) : IM_COL32(242,217, 89,0);
+                gdl->AddConcavePolyFilled(ppx.data(), (int)ppx.size(), zc | (26u<<24));
+                gdl->AddPolyline(ppx.data(), (int)ppx.size(), zc | (150u<<24), ImDrawFlags_Closed, 1.6f);
+                ImVec2 ctr(0,0); for(const auto& p : ppx){ ctr.x+=p.x; ctr.y+=p.y; }
+                ctr.x/=ppx.size(); ctr.y/=ppx.size();
+                ImVec2 ts=ImGui::CalcTextSize(ov.name);
+                gdl->AddText(ImVec2(ctr.x-ts.x*0.5f, ctr.y-ts.y*0.5f), zc | (210u<<24), ov.name);
+            } else {                                           // 데모항적: 점선 꼬리 + 머리 + 라벨
+                ImU32 dc = IM_COL32(150,210,255,0);
+                for(size_t i=0;i+1<ppx.size(); i++){           // 점선: 세그먼트를 8px 대시로 분할
+                    ImVec2 a=ppx[i], b=ppx[i+1];
+                    float dx=b.x-a.x, dy=b.y-a.y, len=sqrtf(dx*dx+dy*dy);
+                    int nseg=(int)(len/8.f)+1;
+                    for(int k=0;k<nseg;k+=2){
+                        float t0=(float)k/nseg, t1=std::min(1.f,(float)(k+1)/nseg);
+                        gdl->AddLine(ImVec2(a.x+dx*t0,a.y+dy*t0), ImVec2(a.x+dx*t1,a.y+dy*t1),
+                                     dc | (140u<<24), 1.4f);
+                    }
+                }
+                ImVec2 hd=ppx.back();
+                gdl->AddCircle(hd, 5.f, dc | (230u<<24), 0, 2.f);          // 머리(현재 위치)
+                gdl->AddText(ImVec2(hd.x+8, hd.y-7), dc | (220u<<24), ov.name);
+            }
+        }
+        // 2) 경보 펄스 링 — 경보 자체 좌표 기준 (가상/실선박 공통, UPDATE 마다 위치 따라감)
+        for(const auto& r : galerts){
+            if(!r.active || r.a.typ>=5) continue;
+            ImU32 base = guard_typ_col(r.a.typ);
+            ImVec2 c = ll2px(r.a.lat, r.a.lon);
+            float spd = r.a.sev>=3? 1.6f : 1.0f;               // 긴급(sev3)은 빠른 펄스
             for(int k=0;k<3;k++){
                 float ph = fmodf(tnow*spd + k/3.f, 1.f);       // 0→1 확장 위상
                 gdl->AddCircle(c, 7.f+ph*16.f, base | ((ImU32)((1.f-ph)*170.f)<<24), 0, 2.f);
@@ -682,6 +720,69 @@ void draw_content(FFTViewer& v, bool just_opened){
             nav_go(id);                                 // 표 행 클릭과 동일 — 그 선박 전체 이력 화면으로
         }
     }
+#ifdef BEWE_MODULE_GUARD
+    // ── GUARD 경보 카드 스택 (지도 좌상단) + 상태 칩 (지도 우하단) ──────────────
+    // 활성 경보만, sev↓→최신↓ 상위 5장. 클릭=선박 선택, hover=상세(점수/CPA/권고) 툴팁.
+    {
+        std::vector<const guard_mod::AlertRow*> act;
+        for(const auto& r : galerts) if(r.active && r.a.typ<5) act.push_back(&r);
+        std::sort(act.begin(), act.end(), [](const guard_mod::AlertRow* x, const guard_mod::AlertRow* y){
+            if(x->a.sev!=y->a.sev) return x->a.sev>y->a.sev;
+            return x->a.t_ms>y->a.t_ms; });
+        ImDrawList* gdl = ImGui::GetWindowDrawList();
+        { // 상태 칩: 우하단 스케일바 위 — 플랫폼 가동 표시 (경보 0=녹색, N=빨강)
+            char chip[24]; int n=(int)act.size();
+            if(n) snprintf(chip,sizeof(chip),"GUARD %d",n); else snprintf(chip,sizeof(chip),"GUARD");
+            ImVec2 ts=ImGui::CalcTextSize(chip);
+            ImVec2 c0(map_p0.x+mapw-ts.x-30, map_p0.y+map_h-46), c1(c0.x+ts.x+14, c0.y+ts.y+6);
+            gdl->AddRectFilled(c0, c1, n? IM_COL32(110,28,24,205) : IM_COL32(18,52,32,185), 4.f);
+            gdl->AddText(ImVec2(c0.x+7,c0.y+3), n? IM_COL32(255,165,150,255) : IM_COL32(120,205,150,220), chip);
+        }
+        const float CW=272.f, CH=38.f, GAP=5.f;
+        float cx=map_p0.x+8.f, cy=map_p0.y+34.f;               // ⛶(6..26) 아래부터
+        int shown=0;
+        for(const guard_mod::AlertRow* pr : act){
+            if(shown>=5){ char more[24]; snprintf(more,sizeof(more),"+%d건", (int)act.size()-shown);
+                gdl->AddText(ImVec2(cx+4,cy+2), IM_COL32(180,190,205,200), more); break; }
+            const GuardAlert& a=pr->a;
+            ImVec2 p0c(cx,cy), p1c(cx+CW, cy+CH);
+            bool hov = io.MousePos.x>=p0c.x&&io.MousePos.x<=p1c.x&&io.MousePos.y>=p0c.y&&io.MousePos.y<=p1c.y;
+            ImU32 tc = guard_typ_col(a.typ);
+            gdl->AddRectFilled(p0c,p1c, hov? IM_COL32(26,35,48,238):IM_COL32(14,21,31,216), 4.f);
+            gdl->AddRectFilled(p0c, ImVec2(p0c.x+3,p1c.y), tc | (255u<<24), 2.f);
+            char l1[64]; snprintf(l1,sizeof(l1),"%s  %u", guard_typ_name(a.typ), a.mmsi);
+            gdl->AddText(ImVec2(p0c.x+9,p0c.y+3), tc | (255u<<24), l1);
+            const char* sv=guard_sev_name(a.sev);
+            ImVec2 svs=ImGui::CalcTextSize(sv);
+            ImU32 svc = a.sev>=3? IM_COL32(255,95,85,255) : a.sev==2? IM_COL32(255,172,72,255) : IM_COL32(232,212,95,255);
+            gdl->AddText(ImVec2(p1c.x-svs.x-8,p0c.y+3), svc, sv);
+            gdl->PushClipRect(ImVec2(p0c.x+9,p0c.y+19), ImVec2(p1c.x-6,p1c.y-1), true);
+            gdl->AddText(ImVec2(p0c.x+9,p0c.y+19), IM_COL32(202,212,226,232), a.msg);
+            gdl->PopClipRect();
+            if(hov){
+                ImGui::BeginTooltip();                          // 상세: 필요한 정보만 (의사결정 지원)
+                ImGui::TextColored(ImVec4(0.95f,0.75f,0.35f,1.f), "%s · %s", guard_typ_name(a.typ), sv);
+                ImGui::TextUnformatted(a.msg);
+                if(a.score>0)   ImGui::Text("위험도 %.0f", a.score);
+                if(a.cpa_m>=0)  ImGui::Text("CPA %.0f m", a.cpa_m);
+                if(a.tcpa_s>=0) ImGui::Text("TCPA %.0f s", a.tcpa_s);
+                if(a.mmsi2)     ImGui::Text("상대선박 %u", a.mmsi2);
+                if(a.reco[0]){ ImGui::Separator();
+                    ImGui::PushTextWrapPos(320.f);
+                    ImGui::TextColored(ImVec4(0.62f,0.85f,0.62f,1.f), "권고: %s", a.reco);
+                    ImGui::PopTextWrapPos(); }
+                ImGui::EndTooltip();
+                if(ImGui::IsMouseClicked(ImGuiMouseButton_Left) && a.mmsi){
+                    sel_mmsi=a.mmsi; map_pin=a.mmsi;            // 카드 클릭 → 그 선박 선택 (지도클릭 덮음)
+                    { std::lock_guard<std::mutex> lk(mtx);
+                      for(const AisRecord& m : log) if(m.mmsi==a.mmsi && m.has_pos) focus=m; }
+                    has_focus=true; nav_go(a.mmsi);
+                }
+            }
+            cy += CH+GAP; shown++;
+        }
+    }
+#endif
 
     // 선택 배 focus 를 최신 수신 레코드로 매 프레임 갱신 (GPS 등 계속 업데이트)
     if(has_focus && sel_mmsi){
@@ -732,6 +833,23 @@ void draw_content(FFTViewer& v, bool just_opened){
             ImGui::Separator();
             char s[24]; snprintf(s,sizeof(s),"%.0f Hz",focus.cfo_hz); row("CFO", s, V);
         }
+#ifdef BEWE_MODULE_GUARD
+        // ── GUARD 활성 경보 (이 선박 관련; 권고 조치 = 의사결정 지원) ──
+        for(const auto& r : galerts){
+            if(!r.active || r.a.typ>=5 || (r.a.mmsi!=focus.mmsi && r.a.mmsi2!=focus.mmsi)) continue;
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.95f,0.62f,0.45f,1.f), "%s · %s",
+                               guard_typ_name(r.a.typ), guard_sev_name(r.a.sev));
+            if(r.a.score>0){ char s[16]; snprintf(s,sizeof(s),"%.0f",r.a.score); row("위험도", s, V); }
+            if(r.a.cpa_m>=0){ char s[20]; snprintf(s,sizeof(s),"%.0f m",r.a.cpa_m); row("CPA", s, V); }
+            if(r.a.tcpa_s>=0){ char s[20]; snprintf(s,sizeof(s),"%.0f s",r.a.tcpa_s); row("TCPA", s, V); }
+            if(r.a.reco[0]){
+                ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+ImGui::GetContentRegionAvail().x);
+                ImGui::TextColored(ImVec4(0.62f,0.85f,0.62f,1.f), "%s", r.a.reco);
+                ImGui::PopTextWrapPos();
+            }
+        }
+#endif
 #ifdef BEWE_MODULE_AIS_AI
         // ── Match_AI (DL 지문; has_rf 와 독립) ──
         if(focus.ai_status==2){ char s[32]; snprintf(s,sizeof(s),"%u (%.1f%%)",focus.ai_mmsi,focus.ai_conf/10.0);
