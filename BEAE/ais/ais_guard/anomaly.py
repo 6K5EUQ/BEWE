@@ -106,10 +106,10 @@ class AnomalyScorer:
             score = 100.0 * (traj_r if traj_r is not None else grid_r)
         why = []
         if traj_r is not None:
-            why.append(f"traj err p{traj_r*100:.0f}")
+            why.append(f"예측오차 상위 {100-traj_r*100:.0f}%")
         if grid_r is not None and grid_r >= 0.5:
-            why.append("rare area/speed/course")
-        return (float(min(max(score, 0.0), 100.0)), ", ".join(why) or "normal")
+            why.append("드문 해역·속력·침로")
+        return (float(min(max(score, 0.0), 100.0)), ", ".join(why) or "정상")
 
     def predict_fn(self, mmsi: int, track):
         """미래 8점 [(lat,lon)...] 또는 None (모델 없음/점 부족)."""

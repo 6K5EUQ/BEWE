@@ -2113,6 +2113,19 @@ void run_streaming_viewer(){
     {
         ImGuiIO& fio = ImGui::GetIO();
         fio.Fonts->AddFontDefault(); // 기본 13px
+        // 한글 글리프 병합: ASCII 는 기본 폰트 유지, 한글만 나눔에서 (1.92 동적 아틀라스
+        // — 필요 글리프만 로드). assets 동봉본 우선, 없으면 시스템 나눔/노토 폴백.
+        {
+            const char* kr[] = {
+                "assets/fonts/NanumBarunGothic.ttf",
+                "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
+                "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            };
+            ImFontConfig mc; mc.MergeMode = true;
+            for(const char* p : kr)
+                if(access(p, R_OK)==0){ fio.Fonts->AddFontFromFileTTF(p, 15.0f, &mc); break; }
+        }
         ImFontConfig cfg;
         cfg.SizePixels = 26.0f;
         g_bits_font = fio.Fonts->AddFontDefaultVector(&cfg);

@@ -765,7 +765,7 @@ void draw_content(FFTViewer& v, bool just_opened){
         float cx=map_p0.x+8.f, cy=map_p0.y+34.f;               // ⛶(6..26) 아래부터
         int shown=0;
         for(const guard_mod::AlertRow* pr : act){
-            if(shown>=5){ char more[24]; snprintf(more,sizeof(more),"+%d more", (int)act.size()-shown);
+            if(shown>=5){ char more[24]; snprintf(more,sizeof(more),"+%d건", (int)act.size()-shown);
                 gdl->AddText(ImVec2(cx+4,cy+2), IM_COL32(180,190,205,200), more); break; }
             const GuardAlert& a=pr->a;
             ImVec2 p0c(cx,cy), p1c(cx+CW, cy+CH);
@@ -786,10 +786,10 @@ void draw_content(FFTViewer& v, bool just_opened){
                 ImGui::BeginTooltip();                          // 상세: 필요한 정보만 (의사결정 지원)
                 ImGui::TextColored(ImVec4(0.95f,0.75f,0.35f,1.f), "%s  %s", guard_typ_name(a.typ), sv);
                 ImGui::TextUnformatted(a.msg);
-                if(a.score>0)   ImGui::Text("Risk %.0f", a.score);
+                if(a.score>0)   ImGui::Text("위험도 %.0f", a.score);
                 if(a.cpa_m>=0)  ImGui::Text("CPA %.0f m", a.cpa_m);
                 if(a.tcpa_s>=0) ImGui::Text("TCPA %.0f s", a.tcpa_s);
-                if(a.mmsi2)     ImGui::Text("Target %u", a.mmsi2);
+                if(a.mmsi2)     ImGui::Text("상대선박 %u", a.mmsi2);
                 if(a.reco[0]){ ImGui::Separator();
                     ImGui::PushTextWrapPos(320.f);
                     ImGui::TextColored(ImVec4(0.62f,0.85f,0.62f,1.f), "%s", a.reco);
@@ -863,7 +863,7 @@ void draw_content(FFTViewer& v, bool just_opened){
             ImGui::Separator();
             ImGui::TextColored(ImVec4(0.95f,0.62f,0.45f,1.f), "%s  %s",
                                guard_typ_name(r.a.typ), guard_sev_name(r.a.sev));
-            if(r.a.score>0){ char s[16]; snprintf(s,sizeof(s),"%.0f",r.a.score); row("Risk", s, V); }
+            if(r.a.score>0){ char s[16]; snprintf(s,sizeof(s),"%.0f",r.a.score); row("위험도", s, V); }
             if(r.a.cpa_m>=0){ char s[20]; snprintf(s,sizeof(s),"%.0f m",r.a.cpa_m); row("CPA", s, V); }
             if(r.a.tcpa_s>=0){ char s[20]; snprintf(s,sizeof(s),"%.0f s",r.a.tcpa_s); row("TCPA", s, V); }
             if(r.a.reco[0]){

@@ -61,23 +61,23 @@ def _demo_items(cfg):
     it.append(("path", 999000001, "DEMO-A", a))
     it.append(("path", 999000002, "DEMO-B", b))
     it.append(("alert", 1, 3, 999000001, 999000002, 35.1200, 128.6533, 92.0, 140.0, 210.0,
-               "CPA 140m in 3.5 min: DEMO-A x DEMO-B", "Call both on VHF16. Order starboard turn."))
+               "CPA 140m 3.5분 후: DEMO-A x DEMO-B", "양 선박 VHF16 호출, 우현 변침 지시"))
     # 2) GROUNDING: REEF-A(35.055~070N 128.640~662E, 진해만 남측 수역)로 남진
     c = [(35.108 - 0.006 * i, 128.648) for i in range(6)]
     it.append(("path", 999000003, "DEMO-C", c))
     it.append(("alert", 2, 2, 999000003, 0, 35.070, 128.648, 78.0, -1.0, 300.0,
-               "REEF-A entry in 5 min: DEMO-C", "Order course change away from reef."))
+               "REEF-A 5분 내 진입: DEMO-C", "즉시 변침 지시, 암초 회피"))
     # 3) ANOMALY: 가덕 서측 수역(35.10N 128.74E) 갈지자
     d = [(35.093, 128.735), (35.100, 128.744), (35.091, 128.750), (35.101, 128.757),
          (35.092, 128.761), (35.100, 128.766), (35.091, 128.760), (35.097, 128.752)]
     it.append(("path", 999000004, "DEMO-D", d))
     it.append(("alert", 3, 2, 999000004, 0, d[-1][0], d[-1][1], 88.0, -1.0, -1.0,
-               "Abnormal track 88: DEMO-D", "Watch track. Call on VHF."))
+               "이상항적 88점: DEMO-D", "항적 감시, VHF 호출"))
     # 4) SPOOF: 가덕수로(35.04~056N 128.79~80E) 북서진, RF 지문 불일치
     e = [(35.040 + 0.0032 * i, 128.802 - 0.0032 * i) for i in range(6)]
     it.append(("path", 999000005, "DEMO-E", e))
     it.append(("alert", 4, 3, 999000005, 0, e[-1][0], e[-1][1], 95.0, -1.0, -1.0,
-               "RF mismatch 6/6: DEMO-E", "Possible spoofed MMSI. Verify by VHF/radar."))
+               "RF지문 불일치 6/6: DEMO-E", "MMSI 위장 의심 — VHF·레이더 확인"))
     return it
 
 
