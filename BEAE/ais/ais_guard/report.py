@@ -35,7 +35,7 @@ def _hhmm(t_ms: int) -> str:
 def generate(cfg, day: str | None = None, emit: bool = True) -> str:
     """report_YYYYMMDD.md 작성, emit=True면 REPORT 경보도 발행. 경로 반환."""
     day = day or kst_day()
-    alerts = [a for a in _load(cfg, day) if a.get("typ") != TYP_REPORT]
+    alerts = [a for a in _load(cfg, day) if a.get("typ") in (1, 2, 3, 4)]   # 보조(6,7)/보고(5) 제외
     news = [a for a in alerts if a.get("st") == ST_NEW]
     by_typ = Counter(a["typ"] for a in news)
     by_sev = Counter(a["sev"] for a in news)
@@ -73,7 +73,7 @@ def generate(cfg, day: str | None = None, emit: bool = True) -> str:
     if ships:
         L += ["| MMSI | 경보수 | 최고점수 | 유형 | 마지막 메시지 |", "|---|---|---|---|---|"]
         for m, s in sorted(ships.items(), key=lambda kv: -kv[1]["max_score"]):
-            typs = "/".join(TYP_NAME[t] for t in sorted(s["typs"]))
+            typs = "/".join(TYP_NAME.get(t, "?") for t in sorted(s["typs"]))
             L.append(f"| {m} | {s['n']} | {s['max_score']:.0f} | {typs} | {s['last_msg']} |")
     else:
         L.append("(해당 선박 없음)")
