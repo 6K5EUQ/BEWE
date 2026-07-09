@@ -107,7 +107,10 @@ inline void header_bar(FFTViewer& v, const char* id, char* filter, size_t cap,
     char cid[40]; snprintf(cid,sizeof(cid),"##%s_hdr",id);
     ImGui::BeginChild(cid, ImVec2(W,30), false);
     float fh=ImGui::GetFrameHeight(), th=ImGui::GetTextLineHeight();
-    float tcy=15.f-th*0.5f, fy=15.f-fh*0.5f;
+    // 바(30px) 기하중심은 15지만, 바 배경 아래 body가 +2px 이음새를 두고 시작해 요소 아래가 더
+    // 비어 보인다. 콘텐츠 시각중심을 살짝 내려 위/아래 여백을 광학적으로 맞춤 (VCEN 으로 미세조정).
+    const float VCEN=16.5f;
+    float tcy=VCEN-th*0.5f, fy=VCEN-fh*0.5f;
     ImGui::SetCursorPos(ImVec2(12, fy));
     if(focus_filter) ImGui::SetKeyboardFocusHere();
     ImGui::SetNextItemWidth(220);
