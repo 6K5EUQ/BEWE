@@ -2083,10 +2083,15 @@ extern std::mutex g_db_list_mtx;
 void run_streaming_viewer(){
     float cf=450.0f;
 
-    // 한글 IME: GLFW 가 XIM(입력컨텍스트)을 UTF-8 로 열려면 LC_CTYPE 이 설정돼야 함.
-    // ibus/fcitx 조합 문자가 char 콜백으로 들어와 InputText 에 한글 입력 가능해진다.
-    // LC_NUMERIC 은 안 건드림(소수점 파싱 안전) — LC_CTYPE 만.
+    // 한글 IME: GLFW 가 XIM(입력컨텍스트)을 열려면 (1) LC_CTYPE UTF-8 (2) XMODIFIERS 로
+    // IM 서버 지정이 glfwInit 전에 돼 있어야 함. 데스크톱 런처 등에서 XMODIFIERS 가 상속
+    // 안 되면 IME 미동작 → 없을 때만 ibus 로 지정(있으면 사용자 설정 유지). LC_NUMERIC 불변.
     setlocale(LC_CTYPE, "");
+    if(!getenv("XMODIFIERS")) setenv("XMODIFIERS", "@im=ibus", 0);
+    // GLFW 오류(입력컨텍스트 생성 실패 등)를 파일에 남겨 IME 문제 진단
+    glfwSetErrorCallback([](int code, const char* desc){
+        FILE* f=fopen("/tmp/bewe_glfw.log","a"); if(f){ fprintf(f,"GLFW %d: %s\n",code,desc); fclose(f); }
+    });
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR,3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,3);
