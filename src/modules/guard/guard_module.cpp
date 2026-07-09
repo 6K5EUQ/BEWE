@@ -353,6 +353,70 @@ void eval_local_zones(const std::vector<VesselSnap>& vs, int64_t now_ms){
     }
 }
 
+// ── 플레이백 전용: 표시 스냅샷 → 충돌위험(CPA/TCPA) + 위조의심(Match_AI) ────────
+// 라이브에선 데몬이 이 둘을 emit 하므로 호출 안 함. 플레이백 커서 위치 기준 재계산.
+static std::map<uint32_t,int64_t> g_pb_live;   // aid → 마지막 조건참 (히스테리시스/CLEAR)
+
+static void pb_emit(const GuardAlert& a){ upsert_local(a); g_pb_live[a.aid]=a.t_ms; }
+
+void eval_playback_alerts(const std::vector<VesselSnap>& vs, int64_t now_ms){
+    const double CPA_WARN=500.0, CPA_CRIT=200.0, TCPA_MAX=600.0;
+    // 로컬 평면좌표(m): 스냅샷 중앙 위도 기준 등거리
+    double lat0=0; int nn=0; for(const auto& v : vs){ lat0+=v.lat; nn++; } if(nn) lat0/=nn;
+    double mlat=111320.0, mlon=111320.0*std::cos(lat0*M_PI/180.0);
+    auto vel=[&](const VesselSnap& v, double& vx, double& vy){
+        double s=(v.sog>0?v.sog:0)*0.514444;               // kt→m/s
+        double th=(v.cog>=0?v.cog:0)*M_PI/180.0;
+        vx=s*std::sin(th); vy=s*std::cos(th);              // x=동(경도), y=북(위도)
+    };
+    // 1) 충돌위험 — 모든 쌍 CPA/TCPA (다가오는 경우만)
+    for(size_t i=0;i<vs.size();i++) for(size_t j=i+1;j<vs.size();j++){
+        const auto& A=vs[i]; const auto& B=vs[j];
+        if(A.sog<0.5f && B.sog<0.5f) continue;              // 둘 다 정지 → 무의미
+        double dx=(B.lon-A.lon)*mlon, dy=(B.lat-A.lat)*mlat;
+        double avx,avy,bvx,bvy; vel(A,avx,avy); vel(B,bvx,bvy);
+        double rvx=bvx-avx, rvy=bvy-avy, rv2=rvx*rvx+rvy*rvy;
+        double tcpa = rv2>1e-6? -(dx*rvx+dy*rvy)/rv2 : -1;
+        if(tcpa<0 || tcpa>TCPA_MAX) continue;              // 멀어지는 중/너무 먼 미래
+        double cx=dx+rvx*tcpa, cy=dy+rvy*tcpa, cpa=std::sqrt(cx*cx+cy*cy);
+        if(cpa>CPA_WARN) continue;
+        uint32_t m1=std::min(A.mmsi,B.mmsi), m2=std::max(A.mmsi,B.mmsi);
+        char k[32]; snprintf(k,sizeof(k),"PBC:%u:%u",m1,m2);
+        GuardAlert a; a.t_ms=now_ms; a.aid=fnv32(k); a.typ=1;
+        a.sev = cpa<=CPA_CRIT?3:2; a.mmsi=m1; a.mmsi2=m2;
+        a.lat=(float)((A.lat+B.lat)/2); a.lon=(float)((A.lon+B.lon)/2);
+        a.score=(float)std::min(100.0,100.0*(1.0-cpa/CPA_WARN));
+        a.cpa_m=(float)cpa; a.tcpa_s=(float)tcpa;
+        snprintf(a.msg,sizeof(a.msg),"%.0fm %.1f분 후", cpa, tcpa/60.0);
+        snprintf(a.reco,sizeof(a.reco),"양 선박 VHF16 호출, 침로·속력 변경 지시");
+        pb_emit(a);
+    }
+    // 2) 위조의심 — Match_AI 지문이 신고 MMSI 와 불일치
+    for(const auto& v : vs){
+        if(v.ai_status!=2 || v.ai_mmsi==0 || v.ai_mmsi==v.mmsi) continue;
+        char k[24]; snprintf(k,sizeof(k),"PBT:%u",v.mmsi);
+        GuardAlert a; a.t_ms=now_ms; a.aid=fnv32(k); a.typ=4; a.sev=3;
+        a.mmsi=v.mmsi; a.mmsi2=v.ai_mmsi; a.lat=(float)v.lat; a.lon=(float)v.lon;
+        a.score=95.f; a.cpa_m=-1.f; a.tcpa_s=-1.f;
+        snprintf(a.reco,sizeof(a.reco),"위조 의심 — VHF·레이더 교차확인");   // msg=카드 구성
+        pb_emit(a);
+    }
+    // 3) 미갱신(조건 해소) → CLEAR (2초)
+    for(auto it=g_pb_live.begin(); it!=g_pb_live.end(); ){
+        if(now_ms - it->second > 2000){
+            GuardAlert a; a.t_ms=now_ms; a.aid=it->first; a.typ=1; a.sev=1; a.state=3;
+            upsert_local(a); it=g_pb_live.erase(it);
+        } else ++it;
+    }
+}
+void clear_playback_alerts(){
+    for(auto& kv : g_pb_live){
+        GuardAlert a; a.t_ms=wall_ms(); a.aid=kv.first; a.typ=1; a.sev=1; a.state=3;
+        upsert_local(a);
+    }
+    g_pb_live.clear();
+}
+
 // ── JOIN/뷰어: 데이터 수신 → upsert ─────────────────────────────────────────
 static void on_data(FFTViewer& v, const char* station, const uint8_t* d, size_t n){
     (void)v;

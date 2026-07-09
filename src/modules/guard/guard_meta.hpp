@@ -117,9 +117,15 @@ std::vector<LocalZone> local_zones();
 void add_local_zone(const char* name, uint8_t kind, double la0,double la1,double lo0,double lo1);
 bool del_local_zone(uint32_t idx);
 
-// 진입/진입예정 판정 (뷰어 ~1초 주기 호출; dead-reckon 10분 투영 → 경보 발화/해제)
-struct VesselSnap { uint32_t mmsi; double lat, lon; float sog, cog; };
+// 표시 스냅샷 1척 (라이브 pts 또는 플레이백 시각 위치). ai_* = Match_AI (위조 판정용)
+struct VesselSnap { uint32_t mmsi; double lat, lon; float sog, cog;
+                    uint8_t ai_status=0; uint32_t ai_mmsi=0; };
+// 진입/진입예정(진입위험) 판정 — 라이브·플레이백 공통 (뷰어 ~1초 주기)
 void eval_local_zones(const std::vector<VesselSnap>& vs, int64_t now_ms);
+// 플레이백 전용: 표시 스냅샷에서 충돌위험(CPA/TCPA)·위조의심(Match_AI) 계산 → 로컬 경보.
+// 라이브에선 데몬이 담당하므로 미호출; 라이브 복귀 시 clear_playback_alerts 로 정리.
+void eval_playback_alerts(const std::vector<VesselSnap>& vs, int64_t now_ms);
+void clear_playback_alerts();
 
 // HOST: ais_guard 데몬 확보 + alerts_live.jsonl tail 시작 (idempotent).
 // 반드시 단일스레드 시점(ais host_start 의 g_mgmt 락 내부)에서 호출 — fork 안전.

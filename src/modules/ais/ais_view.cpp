@@ -666,18 +666,29 @@ void draw_content(FFTViewer& v, bool just_opened){
                    default:return IM_COL32(115,179,255,0); } };
     static std::vector<guard_mod::AlertRow> galerts;   // 이번 프레임 경보 스냅샷 (카드/링/상세 공용)
     galerts = guard_mod::snapshot();
-    // 로컬 위험구역 진입/예정 평가 (1초 주기; 지도에 뜬 최신위치 기준 dead-reckon)
+    // 플레이백/Hist 중엔 데몬(원격) 라이브 경보는 그 시각과 무관 → 로컬(구역·플레이백계산)만 표시
+    if(tl_filt) galerts.erase(std::remove_if(galerts.begin(),galerts.end(),
+        [](const guard_mod::AlertRow& r){ return strcmp(r.a.station,"LOCAL")!=0; }), galerts.end());
+    // GUARD 평가 (1초 주기): 구역 진입은 라이브·플레이백 공통. 충돌·위조는 플레이백에서 GUI 계산.
     {
-        static int64_t last_eval=0; int64_t nowm=(int64_t)(ImGui::GetTime()*1000);
+        static int64_t last_eval=0; static bool prev_pb=false;
+        int64_t nowm=(int64_t)(ImGui::GetTime()*1000);
+        if(prev_pb && !tl_filt) guard_mod::clear_playback_alerts();   // 플레이백→라이브: PB경보 정리
+        prev_pb = tl_filt;
         if(nowm-last_eval>=1000){
             last_eval=nowm;
             std::vector<guard_mod::VesselSnap> vs; vs.reserve(pts.size());
-            for(const auto& mp : pts) vs.push_back({(uint32_t)mp.id, mp.lat, mp.lon,
-                                                    mp.heading, mp.heading});   // sog 근사 아래서 보정
-            { std::lock_guard<std::mutex> lk(mtx);                              // 정확한 sog/cog 채움
-              for(auto& s : vs){ for(auto it=log.rbegin(); it!=log.rend(); ++it)
-                    if(it->mmsi==s.mmsi){ s.sog=it->sog; s.cog=it->cog; break; } } }
+            for(const auto& mp : pts){ guard_mod::VesselSnap s{};
+                s.mmsi=(uint32_t)mp.id; s.lat=mp.lat; s.lon=mp.lon; s.sog=-1; s.cog=-1;
+                vs.push_back(s); }
+            // sog/cog/ai: 라이브=최신, 플레이백=재생커서(hi_ms) 이하 가장 최근 레코드
+            int64_t cut = tl_filt ? hi_ms : (int64_t)4e18;
+            { std::lock_guard<std::mutex> lk(mtx);
+              for(auto& s : vs){ for(auto it=log.rbegin(); it!=log.rend(); ++it){
+                    if(it->mmsi!=s.mmsi || it->t_ms>cut) continue;
+                    s.sog=it->sog; s.cog=it->cog; s.ai_status=it->ai_status; s.ai_mmsi=it->ai_mmsi; break; } } }
             guard_mod::eval_local_zones(vs, wall_now_ms());
+            if(tl_filt) guard_mod::eval_playback_alerts(vs, wall_now_ms());
         }
     }
     {
