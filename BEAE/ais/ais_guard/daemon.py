@@ -108,7 +108,7 @@ def _evaluate(cfg, tracker, book, zones, scorer_fn, predict_fn, now_ms):
         sev = 3 if n_mis / n_tot >= cfg.threat_crit_ratio else 2
         latest = tr.latest()
         extra = f", RF점프 {n_jump}회" if n_jump else ""
-        msg = f"RF지문 불일치 {n_mis}/{n_tot} (추정 MMSI {aim_top}){extra}"
+        msg = ""   # 카드/툴팁에서 "추정 선박: 이름(MMSI)" 로 구성
         reco = "MMSI 위장 의심 — VHF·레이더 교차확인"
         book.observe(TYP_THREAT, sev, tr.mmsi, aim_top, latest[1], latest[2],
                      score, -1.0, -1.0, msg, reco)
@@ -128,7 +128,7 @@ def _evaluate(cfg, tracker, book, zones, scorer_fn, predict_fn, now_ms):
                 continue
             sev = 3 if score >= cfg.anom_score_crit else 2
             latest = tr.latest()
-            msg = f"학습 항로 이탈: {why}"
+            msg = f"항로 이탈 식별: {why}"
             reco = "항적 감시, 지속 시 VHF 호출"
             book.observe(TYP_ANOMALY, sev, tr.mmsi, 0, latest[1], latest[2],
                          score, -1.0, -1.0, msg, reco)

@@ -887,9 +887,9 @@ void draw_content(FFTViewer& v, bool just_opened){
             for(auto it=log.rbegin(); it!=log.rend(); ++it)
                 if(it->mmsi==mm && it->name[0]){ strncpy(o,it->name,cap-1); o[cap-1]=0; return; }
         };
-        auto label=[&](uint32_t mm, char* o, size_t cap){
+        auto label=[&](uint32_t mm, char* o, size_t cap){   // 이름 있으면 이름만, 없으면 MMSI
             char nm[24]; name_of(mm,nm,sizeof(nm));
-            if(nm[0]) snprintf(o,cap,"%u (%s)",mm,nm); else snprintf(o,cap,"%u",mm);
+            if(nm[0]) snprintf(o,cap,"%s",nm); else snprintf(o,cap,"%u",mm);
         };
         ImDrawList* gdl = ImGui::GetWindowDrawList();
         { // 상태 칩: 우하단 스케일바 위 — 플랫폼 가동 표시 (경보 0=녹색, N=빨강)
@@ -922,9 +922,12 @@ void draw_content(FFTViewer& v, bool just_opened){
             gdl->AddText(ImVec2(p0c.x+9,p0c.y+4), tc | (255u<<24), l1);
             gdl->PopClipRect();
             gdl->AddText(ImVec2(p1c.x-svs.x-8,p0c.y+4), svc, sv);
-            // 하단: 짧은 상황 (거리·시각만, 선박 중복 없음)
+            // 하단: 짧은 상황. 위조의심(typ4)은 "추정 선박: 이름(없으면 MMSI)"
+            char m2buf[80]; const char* mline=a.msg;
+            if(a.typ==4){ char lb[32]; label(a.mmsi2, lb, sizeof(lb));
+                          snprintf(m2buf,sizeof(m2buf),"추정 선박: %s", lb); mline=m2buf; }
             gdl->PushClipRect(ImVec2(p0c.x+9,p0c.y+20), ImVec2(p1c.x-6,p1c.y-1), true);
-            gdl->AddText(ImVec2(p0c.x+9,p0c.y+20), IM_COL32(198,208,222,230), a.msg);
+            gdl->AddText(ImVec2(p0c.x+9,p0c.y+20), IM_COL32(198,208,222,230), mline);
             gdl->PopClipRect();
             if(hov){
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14,12));
@@ -935,8 +938,9 @@ void draw_content(FFTViewer& v, bool just_opened){
                     a.sev>=3?ImVec4(1,0.37f,0.33f,1):a.sev==2?ImVec4(1,0.67f,0.28f,1):ImVec4(0.9f,0.83f,0.37f,1),
                     " %s", sv);
                 { char lb[48]; label(a.mmsi,lb,sizeof(lb)); ImGui::Text("선박  %s", lb); }
-                if(a.mmsi2){ char lb[48]; label(a.mmsi2,lb,sizeof(lb)); ImGui::Text("상대  %s", lb); }
-                if(a.msg[0]) ImGui::TextUnformatted(a.msg);
+                if(a.mmsi2){ char lb[48]; label(a.mmsi2,lb,sizeof(lb));
+                             ImGui::Text("%s  %s", a.typ==4? "추정 선박":"상대  ", lb); }
+                if(a.typ!=4 && a.msg[0]) ImGui::TextUnformatted(a.msg);
                 if(a.reco[0]){
                     ImGui::Dummy(ImVec2(0,1));
                     ImGui::PushTextWrapPos(300.f);
@@ -1020,7 +1024,7 @@ void draw_content(FFTViewer& v, bool just_opened){
                 uint32_t om=(r.a.mmsi2==focus.mmsi)? r.a.mmsi : r.a.mmsi2;
                 char onm[24]={0}; { std::lock_guard<std::mutex> lk(mtx);
                     for(auto it=log.rbegin(); it!=log.rend(); ++it) if(it->mmsi==om && it->name[0]){ strncpy(onm,it->name,23); break; } }
-                char s[48]; if(onm[0]) snprintf(s,sizeof(s),"%u (%s)",om,onm); else snprintf(s,sizeof(s),"%u",om);
+                char s[48]; if(onm[0]) snprintf(s,sizeof(s),"%s",onm); else snprintf(s,sizeof(s),"%u",om);
                 row("상대", s, V);
             }
             if(r.a.reco[0]){
