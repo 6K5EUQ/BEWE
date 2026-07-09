@@ -84,7 +84,7 @@ def _evaluate(cfg, tracker, book, zones, scorer_fn, predict_fn, now_ms):
         prox = max(0.0, 1.0 - cpa / cfg.cpa_warn_m)
         tfac = max(0.0, 1.0 - max(tcpa, 0.0) / cfg.tcpa_max_s)
         score = min(100.0, 100.0 * (0.6 * prox + 0.4 * tfac))
-        msg = f"CPA {cpa:.0f}m {_tcpa_txt(tcpa)}: {_ship(a)} x {_ship(b)}"
+        msg = f"{cpa:.0f}m {_tcpa_txt(tcpa)}"
         reco = "양 선박 VHF16 호출, 침로·속력 변경 지시"
         book.observe(TYP_COLLISION, sev, m1, m2, lat, lon, score, cpa, tcpa, msg, reco)
 
@@ -94,7 +94,7 @@ def _evaluate(cfg, tracker, book, zones, scorer_fn, predict_fn, now_ms):
         sev = 3 if inside else 2
         score = 100.0 if inside else min(100.0, 100.0 * (1.0 - eta / cfg.zone_horizon_s))
         what = "진입" if inside else f"{eta / 60:.0f}분 내 진입"
-        msg = f"{z['name']} {what}: {_ship(tr)}"
+        msg = f"{z['name']} {what}"
         reco = "즉시 변침 지시, 구역 이탈 유도"
         book.observe(TYP_GROUNDING, sev, tr.mmsi, 0, lat, lon, score, -1.0,
                      0.0 if inside else eta, msg, reco)
@@ -108,7 +108,7 @@ def _evaluate(cfg, tracker, book, zones, scorer_fn, predict_fn, now_ms):
         sev = 3 if n_mis / n_tot >= cfg.threat_crit_ratio else 2
         latest = tr.latest()
         extra = f", RF점프 {n_jump}회" if n_jump else ""
-        msg = f"RF지문 불일치 {n_mis}/{n_tot} (추정 {aim_top}){extra}: {_ship(tr)}"
+        msg = f"RF지문 불일치 {n_mis}/{n_tot} (추정 MMSI {aim_top}){extra}"
         reco = "MMSI 위장 의심 — VHF·레이더 교차확인"
         book.observe(TYP_THREAT, sev, tr.mmsi, aim_top, latest[1], latest[2],
                      score, -1.0, -1.0, msg, reco)
@@ -128,7 +128,7 @@ def _evaluate(cfg, tracker, book, zones, scorer_fn, predict_fn, now_ms):
                 continue
             sev = 3 if score >= cfg.anom_score_crit else 2
             latest = tr.latest()
-            msg = f"이상항적 {score:.0f}점: {_ship(tr)} — {why}"
+            msg = f"학습 항로 이탈: {why}"
             reco = "항적 감시, 지속 시 VHF 호출"
             book.observe(TYP_ANOMALY, sev, tr.mmsi, 0, latest[1], latest[2],
                          score, -1.0, -1.0, msg, reco)

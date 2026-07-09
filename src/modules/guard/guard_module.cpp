@@ -246,13 +246,13 @@ void demo_toggle(){
     demo_path(0xD0000004u, 999000004u, "GEUMRYONG HO", D,15, on);
     demo_path(0xD0000005u, 999000005u, "MYEONGSUNG 5", E, 6, on);
     demo_alert(1,3, 999000001u,999000002u, 35.1107f,128.6430f, 92.f,140.f,210.f,
-               "CPA 140m 3.5분 후: HAEJIN NO.7 x SEONGWOO 3", "양 선박 VHF16 호출, 우현 변침 지시", on);
+               "140m 3.5분 후", "양 선박 VHF16 호출, 우현 변침 지시", on);
     demo_alert(2,2, 999000003u,0, 35.1000f,128.6790f, 78.f,-1.f,300.f,
-               "진해만 동측 암초 5분 내 진입: DAEYANG 21", "즉시 변침 지시, 암초 회피", on);
+               "진해만 동측 암초 5분 내 진입", "즉시 변침 지시, 암초 회피", on);
     demo_alert(3,2, 999000004u,0, 35.0378f,128.6106f, 88.f,-1.f,-1.f,
-               "이상항적 88점: GEUMRYONG HO", "항적 감시, VHF 호출", on);
+               "학습 항로 이탈: 예측오차 상위 12%", "항적 감시, VHF 호출", on);
     demo_alert(4,3, 999000005u,0, 34.9920f,128.8000f, 95.f,-1.f,-1.f,
-               "RF지문 불일치 6/6: MYEONGSUNG 5", "MMSI 위장 의심 — VHF·레이더 확인", on);
+               "RF지문 불일치 6/6 (추정 MMSI 440185090)", "MMSI 위장 의심 — VHF·레이더 확인", on);
 }
 
 // ── 로컬 위험구역 (우클릭 드래그 등록; 뷰어 파일 영속 + 진입/예정 경보) ────────
@@ -334,9 +334,9 @@ void eval_local_zones(const std::vector<VesselSnap>& vs, int64_t now_ms){
                     a.lat=(float)v.lat; a.lon=(float)v.lon;
                     a.score = in?100.f:(float)(100.0*(1.0-eta/600.0));
                     a.cpa_m=-1.f; a.tcpa_s = in?0.f:(float)eta;
-                    if(in) snprintf(a.msg,sizeof(a.msg),"%s 진입: %u", z.name, v.mmsi);
-                    else   snprintf(a.msg,sizeof(a.msg),"%s %.0f분 내 진입 예상: %u", z.name, eta/60.0, v.mmsi);
-                    snprintf(a.reco,sizeof(a.reco),"침로 변경 지시, 구역 이탈 유도");
+                    if(in) snprintf(a.msg,sizeof(a.msg),"%s 진입", z.name);
+                    else   snprintf(a.msg,sizeof(a.msg),"%s %.0f분 내 진입", z.name, eta/60.0);
+                    snprintf(a.reco,sizeof(a.reco),"즉시 변침 지시, 구역 이탈 유도");
                     upsert_local(a);
                 }
                 if(first) live[aid]=now_ms; else it->second = (in||eta>=0)? now_ms : it->second;

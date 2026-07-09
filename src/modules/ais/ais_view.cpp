@@ -880,6 +880,17 @@ void draw_content(FFTViewer& v, bool just_opened){
         std::sort(act.begin(), act.end(), [](const guard_mod::AlertRow* x, const guard_mod::AlertRow* y){
             if(x->a.sev!=y->a.sev) return x->a.sev>y->a.sev;
             return x->a.t_ms>y->a.t_ms; });
+        // MMSI → 선명 조회 (AIS log; 없으면 빈문자). "MMSI (이름)" 라벨 생성.
+        auto name_of=[&](uint32_t mm, char* o, size_t cap){
+            o[0]=0; if(!mm) return;
+            std::lock_guard<std::mutex> lk(mtx);
+            for(auto it=log.rbegin(); it!=log.rend(); ++it)
+                if(it->mmsi==mm && it->name[0]){ strncpy(o,it->name,cap-1); o[cap-1]=0; return; }
+        };
+        auto label=[&](uint32_t mm, char* o, size_t cap){
+            char nm[24]; name_of(mm,nm,sizeof(nm));
+            if(nm[0]) snprintf(o,cap,"%u (%s)",mm,nm); else snprintf(o,cap,"%u",mm);
+        };
         ImDrawList* gdl = ImGui::GetWindowDrawList();
         { // 상태 칩: 우하단 스케일바 위 — 플랫폼 가동 표시 (경보 0=녹색, N=빨강)
             char chip[24]; int n=(int)act.size();
@@ -889,7 +900,7 @@ void draw_content(FFTViewer& v, bool just_opened){
             gdl->AddRectFilled(c0, c1, n? IM_COL32(110,28,24,205) : IM_COL32(18,52,32,185), 4.f);
             gdl->AddText(ImVec2(c0.x+7,c0.y+3), n? IM_COL32(255,165,150,255) : IM_COL32(120,205,150,220), chip);
         }
-        const float CW=272.f, CH=38.f, GAP=5.f;
+        const float CW=286.f, CH=38.f, GAP=5.f;
         float cx=map_p0.x+8.f, cy=map_p0.y+34.f;               // ⛶(6..26) 아래부터
         int shown=0;
         for(const guard_mod::AlertRow* pr : act){
@@ -901,28 +912,39 @@ void draw_content(FFTViewer& v, bool just_opened){
             ImU32 tc = guard_typ_col(a.typ);
             gdl->AddRectFilled(p0c,p1c, hov? IM_COL32(26,35,48,238):IM_COL32(14,21,31,216), 4.f);
             gdl->AddRectFilled(p0c, ImVec2(p0c.x+3,p1c.y), tc | (255u<<24), 2.f);
-            char l1[64]; snprintf(l1,sizeof(l1),"%s  %u", guard_typ_name(a.typ), a.mmsi);
-            gdl->AddText(ImVec2(p0c.x+9,p0c.y+3), tc | (255u<<24), l1);
+            // 상단: "유형 MMSI (이름)"  +  우측 심각도
+            char lbl[48]; label(a.mmsi,lbl,sizeof(lbl));
+            char l1[80]; snprintf(l1,sizeof(l1),"%s  %s", guard_typ_name(a.typ), lbl);
             const char* sv=guard_sev_name(a.sev);
             ImVec2 svs=ImGui::CalcTextSize(sv);
             ImU32 svc = a.sev>=3? IM_COL32(255,95,85,255) : a.sev==2? IM_COL32(255,172,72,255) : IM_COL32(232,212,95,255);
-            gdl->AddText(ImVec2(p1c.x-svs.x-8,p0c.y+3), svc, sv);
-            gdl->PushClipRect(ImVec2(p0c.x+9,p0c.y+19), ImVec2(p1c.x-6,p1c.y-1), true);
-            gdl->AddText(ImVec2(p0c.x+9,p0c.y+19), IM_COL32(202,212,226,232), a.msg);
+            gdl->PushClipRect(p0c, ImVec2(p1c.x-svs.x-12,p1c.y), true);
+            gdl->AddText(ImVec2(p0c.x+9,p0c.y+4), tc | (255u<<24), l1);
+            gdl->PopClipRect();
+            gdl->AddText(ImVec2(p1c.x-svs.x-8,p0c.y+4), svc, sv);
+            // 하단: 짧은 상황 (거리·시각만, 선박 중복 없음)
+            gdl->PushClipRect(ImVec2(p0c.x+9,p0c.y+20), ImVec2(p1c.x-6,p1c.y-1), true);
+            gdl->AddText(ImVec2(p0c.x+9,p0c.y+20), IM_COL32(198,208,222,230), a.msg);
             gdl->PopClipRect();
             if(hov){
-                ImGui::BeginTooltip();                          // 상세: 필요한 정보만 (의사결정 지원)
-                ImGui::TextColored(ImVec4(0.95f,0.75f,0.35f,1.f), "%s  %s", guard_typ_name(a.typ), sv);
-                ImGui::TextUnformatted(a.msg);
-                if(a.score>0)   ImGui::Text("위험도 %.0f", a.score);
-                if(a.cpa_m>=0)  ImGui::Text("CPA %.0f m", a.cpa_m);
-                if(a.tcpa_s>=0) ImGui::Text("TCPA %.0f s", a.tcpa_s);
-                if(a.mmsi2)     ImGui::Text("상대선박 %u", a.mmsi2);
-                if(a.reco[0]){ ImGui::Separator();
-                    ImGui::PushTextWrapPos(320.f);
-                    ImGui::TextColored(ImVec4(0.62f,0.85f,0.62f,1.f), "%s", a.reco);
-                    ImGui::PopTextWrapPos(); }
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14,12));
+                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8,7));
+                ImGui::BeginTooltip();
+                ImGui::TextColored(ImVec4(0.95f,0.75f,0.35f,1.f), "%s", guard_typ_name(a.typ));
+                ImGui::SameLine(); ImGui::TextColored(
+                    a.sev>=3?ImVec4(1,0.37f,0.33f,1):a.sev==2?ImVec4(1,0.67f,0.28f,1):ImVec4(0.9f,0.83f,0.37f,1),
+                    " %s", sv);
+                { char lb[48]; label(a.mmsi,lb,sizeof(lb)); ImGui::Text("선박  %s", lb); }
+                if(a.mmsi2){ char lb[48]; label(a.mmsi2,lb,sizeof(lb)); ImGui::Text("상대  %s", lb); }
+                if(a.msg[0]) ImGui::TextUnformatted(a.msg);
+                if(a.reco[0]){
+                    ImGui::Dummy(ImVec2(0,1));
+                    ImGui::PushTextWrapPos(300.f);
+                    ImGui::TextColored(ImVec4(0.55f,0.90f,0.58f,1.f), "%s", a.reco);   // 초록 권고
+                    ImGui::PopTextWrapPos();
+                }
                 ImGui::EndTooltip();
+                ImGui::PopStyleVar(2);
                 if(ImGui::IsMouseClicked(ImGuiMouseButton_Left) && a.mmsi){
                     sel_mmsi=a.mmsi; map_pin=a.mmsi;            // 카드 클릭 → 그 선박 선택 (지도클릭 덮음)
                     { std::lock_guard<std::mutex> lk(mtx);
@@ -985,18 +1007,25 @@ void draw_content(FFTViewer& v, bool just_opened){
             char s[24]; snprintf(s,sizeof(s),"%.0f Hz",focus.cfo_hz); row("CFO", s, V);
         }
 #ifdef BEWE_MODULE_GUARD
-        // ── GUARD 활성 경보 (이 선박 관련; 권고 조치 = 의사결정 지원) ──
+        // ── GUARD 활성 경보 (이 선박 관련; 상황+상대선박+초록 권고) ──
         for(const auto& r : galerts){
             if(!r.active || r.a.typ>=5 || (r.a.mmsi!=focus.mmsi && r.a.mmsi2!=focus.mmsi)) continue;
             ImGui::Separator();
-            ImGui::TextColored(ImVec4(0.95f,0.62f,0.45f,1.f), "%s  %s",
-                               guard_typ_name(r.a.typ), guard_sev_name(r.a.sev));
-            if(r.a.score>0){ char s[16]; snprintf(s,sizeof(s),"%.0f",r.a.score); row("위험도", s, V); }
-            if(r.a.cpa_m>=0){ char s[20]; snprintf(s,sizeof(s),"%.0f m",r.a.cpa_m); row("CPA", s, V); }
-            if(r.a.tcpa_s>=0){ char s[20]; snprintf(s,sizeof(s),"%.0f s",r.a.tcpa_s); row("TCPA", s, V); }
+            ImGui::TextColored(ImVec4(0.95f,0.62f,0.45f,1.f), "%s", guard_typ_name(r.a.typ));
+            ImGui::SameLine();
+            ImGui::TextColored(r.a.sev>=3?ImVec4(1,0.37f,0.33f,1):r.a.sev==2?ImVec4(1,0.67f,0.28f,1):ImVec4(0.9f,0.83f,0.37f,1),
+                               " %s", guard_sev_name(r.a.sev));
+            if(r.a.msg[0]) ImGui::TextColored(V, "%s", r.a.msg);
+            if(r.a.mmsi2){                                   // 상대선박 MMSI (이름)
+                uint32_t om=(r.a.mmsi2==focus.mmsi)? r.a.mmsi : r.a.mmsi2;
+                char onm[24]={0}; { std::lock_guard<std::mutex> lk(mtx);
+                    for(auto it=log.rbegin(); it!=log.rend(); ++it) if(it->mmsi==om && it->name[0]){ strncpy(onm,it->name,23); break; } }
+                char s[48]; if(onm[0]) snprintf(s,sizeof(s),"%u (%s)",om,onm); else snprintf(s,sizeof(s),"%u",om);
+                row("상대", s, V);
+            }
             if(r.a.reco[0]){
                 ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+ImGui::GetContentRegionAvail().x);
-                ImGui::TextColored(ImVec4(0.62f,0.85f,0.62f,1.f), "%s", r.a.reco);
+                ImGui::TextColored(ImVec4(0.55f,0.90f,0.58f,1.f), "%s", r.a.reco);
                 ImGui::PopTextWrapPos();
             }
         }

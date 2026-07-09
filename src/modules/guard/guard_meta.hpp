@@ -55,7 +55,7 @@ inline void guard_wire_to_msg(const GuardWireMsg& w, GuardAlert& a){
 inline const char* guard_typ_name(uint8_t t){
     switch(t){
         case 1: return "충돌위험";
-        case 2: return "좌초위험";
+        case 2: return "진입위험";   // 위험구역(암초/기상/군사/항행금지 등) 진입·진입예정
         case 3: return "이상항적";
         case 4: return "위장의심";
         case 5: return "일일보고";
