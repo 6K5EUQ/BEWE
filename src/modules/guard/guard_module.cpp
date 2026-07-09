@@ -355,9 +355,23 @@ void eval_local_zones(const std::vector<VesselSnap>& vs, int64_t now_ms){
 
 // ── 플레이백 전용: 표시 스냅샷 → 충돌위험(CPA/TCPA) + 위조의심(Match_AI) ────────
 // 라이브에선 데몬이 이 둘을 emit 하므로 호출 안 함. 플레이백 커서 위치 기준 재계산.
-static std::map<uint32_t,int64_t> g_pb_live;   // aid → 마지막 조건참 (히스테리시스/CLEAR)
+struct PbState { int64_t seen; int hits; uint8_t typ; uint32_t mmsi, mmsi2; };
+static std::map<uint32_t,PbState> g_pb;        // aid → 조건참/성립횟수/식별(CLEAR 시 typ 복원)
+static bool (*g_land_fn)(double,double,double,double) = nullptr;
+void set_land_check(bool (*fn)(double,double,double,double)){ g_land_fn=fn; }
 
-static void pb_emit(const GuardAlert& a){ upsert_local(a); g_pb_live[a.aid]=a.t_ms; }
+// 지속성: 조건이 2회(≈2초) 연속 성립해야 발화 → 단발 노이즈 제거
+static void pb_emit(GuardAlert a){
+    auto& st=g_pb[a.aid];
+    st.seen=a.t_ms; st.hits++; st.typ=a.typ; st.mmsi=a.mmsi; st.mmsi2=a.mmsi2;
+    if(st.hits<2){ return; }                   // 아직 후보 — 대기 (미표시)
+    upsert_local(a);
+}
+static void pb_clear_one(uint32_t aid, const PbState& st, int64_t t){
+    GuardAlert a; a.t_ms=t; a.aid=aid; a.typ=st.typ; a.sev=1; a.state=3;
+    a.mmsi=st.mmsi; a.mmsi2=st.mmsi2;          // 원 typ/mmsi 복원 (이력 정합)
+    upsert_local(a);
+}
 
 void eval_playback_alerts(const std::vector<VesselSnap>& vs, int64_t now_ms){
     const double CPA_WARN=300.0, CPA_CRIT=100.0, TCPA_MAX=360.0;   // 6분·300/100m
@@ -365,14 +379,15 @@ void eval_playback_alerts(const std::vector<VesselSnap>& vs, int64_t now_ms){
     const double MIN_REL=0.8;        // 상대속도 하한(m/s ≈1.5kt) — 평행·동속·근접정지 제외
     double lat0=0; int nn=0; for(const auto& v : vs){ lat0+=v.lat; nn++; } if(nn) lat0/=nn;
     double mlat=111320.0, mlon=111320.0*std::cos(lat0*M_PI/180.0);
-    // 속도벡터: 저속·정박·계류는 COG 신뢰 불가 → 0 (정지). 반환 = 이동 여부.
+    // 속도벡터: 평활속도(vknown) 우선. 없으면 순시 SOG/COG(저속·정박은 정지). 반환=이동 여부.
     auto vel=[&](const VesselSnap& v, double& vx, double& vy)->bool{
+        if(v.vknown){ vx=v.vx; vy=v.vy; return (vx*vx+vy*vy) >= (MOVE_KT*0.514444)*(MOVE_KT*0.514444); }
         bool moving = v.sog>=(float)MOVE_KT && v.cog>=0.f && v.nav_status!=1 && v.nav_status!=5;
         if(!moving){ vx=vy=0; return false; }
         double s=v.sog*0.514444, th=v.cog*M_PI/180.0;
         vx=s*std::sin(th); vy=s*std::cos(th); return true;
     };
-    // 1) 충돌위험 — 등속직선 CPA/TCPA (실제 접근·유의미 상대속도만)
+    // 1) 충돌위험 — 등속직선 CPA/TCPA (실제 접근·유의미 상대속도·육지 미차단만)
     for(size_t i=0;i<vs.size();i++) for(size_t j=i+1;j<vs.size();j++){
         const auto& A=vs[i]; const auto& B=vs[j];
         double avx,avy,bvx,bvy; bool ma=vel(A,avx,avy), mb=vel(B,bvx,bvy);
@@ -385,6 +400,7 @@ void eval_playback_alerts(const std::vector<VesselSnap>& vs, int64_t now_ms){
         if(tcpa<0 || tcpa>TCPA_MAX) continue;               // 멀어지는 중/너무 먼 미래
         double cx=dx+rvx*tcpa, cy=dy+rvy*tcpa, cpa=std::sqrt(cx*cx+cy*cy);
         if(cpa>CPA_WARN) continue;
+        if(g_land_fn && g_land_fn(A.lat,A.lon,B.lat,B.lon)) continue;   // 육지 낀 쌍 배제
         uint32_t m1=std::min(A.mmsi,B.mmsi), m2=std::max(A.mmsi,B.mmsi);
         char k[32]; snprintf(k,sizeof(k),"PBC:%u:%u",m1,m2);
         GuardAlert a; a.t_ms=now_ms; a.aid=fnv32(k); a.typ=1;
@@ -409,20 +425,18 @@ void eval_playback_alerts(const std::vector<VesselSnap>& vs, int64_t now_ms){
         snprintf(a.reco,sizeof(a.reco),"위조 의심 — VHF·레이더 교차확인");   // msg=카드 구성
         pb_emit(a);
     }
-    // 3) 미갱신(조건 해소) → CLEAR (2초)
-    for(auto it=g_pb_live.begin(); it!=g_pb_live.end(); ){
-        if(now_ms - it->second > 2000){
-            GuardAlert a; a.t_ms=now_ms; a.aid=it->first; a.typ=1; a.sev=1; a.state=3;
-            upsert_local(a); it=g_pb_live.erase(it);
+    // 3) 미갱신(조건 해소) → 발화됐던 것만 CLEAR(원 typ 복원), 후보(hits<2)는 조용히 제거 (3초)
+    for(auto it=g_pb.begin(); it!=g_pb.end(); ){
+        if(now_ms - it->second.seen > 3000){
+            if(it->second.hits>=2) pb_clear_one(it->first, it->second, now_ms);
+            it=g_pb.erase(it);
         } else ++it;
     }
 }
 void clear_playback_alerts(){
-    for(auto& kv : g_pb_live){
-        GuardAlert a; a.t_ms=wall_ms(); a.aid=kv.first; a.typ=1; a.sev=1; a.state=3;
-        upsert_local(a);
-    }
-    g_pb_live.clear();
+    int64_t t=wall_ms();
+    for(auto& kv : g_pb) if(kv.second.hits>=2) pb_clear_one(kv.first, kv.second, t);
+    g_pb.clear();
 }
 
 // ── JOIN/뷰어: 데이터 수신 → upsert ─────────────────────────────────────────

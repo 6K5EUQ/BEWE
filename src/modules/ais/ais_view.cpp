@@ -671,6 +671,8 @@ void draw_content(FFTViewer& v, bool just_opened){
         [](const guard_mod::AlertRow& r){ return strcmp(r.a.station,"LOCAL")!=0; }), galerts.end());
     // GUARD 평가 (1초 주기): 구역 진입은 라이브·플레이백 공통. 충돌·위조는 플레이백에서 GUI 계산.
     {
+        static bool s_land_set=false;
+        if(!s_land_set){ guard_mod::set_land_check(&modview_map::seg_crosses_land); s_land_set=true; }
         static int64_t last_eval=0; static bool prev_pb=false;
         int64_t nowm=(int64_t)(ImGui::GetTime()*1000);
         if(prev_pb && !tl_filt) guard_mod::clear_playback_alerts();   // 플레이백→라이브: PB경보 정리
@@ -681,13 +683,27 @@ void draw_content(FFTViewer& v, bool just_opened){
             for(const auto& mp : pts){ guard_mod::VesselSnap s{};
                 s.mmsi=(uint32_t)mp.id; s.lat=mp.lat; s.lon=mp.lon; s.sog=-1; s.cog=-1;
                 vs.push_back(s); }
-            // sog/cog/ai: 라이브=최신, 플레이백=재생커서(hi_ms) 이하 가장 최근 레코드
             int64_t cut = tl_filt ? hi_ms : (int64_t)4e18;
             { std::lock_guard<std::mutex> lk(mtx);
-              for(auto& s : vs){ for(auto it=log.rbegin(); it!=log.rend(); ++it){
+              for(auto& s : vs){
+                // 최신 레코드(≤cut) → sog/cog/nav/ai; + 최근 120초 변위로 속도 평활화(COG 노이즈 제거)
+                int64_t t_new=0,t_old=0; double la_n=0,lo_n=0,la_o=0,lo_o=0; bool scal=false;
+                for(auto it=log.rbegin(); it!=log.rend(); ++it){
                     if(it->mmsi!=s.mmsi || it->t_ms>cut) continue;
-                    s.sog=it->sog; s.cog=it->cog; s.nav_status=it->nav_status;
-                    s.ai_status=it->ai_status; s.ai_mmsi=it->ai_mmsi; break; } } }
+                    if(!scal){ s.sog=it->sog; s.cog=it->cog; s.nav_status=it->nav_status;
+                               s.ai_status=it->ai_status; s.ai_mmsi=it->ai_mmsi; scal=true; }
+                    if(it->has_pos){
+                        if(t_new==0){ t_new=it->t_ms; la_n=it->lat; lo_n=it->lon; }
+                        if(cut - it->t_ms <= 120000){ t_old=it->t_ms; la_o=it->lat; lo_o=it->lon; }
+                        else break;
+                    }
+                }
+                if(t_new>0 && t_old>0 && t_new-t_old>=20000){
+                    double dt=(t_new-t_old)/1000.0;
+                    double ml=111320.0, mo=111320.0*cos(la_n*M_PI/180.0);
+                    s.vx=(lo_n-lo_o)*mo/dt; s.vy=(la_n-la_o)*ml/dt; s.vknown=true;
+                }
+              } }
             guard_mod::eval_local_zones(vs, wall_now_ms());
             if(tl_filt) guard_mod::eval_playback_alerts(vs, wall_now_ms());
         }
@@ -729,7 +745,9 @@ void draw_content(FFTViewer& v, bool just_opened){
         static double nz_la0,nz_la1,nz_lo0,nz_lo1; static bool open_zone_popup=false;
         bool over_map = io.MousePos.x>=map_p0.x&&io.MousePos.x<=map_p0.x+mapw
                      && io.MousePos.y>=map_p0.y&&io.MousePos.y<=map_p0.y+map_h;
-        if(over_map && ImGui::IsMouseClicked(ImGuiMouseButton_Right)){ drag=true; dstart=io.MousePos; }
+        bool zpopup = ImGui::IsPopupOpen("##guardzone");   // 구역 입력 모달 중엔 드래그 무시
+        if(zpopup) drag=false;
+        if(over_map && !zpopup && ImGui::IsMouseClicked(ImGuiMouseButton_Right)){ drag=true; dstart=io.MousePos; }
         if(drag){
             ImVec2 cur=io.MousePos;
             gdl->AddRectFilled(dstart,cur, IM_COL32(255,158,64,36), 0);

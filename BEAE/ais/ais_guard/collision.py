@@ -9,6 +9,8 @@ import json
 import math
 import os
 
+from . import coastline
+
 KN2MS = 0.514444
 M_PER_DEG_LAT = 111320.0                                # 위도 1도 ≈ 111.32 km
 
@@ -29,6 +31,25 @@ def vel_ms(sog_kn, cog_deg, nav=None):
     v = sog_kn * KN2MS
     r = math.radians(cog_deg)
     return (v * math.sin(r), v * math.cos(r))
+
+
+def smooth_vel(tr, win_ms=120000, min_span_ms=20000):
+    """최근 win_ms 항적 변위로 속도 평활 (m/s, x=동 y=북). 순시 COG 노이즈 제거.
+    표본 부족·정지면 None → 호출부가 순시 vel_ms 로 폴백."""
+    if not tr.pts:
+        return None
+    t_new, la_n, lo_n = tr.pts[-1][0], tr.pts[-1][1], tr.pts[-1][2]
+    old = None
+    for rec in reversed(tr.pts):
+        if t_new - rec[0] <= win_ms:
+            old = rec
+        else:
+            break
+    if old is None or t_new - old[0] < min_span_ms:
+        return None
+    dt = (t_new - old[0]) / 1000.0
+    kx = M_PER_DEG_LAT * math.cos(math.radians(la_n))
+    return ((lo_n - old[2]) * kx / dt, (la_n - old[1]) * M_PER_DEG_LAT / dt)
 
 
 def cpa_tcpa(p1, v1, p2, v2):
@@ -54,8 +75,8 @@ def check_pairs(cfg, active, predict_fn=None):
             a, b = trs[i], trs[j]
             _, la1, lo1, sog1, cog1 = a.latest()
             _, la2, lo2, sog2, cog2 = b.latest()
-            v1 = vel_ms(sog1, cog1, getattr(a, "nav", None))
-            v2 = vel_ms(sog2, cog2, getattr(b, "nav", None))
+            v1 = smooth_vel(a) or vel_ms(sog1, cog1, a.nav)
+            v2 = smooth_vel(b) or vel_ms(sog2, cog2, b.nav)
             relsp = math.hypot(v2[0] - v1[0], v2[1] - v1[1])
             if relsp < 0.8:                             # 상대속도 <~1.5kt: 평행·동속·정지 → 무시
                 continue
@@ -78,6 +99,8 @@ def check_pairs(cfg, active, predict_fn=None):
                 cpa, tcpa = cpa_tcpa((0.0, 0.0), v1, p2, v2)
             if tcpa < 0 or tcpa > cfg.tcpa_max_s or cpa > cfg.cpa_warn_m:
                 continue                                # 멀어지는 중/먼 미래/충분히 먼 최근접
+            if coastline.seg_crosses_land(la1, lo1, la2, lo2):
+                continue                                # 두 배 사이 육지 → 물리적 충돌 불가
             # 경보 지점 = 최근접 순간 두 배 위치 중점
             aL = (la1 + v1[1] * tcpa / M_PER_DEG_LAT, lo1 + v1[0] * tcpa / (M_PER_DEG_LAT * math.cos(math.radians(la1))))
             bL = (la2 + v2[1] * tcpa / M_PER_DEG_LAT, lo2 + v2[0] * tcpa / (M_PER_DEG_LAT * math.cos(math.radians(la2))))

@@ -50,6 +50,7 @@ class GuardConfig:
     active_max_age_s: float = 180.0  # 이 나이 이내 위치만 활성 트랙
     track_prune_s: float = 3600.0   # 오래된 트랙 메모리 정리
     clear_ticks: int = 3            # 해제조건 연속 틱(히스테리시스)
+    enter_ticks: int = 2            # 진입조건 연속 틱(디바운스) — 단발 노이즈 억제
     update_min_interval_s: float = 30.0  # UPDATE 재발행 최소 간격
     update_score_delta: float = 5.0      # 점수 변화 시 즉시 UPDATE
     status_interval_s: float = 10.0

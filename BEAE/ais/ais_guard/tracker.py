@@ -24,6 +24,7 @@ class Track:
     rf: deque = None        # (t_ms, cfo_hz, rssi_db)
     nm: str = ""            # 최신 선명
     st: int = 0             # 최신 선종
+    nav: int = -1           # 최신 항행상태 (1=정박 5=계류)
     last_t_ms: int = 0      # 마지막 수신(위치 무관)
 
     def latest(self):
@@ -112,6 +113,8 @@ class TrackStore:
             tr.nm = str(d["nm"])
         if d.get("st"):
             tr.st = int(d["st"])
+        if "ns" in d:
+            tr.nav = int(d["ns"])
         if "aist" in d:
             tr.match.append((int(d["aist"]), int(d.get("aim", 0))))
         if "cfo" in d:

@@ -111,7 +111,7 @@ def _evaluate(cfg, tracker, book, zones, scorer_fn, predict_fn, now_ms):
         msg = ""   # 카드/툴팁에서 "추정 선박: 이름(MMSI)" 로 구성
         reco = "MMSI 위장 의심 — VHF·레이더 교차확인"
         book.observe(TYP_THREAT, sev, tr.mmsi, aim_top, latest[1], latest[2],
-                     score, -1.0, -1.0, msg, reco)
+                     score, -1.0, -1.0, msg, reco, aid_key2=0)
 
     # 4) 이상항적 (DL scorer 주입 시)
     if scorer_fn is not None:

@@ -21,6 +21,7 @@ struct MapPoint {
     const char* tip_l2 = nullptr;
     const float* trail = nullptr;    // interleaved lat,lon (oldest→newest), 옵션
     int      trail_n = 0;            // trail 점 개수
+    const int64_t* trail_t = nullptr; // trail 각 점의 수신시각(epoch ms), 길이 trail_n — hover 시각 툴팁용(옵션)
 };
 
 // 영속 카메라 상태 (모듈이 1개 보유). 등거리원통 도(degree) 경계.
@@ -65,5 +66,9 @@ MapResult draw_map(const char* id, MapView& view, const std::vector<MapPoint>& p
                    ImVec2 size = ImVec2(0,0), bool do_fit = false,
                    const std::vector<MapStation>* stations = nullptr,
                    const std::vector<MapLink>* links = nullptr);
+
+// 육지 판정 (해안선 KR_OSM_COAST 기반) — GUARD 충돌 오탐(육지 낀 쌍) 배제용
+bool point_on_land(double lat, double lon);
+bool seg_crosses_land(double la1, double lo1, double la2, double lo2);
 
 } // namespace modview_map

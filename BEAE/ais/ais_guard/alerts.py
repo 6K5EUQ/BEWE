@@ -60,21 +60,29 @@ class AlertBook:
         self.n_emitted = 0
         os.makedirs(cfg.guard_dir, exist_ok=True)
 
-    def observe(self, typ, sev, mmsi, mmsi2, lat, lon, score, cpa, tcpa, msg, reco):
-        """이번 틱에 조건이 성립한 사건 보고. NEW/UPDATE 발행은 내부에서 판단."""
-        aid = make_aid(typ, mmsi, mmsi2)
+    def observe(self, typ, sev, mmsi, mmsi2, lat, lon, score, cpa, tcpa, msg, reco,
+                aid_key2=None):
+        """이번 틱에 조건이 성립한 사건 보고. aid_key2 지정 시 aid 는 그 값으로 안정화
+        (위협: mmsi2=추정선박은 표시용, aid 는 대상 mmsi 로 고정 → 플래핑 방지).
+        진입 디바운스: enter_ticks 회 연속 성립해야 첫 NEW 발행(단발 노이즈 억제)."""
+        aid = make_aid(typ, mmsi, mmsi2 if aid_key2 is None else aid_key2)
         e = self.active.get(aid)
-        is_new = e is None
-        if is_new:
+        if e is None:
             e = self.active[aid] = {"typ": typ, "mmsi": mmsi, "mmsi2": mmsi2,
-                                    "last_emit": 0.0, "emit_sev": 0, "emit_score": -1e9}
+                                    "last_emit": 0.0, "emit_sev": 0, "emit_score": -1e9,
+                                    "hits": 0, "emitted": False}
         e.update(tick=self.tick, miss=0, sev=sev, score=score, lat=lat, lon=lon,
-                 cpa=cpa, tcpa=tcpa, msg=msg, reco=reco)
+                 cpa=cpa, tcpa=tcpa, msg=msg, reco=reco, mmsi2=mmsi2)
+        e["hits"] += 1
+        if e["hits"] < self.cfg.enter_ticks and not e["emitted"]:
+            return                                               # 진입 디바운스 — 대기
         now = time.time()
-        if (is_new or sev != e["emit_sev"]                       # 심각도 변화
+        first = not e["emitted"]
+        if (first or sev != e["emit_sev"]
                 or abs(score - e["emit_score"]) >= self.cfg.update_score_delta
                 or now - e["last_emit"] >= self.cfg.update_min_interval_s):
-            self._emit(aid, e, ST_NEW if is_new else ST_UPDATE)
+            e["emitted"] = True
+            self._emit(aid, e, ST_NEW if first else ST_UPDATE)
 
     def end_tick(self):
         """틱 마감: 미관측 사건 miss 누적, clear_ticks 도달 시 CLEAR."""
@@ -84,7 +92,8 @@ class AlertBook:
                 continue
             e["miss"] = e.get("miss", 0) + 1
             if e["miss"] >= self.cfg.clear_ticks:
-                self._emit(aid, e, ST_CLEAR)
+                if e.get("emitted"):
+                    self._emit(aid, e, ST_CLEAR)     # 발행된 것만 CLEAR
                 del self.active[aid]
         self.tick += 1
 

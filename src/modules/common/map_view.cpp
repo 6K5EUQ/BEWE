@@ -95,6 +95,35 @@ static const std::vector<FillEdge>& fill_edges(){
     return E;
 }
 
+// ── 육지 판정 (GUARD 충돌: 두 배 사이 육지면 물리적으로 충돌 불가 → 배제) ──
+// fill_edges(해안선 닫힌 링) 위 even-odd 레이캐스팅. lat 오름차순 정렬 → 범위만 검사.
+bool point_on_land(double lat, double lon){
+    const auto& E=fill_edges();
+    int cross=0;
+    for(const auto& e : E){
+        if(lat < e.latlo) break;                 // 정렬됨 — 이후는 다 위(무관)
+        if(lat >= e.lathi) continue;
+        double lon_at = e.lonlo + (double)e.slope*(lat-e.latlo);
+        if(lon_at > lon) cross++;
+    }
+    return cross & 1;
+}
+bool seg_crosses_land(double la1,double lo1,double la2,double lo2){
+    double d=std::max(std::fabs(la2-la1), std::fabs(lo2-lo1));
+    int n=std::max(4,(int)(d/0.0015)+1);         // ~150m 간격 표본
+    for(int i=1;i<n;i++){                          // 양끝(선박 위치)은 물이므로 내부만
+        double t=(double)i/n;
+        if(point_on_land(la1+(la2-la1)*t, lo1+(lo2-lo1)*t)) return true;
+    }
+    return false;
+}
+
+// epoch ms → "HH:MM:SS" (KST, UTC+9) — 항적 점 hover 수신시각 툴팁용
+static void fmt_hms_kst(int64_t t_ms, char* out, size_t n){
+    int64_t s = t_ms/1000 + 9*3600;
+    snprintf(out, n, "%02d:%02d:%02d", (int)((s/3600)%24), (int)((s/60)%60), (int)(s%60));
+}
+
 MapResult draw_map(const char* id, MapView& v, const std::vector<MapPoint>& pts,
                    ImVec2 size, bool do_fit, const std::vector<MapStation>* stations,
                    const std::vector<MapLink>* links){
@@ -285,6 +314,7 @@ MapResult draw_map(const char* id, MapView& v, const std::vector<MapPoint>& pts,
 
     // ── 항적 + 마커 ── (최근접 마커 추적 → hover/click)
     int best=-1; float bestd=1e9f; ImVec2 mp=io.MousePos;
+    int64_t hovpt_ms=-1; float hovpt_d=1e9f; ImVec2 hovpt_pos{};   // 선택 배 항적 점 hover → 수신시각 툴팁
     bool any_sel=false; for(const auto& p : pts) if(p.selected){ any_sel=true; break; }  // 선택 배 있으면 그 배만 꼬리
     for(size_t i=0;i<pts.size();i++){
         const MapPoint& pt=pts[i];
@@ -294,11 +324,13 @@ MapResult draw_map(const char* id, MapView& v, const std::vector<MapPoint>& pts,
             ImU32 base = pt.color & 0x00FFFFFFu;
             ImVec2 tp = LL2PX(pt.trail[0], pt.trail[1]);
             if(pt.selected) dl->AddCircleFilled(tp, 1.25f, base|0xC0000000u, 8);  // GPS 기록점
+            if(pt.selected && pt.trail_t && hovered){ float dx=mp.x-tp.x,dy=mp.y-tp.y,d=dx*dx+dy*dy; if(d<36.f&&d<hovpt_d){hovpt_d=d;hovpt_ms=pt.trail_t[0];hovpt_pos=tp;} }
             for(int k=1;k<pt.trail_n;k++){
                 ImVec2 tc=LL2PX(pt.trail[k*2], pt.trail[k*2+1]);
                 int a = 40 + (int)(140.0*k/(pt.trail_n-1));
                 dl->AddLine(tp, tc, base|((ImU32)a<<24), pt.selected?2.0f:1.2f);
                 if(pt.selected) dl->AddCircleFilled(tc, 1.25f, base|0xC0000000u, 8);  // 각 기록 위치에 점
+                if(pt.selected && pt.trail_t && hovered){ float dx=mp.x-tc.x,dy=mp.y-tc.y,d=dx*dx+dy*dy; if(d<36.f&&d<hovpt_d){hovpt_d=d;hovpt_ms=pt.trail_t[k];hovpt_pos=tc;} }
                 // 항적선 클릭 판정: 마우스↔선분 최단거리 (꼬리 눌러도 선박 선택)
                 if(hovered && pt.id){
                     float vx=tc.x-tp.x, vy=tc.y-tp.y, wx=mp.x-tp.x, wy=mp.y-tp.y;
@@ -445,8 +477,18 @@ MapResult draw_map(const char* id, MapView& v, const std::vector<MapPoint>& pts,
 
     dl->PopClipRect();
 
+    // ── 선택 배 항적 점 hover → 그 점 수신시각 (마커 툴팁보다 우선) ──
+    if(hovpt_ms>=0){
+        char tb[16]; fmt_hms_kst(hovpt_ms, tb, sizeof(tb));
+        dl->AddCircle(hovpt_pos, 3.5f, IM_COL32(255,255,255,255), 12, 1.4f);
+        ImVec2 ts=ImGui::CalcTextSize(tb);
+        ImVec2 bp(hovpt_pos.x+9, hovpt_pos.y-ts.y-7);
+        dl->AddRectFilled(ImVec2(bp.x-4,bp.y-3),ImVec2(bp.x+ts.x+4,bp.y+ts.y+3),IM_COL32(0,0,0,205),3.f);
+        dl->AddText(bp, IM_COL32(255,240,200,255), tb);
+    }
+
     // ── hover 툴팁 + 클릭(드래그 아님) 선택 ──
-    if(hovered && best>=0 && bestd<=169.f){
+    if(hovpt_ms<0 && hovered && best>=0 && bestd<=169.f){
         const MapPoint& pt=pts[best];
         r.hovered_id=pt.id;
         if(pt.tip_l1||pt.tip_l2){

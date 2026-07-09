@@ -118,8 +118,12 @@ void add_local_zone(const char* name, uint8_t kind, double la0,double la1,double
 bool del_local_zone(uint32_t idx);
 
 // 표시 스냅샷 1척 (라이브 pts 또는 플레이백 시각 위치). ai_* = Match_AI (위조 판정용)
+// vx/vy = 최근 항적에서 최소자승 평활한 속도(m/s, x=동 y=북); vknown=true면 순시 COG 대신 사용.
 struct VesselSnap { uint32_t mmsi; double lat, lon; float sog, cog;
-                    uint8_t ai_status=0; uint32_t ai_mmsi=0; int nav_status=-1; };
+                    uint8_t ai_status=0; uint32_t ai_mmsi=0; int nav_status=-1;
+                    double vx=0, vy=0; bool vknown=false; };
+// 두 좌표 사이 육지 통과 여부 콜백 주입 (GUI가 map_view 해안선으로 제공; CLI는 미설정=검사안함)
+void set_land_check(bool (*fn)(double,double,double,double));
 // 진입/진입예정(진입위험) 판정 — 라이브·플레이백 공통 (뷰어 ~1초 주기)
 void eval_local_zones(const std::vector<VesselSnap>& vs, int64_t now_ms);
 // 플레이백 전용: 표시 스냅샷에서 충돌위험(CPA/TCPA)·위조의심(Match_AI) 계산 → 로컬 경보.
