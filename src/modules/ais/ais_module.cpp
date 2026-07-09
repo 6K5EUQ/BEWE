@@ -127,6 +127,9 @@ void store_append(const AisRecord& m){
     if(m.ai_status)   // Match_AI (DL 지문 예측)
         fprintf(f,",\"aist\":%u,\"aim\":%u,\"aic\":%u",
             (unsigned)m.ai_status,m.ai_mmsi,(unsigned)m.ai_conf);   // aic = decipercent (percent*10)
+    if(m.anom_flag)   // Behavior 이상탐지 (규칙층)
+        fprintf(f,",\"anf\":%u,\"anr\":%u,\"ans\":%u",
+            (unsigned)m.anom_flag,(unsigned)m.anom_reason,(unsigned)m.anom_score);
     fprintf(f,"}\n");
     fclose(f);
 }
@@ -172,6 +175,10 @@ void store_parse_jsonl(const char* data, size_t n, std::vector<AisRecord>& out){
             m.ai_status=(uint8_t)jll(l,"\"aist\":");
             m.ai_mmsi=(uint32_t)jll(l,"\"aim\":"); m.ai_conf=(uint16_t)jll(l,"\"aic\":");
         }
+        if(strstr(l,"\"anf\":")){   // Behavior 이상탐지 (없으면 기본 0 유지)
+            m.anom_flag=(uint8_t)jll(l,"\"anf\":");
+            m.anom_reason=(uint8_t)jll(l,"\"anr\":"); m.anom_score=(uint16_t)jll(l,"\"ans\":");
+        }
         out.push_back(m);
     }
 }
@@ -199,6 +206,7 @@ void host_emit(FFTViewer& v, AisRecord m, const float* ai_iq, int ai_n, uint32_t
 #else
     (void)ai_iq; (void)ai_n; (void)ai_sr;        // AI 모듈 제거 빌드 — 미사용 인자 경고 억제
 #endif
+    host_anom(m);   // Behavior 이상탐지 규칙층 (결정적; store 전에 m.anom_* 채움)
     store_append(m);
     AisWireMsg w; ais_msg_to_wire(m, w);
     bewe_mod_emit(v, "ais", &w, sizeof(w));

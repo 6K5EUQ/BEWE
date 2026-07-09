@@ -31,7 +31,9 @@ struct MapView {
     bool   show_land      = true;    // 육지 채움
     bool   show_coast     = true;    // 해안선
     bool   show_trails    = true;    // 항적 꼬리
+    bool   show_all_trails= false;   // 선택 배 있어도 비선택 배 꼬리 숨기지 않음 (AIS: 전 선박 상시 꼬리)
     bool   show_labels    = true;    // 마커 이름 라벨
+    bool   show_ports     = true;    // 주요 항구 지명 오버레이 (place_labels.hpp)
     bool   big            = false;   // 크게보기: 지도가 패널 전폭 차지 (호출자가 읽어 표 숨김). 좌상단 버튼으로 토글
 
     // 육지 채움 캐시 (해안선 닫힌 링 even-odd 화면-scanline; 카메라/크기 변경 시만 재계산) — 내부 전용

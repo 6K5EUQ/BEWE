@@ -377,7 +377,8 @@ static void draw_preview_content(FFTViewer& v, const char* label){
 
 void demod_draw_panel(FFTViewer& v, bool just_opened){
     ImGuiIO& io = ImGui::GetIO();
-    float W = io.DisplaySize.x, H = io.DisplaySize.y - TOPBAR_H;
+    // 평소엔 하단 상태바(TOPBAR_H) 위까지. AIS 크게보기면 상태바까지 덮어 화면 전체.
+    float W = io.DisplaySize.x, H = io.DisplaySize.y - (v.ais_fullscreen ? 0.f : TOPBAR_H);
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImVec2(W, H));
     if(just_opened) ImGui::SetNextWindowFocus();
@@ -414,7 +415,9 @@ void demod_draw_panel(FFTViewer& v, bool just_opened){
         return hit ? ImGuiTabItemFlags_SetSelected : 0;
     };
 
-    ImGui::SetCursorPos(ImVec2(8, 4));
+    // AIS 크게보기면 탭바(MAIN/AIS…)를 화면 위로 밀어 숨김 → 아래 draw_content 가 (0,0)부터 꽉 참.
+    const float TABBAR_H = 26.f;
+    ImGui::SetCursorPos(ImVec2(8, v.ais_fullscreen ? -TABBAR_H : 4.f));
     extern bool GImCenterTabLabels;   // ImGui 패치: 탭 라벨 중앙정렬 (DEMOD 탭바 한정)
     GImCenterTabLabels = true;
     if(ImGui::BeginTabBar("##demod_tabs", ImGuiTabBarFlags_Reorderable)){

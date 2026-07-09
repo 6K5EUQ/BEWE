@@ -22,12 +22,15 @@
 // Match_AI 열(테이블 idx 11)은 AI 모듈(ais_ai.cpp) 있을 때만 표시. 없으면 열 개수·Info
 // 인덱스가 하나씩 줄어든다. 컴파일 타임 상수로 인덱스 밀림을 일괄 처리.
 // (비-DL Match 열은 제거됨 — 기본 열 = Up~Cnt 11개 + Info.)
+// Behavior 열은 항상 존재(규칙층은 DL 아님). Match_AI 는 AI 모듈 있을 때만.
 #ifdef BEWE_MODULE_AIS_AI
-  #define AIS_TBL_NCOL 13
-  #define AIS_TBL_INFO 12
+  #define AIS_TBL_NCOL  14
+  #define AIS_TBL_BEHAV 12   // Match_AI(11) 다음
+  #define AIS_TBL_INFO  13
 #else
-  #define AIS_TBL_NCOL 12
-  #define AIS_TBL_INFO 11
+  #define AIS_TBL_NCOL  13
+  #define AIS_TBL_BEHAV 11
+  #define AIS_TBL_INFO  12
 #endif
 
 namespace ais_mod {
@@ -86,8 +89,11 @@ struct AisGrp {
     uint8_t  ai_status=0;  // Match_AI (최신 non-zero; sticky)
     uint32_t ai_mmsi=0;
     uint16_t ai_conf=0;    // decipercent (percent*10)
+    uint8_t  anom_flag=0;  // Behavior 이상탐지 (최신 non-zero; sticky)
+    uint8_t  anom_reason=0;
+    uint16_t anom_score=0;
 };
-// 컬럼: 0 Up 1 Down 2 MMSI 3 Type 4 Name 5 Country 6 Lat 7 Lon 8 SOG 9 COG 10 Cnt 11 Match_AI 12 Info
+// 컬럼: 0 Up 1 Down 2 MMSI 3 Type 4 Name 5 Country 6 Lat 7 Lon 8 SOG 9 COG 10 Cnt [11 Match_AI] Behavior Info
 int grp_cmp(int c, const AisGrp& a, const AisGrp& b){
     switch(c){
         case 0:  return a.first<b.first?-1:(a.first>b.first?1:0);
@@ -104,7 +110,12 @@ int grp_cmp(int c, const AisGrp& a, const AisGrp& b){
 #ifdef BEWE_MODULE_AIS_AI
         case 11: return a.ai_mmsi<b.ai_mmsi?-1:(a.ai_mmsi>b.ai_mmsi?1:0);
 #endif
-        default: return a.latest.nav_status-b.latest.nav_status;
+        default:
+            if(c==AIS_TBL_BEHAV){   // Behavior: flag 우선, 동급이면 score 순
+                if(a.anom_flag!=b.anom_flag) return a.anom_flag-b.anom_flag;
+                return a.anom_score<b.anom_score?-1:(a.anom_score>b.anom_score?1:0);
+            }
+            return a.latest.nav_status-b.latest.nav_status;   // Info
     }
 }
 // 선종(ITU shiptype)별 마커 색 — 화물/유조/여객/어선 등 한눈 구분
@@ -218,8 +229,13 @@ void draw_content(FFTViewer& v, bool just_opened){
     { static int64_t prev_base=-1; if(day_base!=prev_base){ prev_base=day_base; if(!tl_play){ tl_a=0.f;tl_b=1440.f;tl_head=0.f; } } }
     if(!tl_show){ tl_play=false; tl_a=0.f; tl_b=1440.f; tl_head=0.f; }   // 플레이백 꺼짐 → 재생/구간 무효
     if(tl_play){ tl_head += io.DeltaTime * 1.0f; if(tl_head>=tl_b){ tl_head=tl_b; tl_play=false; } }   // 실1초=데이터1분
+    // 지도 카메라/크게보기 상태 (아래 지도 렌더에서도 사용). big 여부가 body_h 배분에 필요.
+    static modview_map::MapView mv;
+    mv.show_all_trails = true;   // AIS: 선택 배가 있어도 전 선박 10분 꼬리 상시 표시
     // 표/지도 세로 배분: 헤더(32) 아래부터. 플레이백 켜지면 하단 TL_H 만큼 비워 타임라인 자리 확보.
-    float body_h = tl_show ? (H-36-TL_H) : (H-36); if(body_h<80) body_h=80;
+    // 크게보기(big)면 하단 여백(4px) 제거 → 지도가 패널 맨 아래까지 꽉 참 (표는 숨겨져 영향 없음).
+    float bot = mv.big ? 32.f : 36.f;
+    float body_h = tl_show ? (H-bot-TL_H) : (H-bot); if(body_h<80) body_h=80;
     // 타임라인 바 UI — 지도/데이터 아래(하단바 바로 위)에 그린다. 켜졌을 때만.
     if(tl_show){
         const float PAD=12.f;     // 좌우 대칭 여백 (버튼 왼쪽 = 눈금 오른쪽)
@@ -442,6 +458,7 @@ void draw_content(FFTViewer& v, bool just_opened){
                 if(m.t_ms<G.first) G.first=m.t_ms;          // Up = 최초(불변)
                 if(m.t_ms>=G.last){ G.last=m.t_ms; G.latest=m; }   // Down = 최근
                 if(m.ai_status){ G.ai_status=m.ai_status; G.ai_mmsi=m.ai_mmsi; G.ai_conf=m.ai_conf; }  // Match_AI sticky: non-zero 만 갱신
+                if(m.anom_flag){ G.anom_flag=m.anom_flag; G.anom_reason=m.anom_reason; G.anom_score=m.anom_score; }  // Behavior sticky
                 if(m.name[0] && !G.name[0]){ strncpy(G.name,m.name,sizeof(G.name)-1); G.name[sizeof(G.name)-1]=0; }
             }
             for(AisGrp& G : g) if(G.auth_cnt) G.cnt=(int)G.auth_cnt;   // 요약 상태: 실제 누계로 표시/정렬 통일
@@ -456,8 +473,7 @@ void draw_content(FFTViewer& v, bool just_opened){
         }
     }
 
-    // ── 좌(표) | 우(지도) ──  (지도 크게보기 v.big 면 표 숨기고 지도 전폭)
-    static modview_map::MapView mv;
+    // ── 좌(표) | 우(지도) ──  (지도 크게보기 mv.big 면 표 숨기고 지도 전폭; mv 는 위에서 선언)
     static float split_tw=-1.f;   // 사용자가 스플리터로 정한 표 폭(px). <0 = 미설정(컬럼합 자동)
     float tw, mapw;
     if(mv.big){ tw=0.f; mapw=W; }
@@ -466,6 +482,7 @@ void draw_content(FFTViewer& v, bool just_opened){
 #ifdef BEWE_MODULE_AIS_AI
             +96                                                     // Match_AI (모듈 있을 때만)
 #endif
+            +96                                                     // Behavior (항상)
             ;
         // 컬럼 cell padding(~8px each) + inner border + 세로스크롤바(~14). 이만큼만 더해
         // Info 셀 뒤 빈 여백 없이 마지막 Info 가 데이터폭에서 끝나게.
@@ -494,6 +511,7 @@ void draw_content(FFTViewer& v, bool just_opened){
 #ifdef BEWE_MODULE_AIS_AI
         ImGui::TableSetupColumn("Match_AI",ImGuiTableColumnFlags_WidthFixed, 96);  // DL 지문 예측 MMSI+% (AI 모듈)
 #endif
+        ImGui::TableSetupColumn("Behavior",ImGuiTableColumnFlags_WidthFixed, 96);  // 이상탐지 규칙층 (GAP/JUMP/SPEED)
         ImGui::TableSetupColumn("Info",    ImGuiTableColumnFlags_WidthStretch);  // 남는 폭 흡수 → Info 뒤 빈 칸 없음
         modview::sortable_headers(AIS_TBL_NCOL, sort_col, sort_asc, AIS_TBL_INFO);  // Info 만 좌측, 나머지 중앙
 
@@ -528,18 +546,26 @@ void draw_content(FFTViewer& v, bool just_opened){
             else if(G.ai_status==1) modview::cell("UNKNOWN", ImVec4(0.75f,0.72f,0.5f,1.f));
             else modview::cell("-", ImVec4(0.4f,0.4f,0.4f,1.f));
 #endif
+            ImGui::TableSetColumnIndex(AIS_TBL_BEHAV);   // Behavior: 이상탐지 규칙 발화 (alert=빨강, watch=앰버)
+            if(G.anom_flag==2){ snprintf(b,sizeof(b),"ALERT %s",ais_anom_reason(G.anom_reason));
+                modview::cell(b, ImVec4(1.f,0.4f,0.35f,1.f)); }
+            else if(G.anom_flag==1){ snprintf(b,sizeof(b),"watch %s",ais_anom_reason(G.anom_reason));
+                modview::cell(b, ImVec4(0.9f,0.7f,0.35f,1.f)); }
+            else modview::cell("-", ImVec4(0.4f,0.4f,0.4f,1.f));
             ImGui::TableSetColumnIndex(AIS_TBL_INFO); { char inf[64]; info_str(m,inf,sizeof(inf)); if(inf[0]) ImGui::TextUnformatted(inf); }
         }
         ImGui::EndTable();
     }
     // ── 선박 이력 뷰: 선택 MMSI 의 Up~Down 사이 모든 메시지 (시간순) ──
-    // 기록별 히스토리 테이블. Match_AI 열(idx 6)은 AI 모듈 있을 때만 → Info 인덱스 6/7 가변.
+    // 기록별 히스토리 테이블. Match_AI 열은 AI 모듈 있을 때만, Behavior 는 항상 → 인덱스 가변.
 #ifdef BEWE_MODULE_AIS_AI
-    #define AIS_HIST_NCOL 8
-    #define AIS_HIST_INFO 7
+    #define AIS_HIST_NCOL  9
+    #define AIS_HIST_BEHAV 7   // Match_AI(6) 다음
+    #define AIS_HIST_INFO  8
 #else
-    #define AIS_HIST_NCOL 7
-    #define AIS_HIST_INFO 6
+    #define AIS_HIST_NCOL  8
+    #define AIS_HIST_BEHAV 6
+    #define AIS_HIST_INFO  7
 #endif
     else if(!mv.big && cur_view!=0 && ImGui::BeginTable("##ais_hist", AIS_HIST_NCOL, tf, ImVec2(tw, upper_h))){
         ImGui::TableSetupScrollFreeze(1,1);
@@ -552,6 +578,7 @@ void draw_content(FFTViewer& v, bool just_opened){
 #ifdef BEWE_MODULE_AIS_AI
         ImGui::TableSetupColumn("Match_AI", ImGuiTableColumnFlags_WidthFixed, 96);  // 기록별 DL 지문 예측
 #endif
+        ImGui::TableSetupColumn("Behavior", ImGuiTableColumnFlags_WidthFixed, 96);  // 기록별 이상탐지 규칙
         ImGui::TableSetupColumn("Info", ImGuiTableColumnFlags_WidthStretch);
         static int hsc=-1; static bool hsa=true;
         modview::sortable_headers(AIS_HIST_NCOL, hsc, hsa, AIS_HIST_INFO);   // Info 만 좌측, 나머지 중앙
@@ -580,12 +607,19 @@ void draw_content(FFTViewer& v, bool just_opened){
             else if(m.ai_status==1) modview::cell("UNKNOWN", ImVec4(0.75f,0.72f,0.5f,1.f));
             else modview::cell("-", ImVec4(0.4f,0.4f,0.4f,1.f));
 #endif
+            ImGui::TableSetColumnIndex(AIS_HIST_BEHAV);   // Behavior: 이 기록의 이상탐지 규칙 발화
+            if(m.anom_flag==2){ snprintf(b,sizeof(b),"ALERT %s",ais_anom_reason(m.anom_reason));
+                modview::cell(b, ImVec4(1.f,0.4f,0.35f,1.f)); }
+            else if(m.anom_flag==1){ snprintf(b,sizeof(b),"watch %s",ais_anom_reason(m.anom_reason));
+                modview::cell(b, ImVec4(0.9f,0.7f,0.35f,1.f)); }
+            else modview::cell("-", ImVec4(0.4f,0.4f,0.4f,1.f));
             ImGui::TableSetColumnIndex(AIS_HIST_INFO); { char inf[64]; info_str(m,inf,sizeof(inf)); if(inf[0]) ImGui::TextUnformatted(inf); }
         }
         modview::tail_follow(atb, false);
         ImGui::EndTable();
     }
 #undef AIS_HIST_NCOL
+#undef AIS_HIST_BEHAV
 #undef AIS_HIST_INFO
 
     // ── 수신소(기지) 마커: 지구본과 동일하게 discovered_stations 전부 + 내 위치(HOST) 오버레이 ──
@@ -745,6 +779,8 @@ void draw_content(FFTViewer& v, bool just_opened){
         ImGui::EndChild();
         ImGui::PopStyleVar(3); ImGui::PopStyleColor();
     }
+    // 크게보기 상태를 FFTViewer 로 미러 → 앱 상단바/DEMOD 탭바가 읽어 숨김 (지도만 전체화면).
+    v.ais_fullscreen = mv.big;
 }
 
 } // namespace ais_mod

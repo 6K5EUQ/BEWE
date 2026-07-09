@@ -5954,6 +5954,8 @@ void run_streaming_viewer(){
         ImDrawList* dl=ImGui::GetWindowDrawList();
         float disp_w=io.DisplaySize.x, disp_h=io.DisplaySize.y;
 
+        // AIS 지도 크게보기 중엔 상단바 통째 숨김 (지도가 화면 꽉 참). ESC/⛶ 로 해제.
+        if(!v.ais_fullscreen){
         dl->AddRectFilled(ImVec2(0,0),ImVec2(disp_w,TOPBAR_H),IM_COL32(30,30,30,255));
         ImGui::SetCursorPos(ImVec2(6,6));
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(8,4));
@@ -6264,6 +6266,7 @@ void run_streaming_viewer(){
             }
         }
         ImGui::PopStyleVar(); // ItemSpacing
+        }   // if(!v.ais_fullscreen) — 상단바 블록
 
         // ── Spectrum + Waterfall ──────────────────────────────────────────
         // ── 레이아웃 계산 ─────────────────────────────────────────────────
@@ -11810,6 +11813,7 @@ void run_streaming_viewer(){
         // ── ACARS 오버레이 (하단바 ACARS 버튼으로 토글) ──────────────────────
         static bool s_demod_prev=false;
         if(v.demod_panel_open) demod_draw_panel(v, !s_demod_prev);
+        else v.ais_fullscreen=false;   // 패널 닫히면 AIS 전체화면 미러도 해제 (상단바 복귀)
         s_demod_prev = v.demod_panel_open;
 
         ImGui::Render();

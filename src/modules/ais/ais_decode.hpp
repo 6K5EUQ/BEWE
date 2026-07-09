@@ -16,6 +16,13 @@ public:
     std::function<void(const AisRecord&)> on_record;
     std::function<void(bool)>             on_gate;   // payload(ST_DATA) 구간 알림 (RF 지문 게이팅). true=시작 false=종결
 
+    // ── 진단 카운터 (누적): 버스트가 파이프라인 어느 단계에서 죽는지 국소화용 ──
+    // dg_pre  = 프리앰블(교번열) 검출 = 버스트 후보
+    // dg_gate = 플래그 완성 → 페이로드 진입 = 버스트 확정
+    // dg_crctry = 닫는 플래그 도달 → CRC 검사 시도
+    // dg_crcok  = CRC 통과 (= 유효 프레임)
+    long dg_pre=0, dg_gate=0, dg_crctry=0, dg_crcok=0;
+
     void reset_all(){ if(on_gate) on_gate(false); reset_frame(); state=ST_SKURR; nskurr=0; npreamble=0; last=0; }
 
     // NRZI 디코드된 데이터 비트 1개 투입 (0/1)
@@ -36,7 +43,7 @@ public:
 
         case ST_SKURR:                                         // 잡음/탐색: 프리앰블(교번) 누적
             if(in!=last) antallpreamble++; else antallpreamble=0;
-            if(antallpreamble>14 && in==0){ state=ST_PREAMBLE; nskurr=0; antallpreamble=0; }
+            if(antallpreamble>14 && in==0){ state=ST_PREAMBLE; nskurr=0; antallpreamble=0; dg_pre++; }
             nskurr++;
             break;
 
@@ -57,7 +64,7 @@ public:
         case ST_STARTSIGN:                                     // 플래그 닫는 0 → 데이터 시작
             if(nstartsign>=7){
                 if(in==0){ state=ST_DATA; nstartsign=0; antallenner=0;
-                           memset(buffer,0,sizeof(buffer)); bufferpos=0;
+                           memset(buffer,0,sizeof(buffer)); bufferpos=0; dg_gate++;
                            if(on_gate) on_gate(true); }   // 페이로드 시작 → RF 지문 누산 개시
                 else reset_all();
             } else if(in==0) reset_all();
@@ -66,7 +73,7 @@ public:
 
         case ST_STOPSIGN: {                                    // 닫는 플래그 → 프레임 종결
             int bits = bufferpos - 6 - 16;                     // 데이터 비트 수(플래그6 + FCS16 제거)
-            if(in==0 && bits>0 && calc_crc(bits)) emit(bits);
+            if(in==0 && bits>0){ dg_crctry++; if(calc_crc(bits)){ dg_crcok++; emit(bits); } }
             reset_all();
             break;
         }

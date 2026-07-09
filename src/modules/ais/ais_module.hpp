@@ -30,6 +30,9 @@ void host_emit(FFTViewer& v, AisRecord m, const float* ai_iq = nullptr,
 // RF 지문 raw 시리즈 캡처 (BEWE_AIS_FPCAP; 학습데이터 사이드카)
 void host_fpcap(uint32_t mmsi, const float* series, int n);
 
+// Behavior 이상탐지 규칙층 (ais_anom.cpp): GAP/JUMP/SPEED 결정적 규칙. m.anom_* in-place 채움.
+void host_anom(AisRecord& m);
+
 // Match_AI (ais_ai.cpp): venv 존재 게이트(env BEWE_AIS_AI 로 강제 오버라이드). aicap append + UDS 질의
 // 독립 판매 모듈 — ais_ai.cpp 없으면 BEWE_MODULE_AIS_AI 미정의 → 선언·호출·열 전부 제외.
 #ifdef BEWE_MODULE_AIS_AI

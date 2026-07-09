@@ -136,6 +136,7 @@ void worker(FFTViewer& v, int ch_idx){
     std::atomic<size_t>& my_rp = worker_rp(ch_idx);
     my_rp.store(v.ring_wp.load());
     int64_t last_diag=now_ms(); long diag_bits=0;
+    long lp=0,lg=0,lt=0,lo=0;   // 진단 카운터 직전 스냅샷 (워커별 — static 금지: 2채널 공유되면 오염)
 
     bool hold_prev=false;
     while(!worker_stop_req(ch_idx) && !v.sdr_stream_error.load() && ch.filter_active){
@@ -230,7 +231,12 @@ void worker(FFTViewer& v, int ch_idx){
 
         int64_t t=now_ms();
         if(t-last_diag>=10000){                              // 10초마다 진단 (콘솔만)
-            bewe_log_push(0,"AIS[%d] diag: bits/10s=%ld frames=%ld\n", ch_idx, diag_bits, frames);
+            // 단계별 버스트 산출 (10초 델타): pre=프리앰블후보 gate=페이로드진입(버스트확정)
+            // crctry=CRC검사 crcok=통과. gate>>crcok 면 복조 병목, gate 자체 낮으면 비트동기 실패.
+            long dpre=dec.dg_pre-lp, dgate=dec.dg_gate-lg, dtry=dec.dg_crctry-lt, dok=dec.dg_crcok-lo;
+            lp=dec.dg_pre; lg=dec.dg_gate; lt=dec.dg_crctry; lo=dec.dg_crcok;
+            bewe_log_push(0,"AIS[%d] diag: bits/10s=%ld frames=%ld | pre=%ld gate=%ld crctry=%ld crcok=%ld\n",
+                          ch_idx, diag_bits, frames, dpre, dgate, dtry, dok);
             last_diag=t; diag_bits=0;
         }
     }

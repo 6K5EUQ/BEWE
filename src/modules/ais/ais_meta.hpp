@@ -43,7 +43,29 @@ struct AisRecord {
     uint8_t  ai_status = 0;       // 0=off/데몬부재/모델없음 1=UNKNOWN 2=match
     uint32_t ai_mmsi = 0;         // 예측 MMSI (status=2)
     uint16_t ai_conf = 0;         // 신뢰 decipercent 0..1000 (percent*10, 소수점 1자리)
+    // ── Behavior 이상탐지 (ais_anom.cpp 규칙층; DL 아님, 결정적) ──
+    uint8_t  anom_flag = 0;       // 0=정상/판정없음 1=watch 2=alert
+    uint8_t  anom_reason = 0;     // AnomReason enum (어느 규칙이 발화했나 — 운영자 신뢰용)
+    uint16_t anom_score = 0;      // 이상 강도 (규칙별 정규화; 표시/정렬용, 0=없음)
 };
+
+// Behavior 이상탐지 발화 사유 (규칙층). ais_anom.hpp 와 동기.
+enum AnomReason : uint8_t {
+    ANOM_NONE = 0,
+    ANOM_GAP,          // AIS 소등 (직전 수신 후 장시간 침묵)
+    ANOM_JUMP,         // 순간이동 (위치 델타가 물리적 불가능 속도)
+    ANOM_SPEED,        // 과속 (SOG 상한 초과)
+    ANOM_ZONE,         // 금지구역 진입
+};
+inline const char* ais_anom_reason(uint8_t r){
+    switch(r){
+        case ANOM_GAP:   return "GAP";
+        case ANOM_JUMP:  return "JUMP";
+        case ANOM_SPEED: return "SPEED";
+        case ANOM_ZONE:  return "ZONE";
+        default:         return "";
+    }
+}
 
 // wire 포맷 (framework BEWE_MK_DATA payload; station 은 MpData 봉투가 운반)
 // rx_cnt 는 끝에 추가 — 기존 필드 오프셋 불변(구버전 .dat 레코드도 앞 필드 파싱 안전).
@@ -61,6 +83,8 @@ struct __attribute__((packed)) AisWireMsg {
     float    cfo_hz, fdev_std_hz, rssi_db, clk_ppm, dur_ms;
     // ── Match_AI (끝에 추가; append-only 유지) ──
     uint8_t  ai_status; uint32_t ai_mmsi; uint16_t ai_conf;
+    // ── Behavior 이상탐지 (끝에 추가; append-only 유지) ──
+    uint8_t  anom_flag; uint8_t anom_reason; uint16_t anom_score;
 };
 
 inline void ais_msg_to_wire(const AisRecord& m, AisWireMsg& w){
@@ -76,6 +100,7 @@ inline void ais_msg_to_wire(const AisRecord& m, AisWireMsg& w){
     w.fp_ver=m.fp_ver; w.has_rf=m.has_rf?1:0;
     w.cfo_hz=m.cfo_hz; w.fdev_std_hz=m.fdev_std_hz; w.rssi_db=m.rssi_db; w.clk_ppm=m.clk_ppm; w.dur_ms=m.dur_ms;
     w.ai_status=m.ai_status; w.ai_mmsi=m.ai_mmsi; w.ai_conf=m.ai_conf;
+    w.anom_flag=m.anom_flag; w.anom_reason=m.anom_reason; w.anom_score=m.anom_score;
 }
 inline void ais_wire_to_msg(const AisWireMsg& w, AisRecord& m){
     m = AisRecord{};
@@ -91,6 +116,7 @@ inline void ais_wire_to_msg(const AisWireMsg& w, AisRecord& m){
     m.fp_ver=w.fp_ver; m.has_rf=w.has_rf!=0;
     m.cfo_hz=w.cfo_hz; m.fdev_std_hz=w.fdev_std_hz; m.rssi_db=w.rssi_db; m.clk_ppm=w.clk_ppm; m.dur_ms=w.dur_ms;
     m.ai_status=w.ai_status; m.ai_mmsi=w.ai_mmsi; m.ai_conf=w.ai_conf;
+    m.anom_flag=w.anom_flag; m.anom_reason=w.anom_reason; m.anom_score=w.anom_score;
 }
 
 // ── AIS 6-bit ASCII → 8-bit ASCII (ITU-R M.1371 Table 47) ──────────────────

@@ -3,6 +3,7 @@
 // 위경도 격자 + 항적 꼬리 + 침로 마커 + 커서고정 휠줌 + 드래그 팬 + auto-fit.
 #include "modview_map.hpp"
 #include "../../korea_osm_data.hpp"   // OSM 한국 해안선 (KR_OSM_COAST) — 육지/해안선 유일 소스
+#include "place_labels.hpp"           // 주요 항구 지명 오버레이 (KR_PORTS)
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
@@ -261,8 +262,9 @@ MapResult draw_map(const char* id, MapView& v, const std::vector<MapPoint>& pts,
     bool any_sel=false; for(const auto& p : pts) if(p.selected){ any_sel=true; break; }  // 선택 배 있으면 그 배만 꼬리
     for(size_t i=0;i<pts.size();i++){
         const MapPoint& pt=pts[i];
-        // 항적 꼬리 (oldest→newest, alpha ramp) — 선택 배 있으면 비선택 배 꼬리 숨김(그 배만 돋보이게)
-        if(v.show_trails && pt.trail && pt.trail_n>1 && (!any_sel || pt.selected)){
+        // 항적 꼬리 (oldest→newest, alpha ramp) — 선택 배 있으면 비선택 배 꼬리 숨김(그 배만 돋보이게).
+        // show_all_trails 면 선택 무시하고 전 선박 꼬리 유지 (AIS 요구: 모든 배 10분 꼬리 상시).
+        if(v.show_trails && pt.trail && pt.trail_n>1 && (v.show_all_trails || !any_sel || pt.selected)){
             ImU32 base = pt.color & 0x00FFFFFFu;
             ImVec2 tp = LL2PX(pt.trail[0], pt.trail[1]);
             if(pt.selected) dl->AddCircleFilled(tp, 1.25f, base|0xC0000000u, 8);  // GPS 기록점

@@ -446,6 +446,9 @@ public:
 
     // ── DEMOD 모듈 패널 (src/modules/ 설치형 모듈 컨테이너) ──────────────
     bool                 demod_panel_open = false;
+    // AIS 지도 크게보기(mv.big) 상태 미러 — 켜지면 앱 상단바+DEMOD 탭바 숨겨 지도만 전체화면.
+    // AIS 뷰가 매 프레임 mv.big 값을 여기 반영; 다른 모듈 탭/패널에선 항상 false 로 리셋.
+    bool                 ais_fullscreen = false;
 
     // ── EID (Emitter ID / RF Fingerprint) 패널 ─────────────────────────────
     bool              eid_panel_open = false;
