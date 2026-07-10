@@ -77,11 +77,22 @@ def check_pairs(cfg, active, predict_fn=None):
             _, la2, lo2, sog2, cog2 = b.latest()
             v1 = smooth_vel(a) or vel_ms(sog1, cog1, a.nav)
             v2 = smooth_vel(b) or vel_ms(sog2, cog2, b.nav)
-            relsp = math.hypot(v2[0] - v1[0], v2[1] - v1[1])
-            if relsp < 0.8:                             # 상대속도 <~1.5kt: 평행·동속·정지 → 무시
+            dvx, dvy = v2[0] - v1[0], v2[1] - v1[1]
+            relsp = math.hypot(dvx, dvy)
+            if relsp < cfg.min_rel_speed_ms:            # 상대속도 하한: 평행·동속·정지 → 무시
                 continue
-            p2 = to_local(la2, lo2, la1, lo1)
-            if math.hypot(*p2) > cfg.pair_max_dist_m:
+            p2 = to_local(la2, lo2, la1, lo1)           # A(원점)→B 상대위치(LOS)
+            dist = math.hypot(*p2)
+            if dist > cfg.pair_max_dist_m or dist < 1e-6:
+                continue
+            # 접근 여부·조우각 게이트: B의 A대비 상대속도(dv)와 LOS(p2) 관계.
+            # closing = LOS 반대방향(접근) 성분 = -(dv·p2)/|p2| (양수=접근).
+            dot = dvx * p2[0] + dvy * p2[1]
+            closing = -dot / dist
+            if closing < cfg.min_closing_ms:            # 멀어지는 중/접근 너무 느림 → 무시
+                continue
+            enc_cos = dot / (relsp * dist)              # dv·LOS 코사인: 정면접근≈-1, 측면통과≈0
+            if enc_cos > cfg.max_encounter_cos:         # 측면 스침(교차각 큼) → 무시
                 continue
             cpa = tcpa = None
             if predict_fn is not None:                  # 예측궤적 CPA 우선

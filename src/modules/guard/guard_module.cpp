@@ -250,7 +250,7 @@ void demo_toggle(){
     demo_alert(2,2, 999000003u,0, 35.1000f,128.6790f, 78.f,-1.f,300.f,
                "진해만 동측 암초 5분 내 진입", "즉시 변침 지시, 암초 회피", on);
     demo_alert(3,2, 999000004u,0, 35.0378f,128.6106f, 88.f,-1.f,-1.f,
-               "항로 이탈 식별: 예측오차 상위 12%", "항적 감시, VHF 호출", on);
+               "항로 이탈 식별", "항적 감시, VHF 호출", on);
     demo_alert(4,3, 999000005u,440185090u, 34.9920f,128.8000f, 95.f,-1.f,-1.f,
                "", "위조 의심 — VHF·레이더 교차확인", on);   // 추정 선박=mmsi2, 카드가 구성
 }
@@ -374,9 +374,11 @@ static void pb_clear_one(uint32_t aid, const PbState& st, int64_t t){
 }
 
 void eval_playback_alerts(const std::vector<VesselSnap>& vs, int64_t now_ms){
-    const double CPA_WARN=300.0, CPA_CRIT=100.0, TCPA_MAX=360.0;   // 6분·300/100m
+    const double CPA_WARN=120.0, CPA_CRIT=60.0, TCPA_MAX=180.0;    // 3분·120/60m (강화)
     const double MOVE_KT=1.0;        // SOG 이 값 미만 = 정박/표류로 보고 COG 무시(정지 취급)
-    const double MIN_REL=0.8;        // 상대속도 하한(m/s ≈1.5kt) — 평행·동속·근접정지 제외
+    const double MIN_REL=1.5;        // 상대속도 하한(m/s ≈3kt) — 평행·동속·근접정지 제외
+    const double MIN_CLOSING=0.5;    // 접근율 하한 — LOS 방향 접근 성분 이 미만이면 무시
+    const double MAX_ENC_COS=-0.3;   // 조우각 게이트 — 상대속도·LOS 코사인 이보다 크면(측면통과) 무시
     double lat0=0; int nn=0; for(const auto& v : vs){ lat0+=v.lat; nn++; } if(nn) lat0/=nn;
     double mlat=111320.0, mlon=111320.0*std::cos(lat0*M_PI/180.0);
     // 속도벡터: 평활속도(vknown) 우선. 없으면 순시 SOG/COG(저속·정박은 정지). 반환=이동 여부.
@@ -395,7 +397,15 @@ void eval_playback_alerts(const std::vector<VesselSnap>& vs, int64_t now_ms){
         double rvx=bvx-avx, rvy=bvy-avy, rv2=rvx*rvx+rvy*rvy;
         if(rv2 < MIN_REL*MIN_REL) continue;                 // 상대속도 미미 → 무시
         double dx=(B.lon-A.lon)*mlon, dy=(B.lat-A.lat)*mlat;
-        if(dx*dx+dy*dy > 6000.0*6000.0) continue;           // 6km 밖은 스킵(성능)
+        double d2=dx*dx+dy*dy;
+        if(d2 > 6000.0*6000.0 || d2 < 1e-6) continue;       // 6km 밖은 스킵(성능)
+        double dist=std::sqrt(d2), relsp=std::sqrt(rv2);
+        // 접근 여부·조우각 게이트: 상대속도(rv)와 LOS(dx,dy=A→B) 관계.
+        double dot=dx*rvx+dy*rvy;                           // <0 이면 접근
+        double closing=-dot/dist;                           // LOS 반대방향(접근) 성분
+        if(closing < MIN_CLOSING) continue;                 // 멀어지는 중/접근 너무 느림
+        double enc_cos=dot/(relsp*dist);                    // 정면접근≈-1, 측면통과≈0
+        if(enc_cos > MAX_ENC_COS) continue;                 // 측면 스침(교차각 큼) → 무시
         double tcpa = -(dx*rvx+dy*rvy)/rv2;
         if(tcpa<0 || tcpa>TCPA_MAX) continue;               // 멀어지는 중/너무 먼 미래
         double cx=dx+rvx*tcpa, cy=dy+rvy*tcpa, cpa=std::sqrt(cx*cx+cy*cy);

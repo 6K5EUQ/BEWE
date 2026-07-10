@@ -22,12 +22,15 @@ class GuardConfig:
     pid_path: str = ""
 
     # ── 충돌(CPA/TCPA) ─────────────────────────────────────────────────────
-    cpa_warn_m: float = 300.0       # CPA 경고 반경
-    cpa_crit_m: float = 100.0       # CPA 심각 반경
-    tcpa_max_s: float = 360.0       # 이 시간 내 최근접만 경보
-    pair_max_dist_m: float = 20000.0  # 현재 이보다 먼 쌍은 계산 생략
+    cpa_warn_m: float = 120.0       # CPA 경고 반경 (강화: 밀집구역 오탐 억제)
+    cpa_crit_m: float = 60.0        # CPA 심각 반경
+    tcpa_max_s: float = 180.0       # 이 시간(3분) 내 최근접만 경보 (강화)
+    pair_max_dist_m: float = 6000.0  # 현재 이보다 먼 쌍은 계산 생략 (강화: 먼 미래 경보 배제)
     pair_min_sog_kn: float = 1.0    # 둘 다 이 속력 미만(정박)이면 생략
     predict_step_s: float = 30.0    # predict_fn 궤적 점 간격 가정
+    min_rel_speed_ms: float = 1.5   # 상대속도 하한 (≈3kt): 이보다 느린 쌍 무시
+    min_closing_ms: float = 0.5     # 접근율 하한: LOS 방향 접근 성분이 이 미만이면 무시
+    max_encounter_cos: float = -0.3  # 조우각 게이트: 상대속도·LOS 코사인이 이보다 크면(측면 통과) 무시
 
     # ── 위험구역(좌초) ──────────────────────────────────────────────────────
     zone_horizon_s: float = 600.0   # 진입 예측 시계
