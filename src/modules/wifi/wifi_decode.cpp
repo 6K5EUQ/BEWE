@@ -18,6 +18,7 @@
 #include <chrono>
 #include <thread>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <sys/stat.h>
 
@@ -26,6 +27,12 @@ namespace wifi_mod {
 static int64_t now_ms(){
     return (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// IQ 덤프 플래그 (env BEWE_WIFI_IQDUMP=1). 1회 평가 캐시. (AIS BEWE_AIS_FPCAP 패턴)
+static bool iqdump_enabled(){
+    static int c=-1; if(c<0){ const char* e=getenv("BEWE_WIFI_IQDUMP"); c=(e&&e[0]=='1')?1:0; }
+    return c==1;
 }
 
 void worker(FFTViewer& v, int ch_idx){
@@ -52,14 +59,19 @@ void worker(FFTViewer& v, int ch_idx){
     WifiDecoder dec; dec.reset(out_sr);
     dec.on_record = [&v,ch_idx](const WifiRecord& r){ /* M2+: 실제 비콘 */ (void)v;(void)ch_idx;(void)r; };
 
-    // ── M1 IQ 덤프 (complex float32 interleaved). census/EVM 오프라인 분석용. 약 3초 cap. ──
-    std::string dir = BEWEPaths::data_dir() + "/modules/wifi";
-    mkdir((BEWEPaths::data_dir()+"/modules").c_str(), 0755);
-    mkdir(dir.c_str(), 0755);
-    char fn[320]; char ts[32];
-    { struct tm tmv; KST::to_tm((time_t)(now_ms()/1000), tmv); strftime(ts,sizeof(ts),"%Y%m%d_%H%M%S",&tmv); }
-    snprintf(fn, sizeof(fn), "%s/wifi_cap_%s_ch%d_%uMSPS.cf32", dir.c_str(), ts, ch_idx, out_sr/1000000);
-    FILE* dump = fopen(fn, "wb");
+    // ── M1 IQ 덤프 (complex float32 interleaved). census/EVM 오프라인 분석용. 약 3초 cap.
+    //    env BEWE_WIFI_IQDUMP=1 일 때만 (기본 OFF — 워커 시작마다 ~0.5GB 디스크 기록 방지) ──
+    char fn[320]; fn[0]=0;
+    FILE* dump = nullptr;
+    if(iqdump_enabled()){
+        std::string dir = BEWEPaths::data_dir() + "/modules/wifi";
+        mkdir((BEWEPaths::data_dir()+"/modules").c_str(), 0755);
+        mkdir(dir.c_str(), 0755);
+        char ts[32];
+        { struct tm tmv; KST::to_tm((time_t)(now_ms()/1000), tmv); strftime(ts,sizeof(ts),"%Y%m%d_%H%M%S",&tmv); }
+        snprintf(fn, sizeof(fn), "%s/wifi_cap_%s_ch%d_%uMSPS.cf32", dir.c_str(), ts, ch_idx, out_sr/1000000);
+        dump = fopen(fn, "wb");
+    }
     uint64_t dump_cap = (uint64_t)out_sr * 3;            // 3초
     uint64_t dump_n = 0;
 
@@ -73,7 +85,7 @@ void worker(FFTViewer& v, int ch_idx){
     std::atomic<size_t>& my_rp = worker_rp(ch_idx);
     my_rp.store(v.ring_wp.load());
     int64_t last_emit = now_ms();
-    std::vector<float> dbuf; dbuf.reserve(BATCH*2/std::max(1u,decim)+4);
+    std::vector<float> dbuf; if(dump) dbuf.reserve(BATCH*2/std::max(1u,decim)+4);
     // OFDM 비콘 디코드용 누적 버퍼 (채널 baseband, ~0.12s 마다 스캔)
     std::vector<std::complex<float>> wbuf; size_t wcap=(size_t)(out_sr/8); wbuf.reserve(wcap+4096);
     std::unordered_map<std::string,int64_t> seen;   // BSSID → 마지막 emit (dedup, 10s)

@@ -11,6 +11,7 @@
 #include <atomic>
 #include <memory>
 #include <functional>
+#include <chrono>
 #include <netinet/in.h>
 
 // ── Per-client connection ─────────────────────────────────────────────────
@@ -269,7 +270,9 @@ public:
     void send_region_response(int op_index, bool allowed);
 
     // Channel state → all clients
-    void broadcast_channel_sync(const Channel* chs, int n);
+    // periodic=true: 메인루프 10Hz 주기 호출 전용 — 내용 불변 시 1Hz 감속 +
+    // 원격 JOIN 0 이면 relay 1Hz. 이벤트성 호출(채널 op)은 기본 false 로 항상 즉시.
+    void broadcast_channel_sync(const Channel* chs, int n, bool periodic = false);
 
     // Scheduled recording list snapshot → all clients
     void broadcast_sched_sync(const PktSchedSync& pkt);
@@ -340,6 +343,14 @@ public:
     
 private:
     std::atomic<bool> bcast_pause_{false}; // /chassis 2 reset: 방송 일시 중단 플래그
+
+    // ── CHANNEL_SYNC 주기 송신 게이트 상태 ───────────────────────────────
+    // periodic=true 경로는 단일 스레드(CLI 메인루프 또는 GUI 렌더루프)에서만
+    // 호출된다는 가정 — 주기 호출부가 추가되면 이 비원자 멤버 가정이 깨짐.
+    uint64_t chsync_last_hash_ = 0;
+    std::chrono::steady_clock::time_point chsync_last_send_{};
+    std::chrono::steady_clock::time_point chsync_relay_last_{};
+    std::atomic<bool> chsync_force_{true};  // 신규 JOIN AUTH 시 즉시 시드 (client 스레드에서 set)
 
     // ── Traffic stats ────────────────────────────────────────────────────
 public:

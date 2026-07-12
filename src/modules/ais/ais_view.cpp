@@ -19,7 +19,7 @@
 #include <chrono>
 #include <algorithm>
 #ifdef BEWE_MODULE_GUARD
-#include "../guard/guard_meta.hpp"   // guard_mod::vessel_alert (경보 선박 펄스 링)
+#include "../guard/guard_meta.hpp"   // guard_mod::snapshot/overlays/generation (경보 오버레이)
 #endif
 
 // Match_AI 열(테이블 idx 11)은 AI 모듈(ais_ai.cpp) 있을 때만 표시. 없으면 열 개수·Info
@@ -150,6 +150,7 @@ struct PosPt { int64_t t; float lat, lon, cog, hdg, sog; };
 
 void draw_content(FFTViewer& v, bool just_opened){
     ImGuiIO& io = ImGui::GetIO();
+    int64_t vnow=(int64_t)(ImGui::GetTime()*1000);   // 프레임 시각 ms (재계산 캐시 스로틀 공용)
     bool remote = bewe_mod_my_station()[0] != 0;
     if(just_opened && !remote) local_load_today(v);
 
@@ -179,7 +180,7 @@ void draw_content(FFTViewer& v, bool just_opened){
     // 필터 박스를 수동으로 바꾸면 핀 해제 (지도 토글 일관성)
     if(map_pin){ char ms[16]; snprintf(ms,sizeof(ms),"%u",map_pin); if(strcmp(filter,ms)!=0) map_pin=0; }
 
-    auto on_clear=[&](){ std::lock_guard<std::mutex> lk(mtx); log.clear(); sel.clear(); anchor.clear(); has_focus=false; vloaded.clear(); };
+    auto on_clear=[&](){ std::lock_guard<std::mutex> lk(mtx); log.clear(); log_gen++; sel.clear(); anchor.clear(); has_focus=false; vloaded.clear(); };
 
     // 스페이스바 Recv 토글 + Ctrl+F/Tab 필터 포커스
     modview::space_toggle_recv(v, "ais", remote, win_focus, on_clear);
@@ -327,21 +328,26 @@ void draw_content(FFTViewer& v, bool just_opened){
     static std::vector<std::vector<float>>    trailbuf;
     static std::vector<std::vector<int64_t>>  trailt;   // 선택 배 항적 점별 수신시각(ms) — hover 시각 툴팁
     static std::vector<std::string>           tip1, tip2;
+    // 선택 배 전체 항적 캐시 — 매 프레임 log 전체 스캔 방지 (log_gen 세대 + 250ms 스로틀; 클릭=즉시)
+    static std::vector<float>   sel_tr;                  // lat,lon 인터리브
+    static std::vector<int64_t> sel_trt;                 // 점별 수신시각(ms)
+    static uint32_t c_tr_mmsi=0; static uint64_t c_tr_gen=~0ull; static int64_t c_tr_ms=0;
     // (지도 pts 는 아래 grps/mlatest/mtrail 집계 직후 "지도 오버레이 빌드" 블록에서 채움)
 
     // ── MMSI 그룹 집계 (표: 동일 MMSI 묶음, Up/Down/Cnt + 최신값. 캐시 게이팅) ──
     // (grps/rx_stations/info_w 선언은 위 "공유 캐시" 블록으로 이동)
     {
         std::lock_guard<std::mutex> lk(mtx);
-        static size_t c_n=(size_t)-1; static int64_t c_last=-1;
+        static uint64_t c_gen=~0ull; static int64_t c_aggms=0;
         static char c_filter[64]={'\xff'}; static int c_sc=-99; static bool c_asc=false;
         static int64_t c_lo=-1, c_hi=-1;
         // 게이팅은 분 단위로 양자화 — 재생 중 hi_ms 매프레임 변해도 재집계는 1분(=실1초)당 1회
         int64_t lo_q=(int64_t)tl_a, hi_q=(int64_t)hi_min;
-        size_t n_now=log.size(); int64_t last_t=n_now?log.back().t_ms:0;
-        bool datachg = (n_now!=c_n||last_t!=c_last);   // tl_filt(재생/구간) 중엔 라이브 변경 무시 = 스냅샷
-        if((!tl_filt && datachg)||strncmp(c_filter,filter,sizeof(c_filter))||c_sc!=sort_col||c_asc!=sort_asc
-           ||c_lo!=lo_q||c_hi!=hi_q){
+        size_t n_now=log.size();
+        bool datachg = (log_gen!=c_gen);   // tl_filt(재생/구간) 중엔 라이브 변경 무시 = 스냅샷 (mtx 보유 중 읽음)
+        bool uichg = strncmp(c_filter,filter,sizeof(c_filter))||c_sc!=sort_col||c_asc!=sort_asc
+           ||c_lo!=lo_q||c_hi!=hi_q;      // 사용자 조작/재생 스텝 = 스로틀 없이 즉시
+        if((!tl_filt && datachg && vnow-c_aggms>=250) || uichg){
             std::vector<AisGrp> g; g.reserve(256);
             std::unordered_map<uint32_t,int> idx; idx.reserve(512);
             std::unordered_map<uint32_t, AisRecord> ml; ml.reserve(512);
@@ -373,7 +379,7 @@ void draw_content(FFTViewer& v, bool just_opened){
             for(AisGrp& G : g) if(G.auth_cnt) G.cnt=(int)G.auth_cnt;   // 요약 상태: 실제 누계로 표시/정렬 통일
             std::stable_sort(g.begin(),g.end(),[&](const AisGrp&a,const AisGrp&b){ int c=grp_cmp(sort_col<0?0:sort_col,a,b); return (sort_col<0?true:sort_asc)? c<0:c>0; });
             grps.swap(g); mlatest.swap(ml); mtrail.swap(mt);
-            c_n=n_now; c_last=last_t; strncpy(c_filter,filter,sizeof(c_filter)-1); c_filter[sizeof(c_filter)-1]=0; c_sc=sort_col; c_asc=sort_asc; c_lo=lo_q; c_hi=hi_q;
+            c_gen=log_gen; c_aggms=vnow; strncpy(c_filter,filter,sizeof(c_filter)-1); c_filter[sizeof(c_filter)-1]=0; c_sc=sort_col; c_asc=sort_asc; c_lo=lo_q; c_hi=hi_q;
             // Info 폭 = 실제 데이터 최대 길이에 맞춤 (헤더 글자폭 무시)
             float mw=8.f;
             for(const AisGrp& G : grps){ char inf[64]; info_str(G.latest,inf,sizeof(inf));
@@ -382,10 +388,40 @@ void draw_content(FFTViewer& v, bool just_opened){
         }
     }
 
+#ifdef BEWE_MODULE_GUARD
+    // ── GUARD 경보 스냅샷 캐시 (g_gen 세대 게이팅) — 카드/링/행강조/상세/오버레이 공용 ──
+    // 매 프레임 snapshot()/overlays() 복사 + 선박별 vessel_alert 락 스캔 제거. 세대 변화 시에만 재생성.
+    static std::vector<guard_mod::AlertRow> galerts;       // 경보 스냅샷 (tl_filt 시 LOCAL 만)
+    static std::vector<guard_mod::OverlayPath> govl;       // 보조 오버레이 (구역/데모항적)
+    static std::unordered_map<uint32_t,uint32_t> valert;   // mmsi → (typ<<8)|sev — 필터 전 전체 기준
+    {
+        static uint64_t c_ggen=~0ull; static bool c_tlf=false;
+        uint64_t ggen=guard_mod::generation();
+        if(ggen!=c_ggen || tl_filt!=c_tlf){
+            galerts = guard_mod::snapshot();
+            govl    = guard_mod::overlays();
+            valert.clear();
+            for(const auto& r : galerts){                  // 필터 전 전체 기준 = 기존 vessel_alert 동일
+                if(!r.active || r.a.typ>=5) continue;
+                uint32_t mms[2]={r.a.mmsi,r.a.mmsi2};
+                for(uint32_t mm : mms){ if(!mm) continue;
+                    auto it=valert.find(mm); uint32_t val=((uint32_t)r.a.typ<<8)|r.a.sev;
+                    if(it==valert.end()) valert[mm]=val;
+                    else if(r.a.sev>(uint8_t)(it->second&0xff)) it->second=val; }   // 동률=선행 유지 (vessel_alert 동일)
+            }
+            // 플레이백/Hist 중엔 데몬(원격) 라이브 경보는 그 시각과 무관 → 로컬(구역·플레이백계산)만 표시
+            if(tl_filt) galerts.erase(std::remove_if(galerts.begin(),galerts.end(),
+                [](const guard_mod::AlertRow& r){ return strcmp(r.a.station,"LOCAL")!=0; }), galerts.end());
+            c_ggen=ggen; c_tlf=tl_filt;
+        }
+    }
+#endif
+
     // ── 지도 오버레이 빌드: grps(표)와 같은 필터/타임라인 윈도우 → 표에 뜬 배만 지도에 (100% 동기) ──
     //    마커=mlatest[최신 위치], 꼬리=mtrail[최근10분 전점]. 선택 배는 log 전체(전 항적).
     {
         pts.clear(); trailbuf.clear(); trailt.clear(); tip1.clear(); tip2.clear();
+        int sel_idx=-1;                                       // 선택 배 pts 인덱스 (캐시 항적 주입용)
         for(const AisGrp& G : grps){
             auto lit = mlatest.find(G.mmsi);
             if(lit==mlatest.end()) continue;                  // 최근 위치 없음(정적 only) → 마커 못 그림
@@ -398,9 +434,16 @@ void draw_content(FFTViewer& v, bool just_opened){
             mpt.label = G.name[0]? G.name : nullptr;
             trailbuf.emplace_back(); trailt.emplace_back();
             if(sel_mmsi==G.mmsi){                             // 선택 배 = 전체 항적(윈도우 무시) + 점별 수신시각
+                // log_gen 세대 캐시 + 250ms 스로틀 — 배 변경(클릭)은 즉시 재빌드. 슬롯은 빈 채로 두고
+                // 포인터 픽스업 뒤(파티션 앞)에 sel_tr/sel_trt 주입.
+                sel_idx=(int)pts.size();
                 std::lock_guard<std::mutex> lk(mtx);
-                for(const AisRecord& r : log)
-                    if(r.mmsi==G.mmsi && r.has_pos){ trailbuf.back().push_back((float)r.lat); trailbuf.back().push_back((float)r.lon); trailt.back().push_back(r.t_ms); }
+                if(c_tr_mmsi!=sel_mmsi || (log_gen!=c_tr_gen && vnow-c_tr_ms>=250)){
+                    sel_tr.clear(); sel_trt.clear();
+                    for(const AisRecord& r : log)
+                        if(r.mmsi==G.mmsi && r.has_pos){ sel_tr.push_back((float)r.lat); sel_tr.push_back((float)r.lon); sel_trt.push_back(r.t_ms); }
+                    c_tr_mmsi=sel_mmsi; c_tr_gen=log_gen; c_tr_ms=vnow;
+                }
             } else {
                 auto tit = mtrail.find(G.mmsi);               // 최근 10분 연속 꼬리(전점)
                 if(tit!=mtrail.end()) for(const TrailPt& p : tit->second){ trailbuf.back().push_back(p.lat); trailbuf.back().push_back(p.lon); }
@@ -421,10 +464,15 @@ void draw_content(FFTViewer& v, bool just_opened){
             pts[i].tip_l1  = tip1[i].c_str();
             pts[i].tip_l2  = tip2[i].empty()? nullptr : tip2[i].c_str();
         }
+        if(sel_idx>=0){                                    // 선택 배 캐시 항적 주입 — 반드시 파티션 앞
+            pts[sel_idx].trail   = sel_tr.empty()? nullptr : sel_tr.data();
+            pts[sel_idx].trail_n = (int)sel_tr.size()/2;
+            pts[sel_idx].trail_t = sel_trt.empty()? nullptr : sel_trt.data();
+        }
 #ifdef BEWE_MODULE_GUARD
-        // 경보 선박 마커를 뒤로 정렬 → 밀집 해역에서도 경보 배가 위에 그려짐
+        // 경보 선박 마커를 뒤로 정렬 → 밀집 해역에서도 경보 배가 위에 그려짐 (valert = 캐시)
         std::stable_partition(pts.begin(), pts.end(), [](const modview_map::MapPoint& p){
-            uint8_t gt, gs; return !guard_mod::vessel_alert((uint32_t)p.id, gt, gs); });
+            return valert.find((uint32_t)p.id)==valert.end(); });
 #endif
     }
 
@@ -476,10 +524,10 @@ void draw_content(FFTViewer& v, bool just_opened){
             const AisRecord& m=G.latest;
             ImGui::TableNextRow();
 #ifdef BEWE_MODULE_GUARD
-            { uint8_t gt,gs;                                     // 경보 선박 행 강조 (sev 색)
-              if(guard_mod::vessel_alert(G.mmsi,gt,gs))
+            { auto va=valert.find(G.mmsi);                       // 경보 선박 행 강조 (sev 색; valert = 캐시)
+              if(va!=valert.end()){ uint8_t gs=(uint8_t)(va->second&0xff);
                   ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
-                      gs>=3? IM_COL32(120,32,26,95) : gs==2? IM_COL32(115,78,22,85) : IM_COL32(105,96,26,70)); }
+                      gs>=3? IM_COL32(120,32,26,95) : gs==2? IM_COL32(115,78,22,85) : IM_COL32(105,96,26,70)); } }
 #endif
             char up[12]; hms(G.first,up);
             bool selrow = (sel_mmsi==G.mmsi);
@@ -664,11 +712,7 @@ void draw_content(FFTViewer& v, bool just_opened){
                    case 3: return IM_COL32(242,217, 89,0);
                    case 4: return IM_COL32(204,140,255,0);
                    default:return IM_COL32(115,179,255,0); } };
-    static std::vector<guard_mod::AlertRow> galerts;   // 이번 프레임 경보 스냅샷 (카드/링/상세 공용)
-    galerts = guard_mod::snapshot();
-    // 플레이백/Hist 중엔 데몬(원격) 라이브 경보는 그 시각과 무관 → 로컬(구역·플레이백계산)만 표시
-    if(tl_filt) galerts.erase(std::remove_if(galerts.begin(),galerts.end(),
-        [](const guard_mod::AlertRow& r){ return strcmp(r.a.station,"LOCAL")!=0; }), galerts.end());
+    // (galerts/valert/govl 스냅샷은 위 집계 블록 직후 g_gen 세대 캐시에서 채워짐)
     // GUARD 평가 (1초 주기): 구역 진입은 라이브·플레이백 공통. 충돌·위조는 플레이백에서 GUI 계산.
     {
         static bool s_land_set=false;
@@ -685,25 +729,30 @@ void draw_content(FFTViewer& v, bool just_opened){
                 vs.push_back(s); }
             int64_t cut = tl_filt ? hi_ms : (int64_t)4e18;
             { std::lock_guard<std::mutex> lk(mtx);
-              for(auto& s : vs){
-                // 최신 레코드(≤cut) → sog/cog/nav/ai; + 최근 120초 변위로 속도 평활화(COG 노이즈 제거)
-                int64_t t_new=0,t_old=0; double la_n=0,lo_n=0,la_o=0,lo_o=0; bool scal=false;
-                for(auto it=log.rbegin(); it!=log.rend(); ++it){
-                    if(it->mmsi!=s.mmsi || it->t_ms>cut) continue;
-                    if(!scal){ s.sog=it->sog; s.cog=it->cog; s.nav_status=it->nav_status;
-                               s.ai_status=it->ai_status; s.ai_mmsi=it->ai_mmsi; scal=true; }
-                    if(it->has_pos){
-                        if(t_new==0){ t_new=it->t_ms; la_n=it->lat; lo_n=it->lon; }
-                        if(cut - it->t_ms <= 120000){ t_old=it->t_ms; la_o=it->lat; lo_o=it->lon; }
-                        else break;
-                    }
-                }
-                if(t_new>0 && t_old>0 && t_new-t_old>=20000){
-                    double dt=(t_new-t_old)/1000.0;
-                    double ml=111320.0, mo=111320.0*cos(la_n*M_PI/180.0);
-                    s.vx=(lo_n-lo_o)*mo/dt; s.vy=(la_n-la_o)*ml/dt; s.vknown=true;
-                }
-              } }
+              // 최신 레코드(≤cut) → sog/cog/nav/ai; + 최근 120초 변위로 속도 평활화(COG 노이즈 제거)
+              // per-ship 역방향 전체 스캔 대신 단일 전방 패스 O(log+ships) — 시간순 log 에서 결과 동일
+              // (마지막 덮음=최신 ≤cut 레코드, 마지막 pos=최신 위치, 첫 창내 pos=창내 최고령)
+              std::unordered_map<uint32_t,size_t> vidx; vidx.reserve(vs.size()*2);
+              for(size_t k=0;k<vs.size();k++) vidx[vs[k].mmsi]=k;
+              struct VTmp{ int64_t t_new=0,t_old=0; double la_n=0,lo_n=0,la_o=0,lo_o=0; };
+              std::vector<VTmp> tmp(vs.size());
+              for(const AisRecord& r : log){
+                  if(r.t_ms>cut) continue;
+                  auto it=vidx.find(r.mmsi); if(it==vidx.end()) continue;
+                  guard_mod::VesselSnap& s=vs[it->second]; VTmp& t=tmp[it->second];
+                  s.sog=r.sog; s.cog=r.cog; s.nav_status=r.nav_status;
+                  s.ai_status=r.ai_status; s.ai_mmsi=r.ai_mmsi;
+                  if(r.has_pos){
+                      t.t_new=r.t_ms; t.la_n=r.lat; t.lo_n=r.lon;
+                      if(cut-r.t_ms<=120000 && t.t_old==0){ t.t_old=r.t_ms; t.la_o=r.lat; t.lo_o=r.lon; }
+                  }
+              }
+              for(size_t k=0;k<vs.size();k++){ VTmp& t=tmp[k]; guard_mod::VesselSnap& s=vs[k];
+                  if(t.t_new>0 && t.t_old>0 && t.t_new-t.t_old>=20000){
+                      double dt=(t.t_new-t.t_old)/1000.0;
+                      double ml=111320.0, mo=111320.0*cos(t.la_n*M_PI/180.0);
+                      s.vx=(t.lo_n-t.lo_o)*mo/dt; s.vy=(t.la_n-t.la_o)*ml/dt; s.vknown=true;
+                  } } }
             guard_mod::eval_local_zones(vs, wall_now_ms());
             if(tl_filt) guard_mod::eval_playback_alerts(vs, wall_now_ms());
         }
@@ -772,7 +821,7 @@ void draw_content(FFTViewer& v, bool just_opened){
         static std::vector<ImVec2> ppx;
         struct GHead { uint32_t mmsi; ImVec2 px; };
         static std::vector<GHead> gheads; gheads.clear();
-        for(const auto& ov : guard_mod::overlays()){
+        for(const auto& ov : govl){                     // g_gen 세대 캐시 (guard_mod::overlays 스냅샷)
             ppx.clear();
             for(size_t i=0;i+1<ov.ll.size(); i+=2) ppx.push_back(ll2px(ov.ll[i], ov.ll[i+1]));
             if(ppx.size()<2) continue;

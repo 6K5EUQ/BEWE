@@ -75,6 +75,9 @@ static void on_ch_stop(FFTViewer& v, int ch){
 
 // ── 로그 ──────────────────────────────────────────────────────────────────
 void append_log(const AcarsMsg& m){
+#ifdef BEWE_HEADLESS
+    (void)m; return;  // CLI: 뷰 없음 — 표시 로그 RAM 미적재 (JOIN 은 Central 히스토리로 시드)
+#endif
     std::lock_guard<std::mutex> lk(mtx);
     // dedup: 히스토리/라이브 경계·재구독에서 같은 레코드 중복 도달 가능
     int n = (int)msglog.size();

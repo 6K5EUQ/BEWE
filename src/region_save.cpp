@@ -234,6 +234,10 @@ std::string FFTViewer::do_region_save_work(){
     int64_t valid_start = (snap_write >= max_cap) ? snap_write - max_cap : 0;
     samp_start = std::max(samp_start, valid_start);
     samp_end   = std::min(samp_end,   snap_write);
+    // 비동기 writer: enqueue 카운터(snap_write)보다 디스크 기록이 뒤처질 수 있음 —
+    // 아직 파일에 없는 구간(이전 pass 잔재)을 읽지 않도록 flushed 워터마크로 상한.
+    { int64_t flushed = tm_iq_flushed_sample.load(std::memory_order_acquire);
+      if(flushed > 0) samp_end = std::min(samp_end, flushed); }
 
     bewe_log_push(0,"[region_save] samp_start=%lld samp_end=%lld snap_write=%lld valid_start=%lld max_total=%lld sr=%u decim=%d\n",
                    (long long)samp_start,(long long)samp_end,

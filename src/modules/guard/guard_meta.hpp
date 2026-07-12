@@ -86,6 +86,7 @@ std::vector<AlertRow> snapshot();   // 내부 log 사본 (aid 별 최신상태, 
 int  active_count();                // 활성 경보 수 (보조 typ>=5 제외)
 // mmsi 가 관련된 활성 경보 중 최고 sev 1건 → typ/sev 채움 (ais_view 행 강조용)
 bool vessel_alert(uint32_t mmsi, uint8_t& typ, uint8_t& sev);
+uint64_t generation();              // g_log/g_overlays 변경 세대 (뷰 스냅샷 캐시 무효화)
 
 // 보조 오버레이 (typ=6 위험구역 / typ=7 데모 항적) — reco/msg 텍스트에
 // "lat,lon;lat,lon;..." 꼭짓점 패킹, 청크(mmsi=idx, mmsi2=총수) 조립 완료분만 반환.

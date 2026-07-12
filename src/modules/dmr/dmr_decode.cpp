@@ -122,6 +122,7 @@ void worker(FFTViewer& v, int ch_idx){
     int64_t last_diag=now_ms();
     bool gate_prev=false;   // 스컬치 게이트 이전상태 (AM/FM 과 동일 sq_gate 사용)
     bool hold_prev=false;   // Holding 이전상태 (전환 edge 에서만 runtime freeze/resume)
+    bool idle_skip=false;   // 무신호 스킵 상태 — 복귀 시 워커 DSP 리셋 (demod.cpp 와 동형)
 
     while(!worker_stop_req(ch_idx) && !v.sdr_stream_error.load() && ch.filter_active){
         // ── Holding(CF 범위 밖): 복조 불가 → 무거운 DDC 루프 건너뛰고 연산 정지.
@@ -141,6 +142,33 @@ void worker(FFTViewer& v, int ch_idx){
               osc.set_freq((double)off_hz,(double)msr); prev_cf=cur;
           }
         }
+        // ── 스컬치 게이트: AM/FM 과 동일한 ch.sq_gate (HOST FFT 기반) 사용.
+        //    닫힘 = 신호 없음 → 복조기에 노이즈 안 넣음(가짜 voice-sync 방지).
+        //    닫힘 edge 에서 예약 음성(B–F) 폐기 + AMBE 리셋 → 잔향/클릭 차단.
+        bool gate = ch.sq_gate.load(std::memory_order_relaxed);
+        if(gate_prev && !gate){ dec.clear_voice(); ambe.reset(); a_prev=0.f; rec_close(); }  // 통화 끝 → WAV 닫기
+        gate_prev = gate;
+
+        // 무신호 → 무거운 per-sample DSP(혼합/8단 IIR/atan2) 스킵 (demod.cpp 와 동형).
+        // read-ptr 은 wp 까지가 아니라 20ms 꼬리를 남김: 게이트 열림 순간 현재 코드가
+        // 공급하던 링 리드인(디코더가 sync 앞 56심볼 필요)을 그대로 보존.
+        // gate 는 FFT 행 피크 기반(cli_host/ui 스레드 계산)이라 DSP 정지와 무관하게 열림 감지.
+        if(!gate){
+            size_t wp0=v.ring_wp.load(std::memory_order_acquire);
+            size_t keep=(size_t)(msr*0.02);
+            my_rp.store((wp0-keep)&IQ_RING_MASK, std::memory_order_release);
+            idle_skip=true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        if(idle_skip){   // idle→active: 워커 DSP 상태만 리셋. dec.reset() 은 호출하지 않음
+                         // (polLock_/omega_ 적응 유지 — 약신호 재획득 성능 보존).
+            for(int k=0;k<4;k++){ lpi[k].s=lpq[k].s=0; }
+            dec_i=dec_q=0; dec_cnt=0; prev_i=prev_q=0;
+            std::fill(box.begin(),box.end(),0.f); box_sum=0; box_pos=0;
+            idle_skip=false;
+        }
+
         size_t wp=v.ring_wp.load(std::memory_order_acquire);
         size_t rp=my_rp.load(std::memory_order_relaxed);
         size_t lag=(wp-rp)&IQ_RING_MASK;
@@ -154,13 +182,6 @@ void worker(FFTViewer& v, int ch_idx){
             lag=(wp-rp)&IQ_RING_MASK;
         }
         if(lag==0){ std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue; }
-
-        // ── 스컬치 게이트: AM/FM 과 동일한 ch.sq_gate (HOST FFT 기반) 사용.
-        //    닫힘 = 신호 없음 → 복조기에 노이즈 안 넣음(가짜 voice-sync 방지).
-        //    닫힘 edge 에서 예약 음성(B–F) 폐기 + AMBE 리셋 → 잔향/클릭 차단.
-        bool gate = ch.sq_gate.load(std::memory_order_relaxed);
-        if(gate_prev && !gate){ dec.clear_voice(); ambe.reset(); a_prev=0.f; rec_close(); }  // 통화 끝 → WAV 닫기
-        gate_prev = gate;
 
         size_t avail=std::min(lag,BATCH);
         for(size_t s=0;s<avail;s++){

@@ -24,7 +24,8 @@ namespace guard_mod { void host_ensure(FFTViewer& v); }
 namespace ais_mod {
 
 std::mutex             mtx;
-std::vector<AisRecord> log;
+std::vector<AisRecord> log;      // 변형 시 반드시 log_gen++ (뷰 캐시 무효화)
+uint64_t               log_gen = 0;
 char                   filter[64] = {};
 
 // ── 워커 슬롯 ──────────────────────────────────────────────────────────────
@@ -84,12 +85,16 @@ static void on_ch_stop(FFTViewer& v, int ch){
 
 // ── 표시 로그 append (dedup: 히스토리/라이브 경계 중복 도달 대비) ───────────
 void append_log(const AisRecord& m){
+#ifdef BEWE_HEADLESS
+    (void)m; return;  // CLI: 뷰 없음 — 표시 로그 RAM 미적재 (JOIN 은 Central 히스토리로 시드)
+#endif
     std::lock_guard<std::mutex> lk(mtx);
     int n=(int)log.size();
     for(int i=n-1;i>=0 && i>=n-64;i--)
         if(log[i].t_ms==m.t_ms && log[i].mmsi==m.mmsi && log[i].msg_type==m.msg_type) return;
     if(n>=LOG_MAX) log.erase(log.begin());
     log.push_back(m);
+    log_gen++;
 }
 
 // station_id ("DGS-2_DGS-2") → 표시명 ("DGS-2")
@@ -234,10 +239,12 @@ static std::vector<AisRecord> g_stash;   // Hist 진입 시 라이브 log 대피
 static void log_stash(){
     std::lock_guard<std::mutex> lk(mtx);
     g_stash = std::move(log); log.clear();   // move: 이전 잔여 버퍼 폐기
+    log_gen++;
 }
 static void log_restore(){
     std::lock_guard<std::mutex> lk(mtx);
     log = std::move(g_stash); g_stash.clear();
+    log_gen++;
 }
 // 과거 날짜 아카이브 기지별 JSONL 1개 → 파싱·기지명 태그·시간순 병합 (기지 수만큼 호출)
 static void on_hist_file(const char* station, const char* data, size_t n){
@@ -249,6 +256,7 @@ static void on_hist_file(const char* station, const char* data, size_t n){
     std::stable_sort(log.begin(), log.end(),
                      [](const AisRecord& a, const AisRecord& b){ return a.t_ms < b.t_ms; });
     if((int)log.size() > LOG_MAX) log.erase(log.begin(), log.end()-LOG_MAX);
+    log_gen++;
 }
 
 // JOIN: 단일 MMSI 온디맨드 전체 이력 도착 → 그 MMSI 기존 log 레코드(구독 요약분)를
@@ -275,6 +283,7 @@ static void on_vessel_hist(FFTViewer& v, const uint8_t* d, size_t n){
         [key](const AisRecord& r){ return r.mmsi == key; }), log.end());
     for(const auto& m : recs) log.push_back(m);
     if((int)log.size() > LOG_MAX) log.erase(log.begin(), log.end()-LOG_MAX);
+    log_gen++;
 }
 
 #ifndef BEWE_HEADLESS
@@ -288,6 +297,7 @@ void local_load_today(FFTViewer& v){
     std::lock_guard<std::mutex> lk(mtx);
     if(!parsed.empty()) log = std::move(parsed);
     if((int)log.size() > LOG_MAX) log.erase(log.begin(), log.end()-LOG_MAX);
+    log_gen++;
 }
 #endif
 

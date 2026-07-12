@@ -47,8 +47,11 @@ public:
     std::mutex               central_lan_ips_mtx;
 
     // ── 목록 조회 (persistent TCP) ──────────────────────────────────────
+    // interval_ms: parent globe 는 700ms 유지 필수(last_seen grace 1s 커플링),
+    // JOIN/HOST 자식 세션은 geo 캐시 갱신용이라 5000ms 로 충분.
     void start_polling(const std::string& host, int port,
-                       std::function<void(const std::vector<Station>&)> cb);
+                       std::function<void(const std::vector<Station>&)> cb,
+                       int interval_ms = 700);
     void stop_polling();
 
     // ── HOST 모드 ─────────────────────────────────────────────────────────
@@ -66,7 +69,12 @@ public:
                            std::function<void()> on_disconnect = nullptr);
     void stop_mux_adapter();
     bool is_central_connected() const { return mux_running_.load(); }
-    size_t queue_bytes() const { return central_queue_bytes_; }
+    size_t queue_bytes() const { return central_queue_bytes_.load(std::memory_order_relaxed); }
+    // 파일 push 백프레셔 공용 술어 — 연결 끊기면 false (stale 카운터 무한 대기 방지).
+    // 사용처: while(cli.uplink_backlogged() [&& 생산자 자체 종료조건]) sleep(10ms);
+    bool uplink_backlogged(size_t cap = 2*1024*1024) const {
+        return is_central_connected() && queue_bytes() > cap;
+    }
 
     // HOST 주기 STATS 출력용 (3초 평균 전송 바이트/s)
     std::atomic<uint64_t> stat_tx_total_bytes{0};
@@ -136,7 +144,8 @@ private:
     std::thread       poll_thr_;
     std::atomic<bool> poll_running_{false};
     void poll_loop(std::string host, int port,
-                   std::function<void(const std::vector<Station>&)> cb);
+                   std::function<void(const std::vector<Station>&)> cb,
+                   int interval_ms);
 
     // MUX 어댑터
     std::thread       mux_thr_;
@@ -152,7 +161,7 @@ private:
     std::condition_variable  central_queue_cv_;
     struct QueueEntry { std::vector<uint8_t> data; bool no_drop; };
     std::deque<QueueEntry> central_send_queue_;
-    size_t                   central_queue_bytes_ = 0;
+    std::atomic<size_t>      central_queue_bytes_{0};  // 뮤텍스 밖(백프레셔 폴링)에서도 읽힘
     static constexpr size_t  CENTRAL_QUEUE_MAX_BYTES = 4 * 1024 * 1024; // 4MB (~1초)
 
     // (hdr, hdr_len) + (data, data_len) 을 합쳐 하나의 청크로 enqueue

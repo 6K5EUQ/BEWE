@@ -95,18 +95,64 @@ static const std::vector<FillEdge>& fill_edges(){
     return E;
 }
 
-// ── 육지 판정 (GUARD 충돌: 두 배 사이 육지면 물리적으로 충돌 불가 → 배제) ──
-// fill_edges(해안선 닫힌 링) 위 even-odd 레이캐스팅. lat 오름차순 정렬 → 범위만 검사.
-bool point_on_land(double lat, double lon){
-    const auto& E=fill_edges();
-    int cross=0;
-    for(const auto& e : E){
-        if(lat < e.latlo) break;                 // 정렬됨 — 이후는 다 위(무관)
-        if(lat >= e.lathi) continue;
-        double lon_at = e.lonlo + (double)e.slope*(lat-e.latlo);
-        if(lon_at > lon) cross++;
+// 해안선 청크 인덱스 — NAN 경계·최대 512점 단위로 분할 + bbox (뷰 밖 청크 통째 스킵용, 1회 캐시)
+struct CoastChunk { float la0,la1,lo0,lo1; int i0,i1; };   // bbox + KR_OSM_COAST float 인덱스 [i0,i1)
+static const std::vector<CoastChunk>& coast_chunks(){
+    static std::vector<CoastChunk> C; static bool done=false;
+    if(!done){ done=true;
+        const int CAP=512;
+        int start=-1,npts=0; float la0=90,la1=-90,lo0=180,lo1=-180;
+        auto close=[&](int end){ if(npts>=2) C.push_back({la0,la1,lo0,lo1,start,end});
+                                 start=-1;npts=0;la0=90;la1=-90;lo0=180;lo1=-180; };
+        for(int i=0;i+1<KR_OSM_COAST_COUNT;i+=2){
+            float lat=KR_OSM_COAST[i], lon=KR_OSM_COAST[i+1];
+            if(std::isnan(lat)){ close(i); continue; }
+            if(start<0) start=i;
+            if(lat<la0)la0=lat; if(lat>la1)la1=lat; if(lon<lo0)lo0=lon; if(lon>lo1)lo1=lon;
+            if(++npts==CAP){ close(i+2); start=i; npts=1; la0=la1=lat; lo0=lo1=lon; }  // 경계점 중복 → 연결 세그먼트는 다음 청크가 그림
+        }
+        close(KR_OSM_COAST_COUNT&~1);
     }
-    return cross & 1;
+    return C;
+}
+
+// ── 육지 판정 (GUARD 충돌: 두 배 사이 육지면 물리적으로 충돌 불가 → 배제) ──
+// fill_edges(해안선 닫힌 링) 위 even-odd 레이캐스팅. lat 밴드 인덱스로 해당 밴드만 검사.
+// lat 0.05° 밴드별 엣지 인덱스 (point_on_land 가속; fill_edges 결과 동일, 1회 캐시).
+// 밴드 범위(lb0/nlb)는 데이터의 lat min/max 에서 유도 — OSM 데이터 교체 시 자동 추종.
+static const float LBSTEP=0.05f;
+struct LandBands { double lb0=0; int nlb=0; std::vector<int32_t> idx; std::vector<int32_t> off; };
+static const LandBands& land_bands(){
+    static LandBands L; static bool done=false;
+    if(!done){ done=true;
+        const auto& E=fill_edges();
+        double lmin=90, lmax=-90;
+        for(const auto& e:E){ if(e.latlo<lmin)lmin=e.latlo; if(e.lathi>lmax)lmax=e.lathi; }
+        if(E.empty()||lmin>lmax){ L.lb0=0; L.nlb=0; L.off.assign(1,0); return L; }
+        L.lb0=std::floor(lmin/LBSTEP)*LBSTEP;
+        L.nlb=(int)std::ceil((lmax-L.lb0)/LBSTEP)+1;
+        std::vector<int> cnt(L.nlb,0);
+        auto band=[&](double la){ int b=(int)((la-L.lb0)/LBSTEP); return b<0?0:(b>=L.nlb?L.nlb-1:b); };  // double: point_on_land 쿼리와 동일 연산 → 밴드 경계 불일치 방지
+        for(const auto& e:E) for(int b=band(e.latlo);b<=band(e.lathi);b++) cnt[b]++;
+        L.off.assign(L.nlb+1,0);
+        for(int b=0;b<L.nlb;b++) L.off[b+1]=L.off[b]+cnt[b];
+        L.idx.resize(L.off[L.nlb]); std::vector<int32_t> w(L.off.begin(),L.off.end()-1);
+        for(int32_t i=0;i<(int32_t)E.size();i++)
+            for(int b=band(E[i].latlo);b<=band(E[i].lathi);b++) L.idx[w[b]++]=i;
+    }
+    return L;
+}
+bool point_on_land(double lat, double lon){
+    const auto& E=fill_edges(); const auto& L=land_bands();
+    if(L.nlb==0 || lat<L.lb0 || lat>=L.lb0+(double)L.nlb*LBSTEP) return false;  // 데이터 밖 = 바다 (기존 cross=0 과 동일)
+    int b=(int)((lat-L.lb0)/LBSTEP), cross=0;
+    for(int32_t k=L.off[b];k<L.off[b+1];k++){
+        const FillEdge& e=E[L.idx[k]];
+        if(lat<e.latlo || lat>=e.lathi) continue;
+        double lon_at=e.lonlo+(double)e.slope*(lat-e.latlo);
+        if(lon_at>lon) cross++;
+    }
+    return cross&1;
 }
 bool seg_crosses_land(double la1,double lo1,double la2,double lo2){
     double d=std::max(std::fabs(la2-la1), std::fabs(lo2-lo1));
@@ -247,19 +293,35 @@ MapResult draw_map(const char* id, MapView& v, const std::vector<MapPoint>& pts,
     }
 
     // ── OSM 한국 해안선 (KR_OSM_COAST: interleaved lat,lon, NAN 끊김, 화면밖 컬링) ──
+    // 카메라(bbox)/크기 변경 시만 재투영 → v._coast 세그먼트(p0 상대 px) 캐시, 정지 프레임은 재방출만.
     if(v.show_coast && kr_active){
-        bool have=false; ImVec2 prev;
-        for(int i=0;i+1<KR_OSM_COAST_COUNT;i+=2){
-            float lat=KR_OSM_COAST[i], lon=KR_OSM_COAST[i+1];
-            if(std::isnan(lat)){ have=false; continue; }
-            ImVec2 cur=LL2PX(lat,lon);
-            if(have){
-                bool out=(prev.x<p0.x&&cur.x<p0.x)||(prev.x>p1.x&&cur.x>p1.x)||
-                         (prev.y<p0.y&&cur.y<p0.y)||(prev.y>p1.y&&cur.y>p1.y);
-                if(!out) dl->AddLine(prev,cur, IM_COL32(120,150,175,255), 1.2f);
+        bool changed = v.lat0!=v._co_lat0 || v.lat1!=v._co_lat1
+                    || v.lon0!=v._co_lon0 || v.lon1!=v._co_lon1
+                    || W!=v._co_W || H!=v._co_H;
+        if(changed){
+            v._co_lat0=v.lat0; v._co_lat1=v.lat1; v._co_lon0=v.lon0; v._co_lon1=v.lon1; v._co_W=W; v._co_H=H;
+            v._coast.clear();
+            double latsp=v.lat1-v.lat0, lonsp=v.lon1-v.lon0;
+            for(const CoastChunk& c : coast_chunks()){
+                if((double)c.la1<v.lat0||(double)c.la0>v.lat1||(double)c.lo1<v.lon0||(double)c.lo0>v.lon1)
+                    continue;                                   // 뷰 무교차 → 통째 스킵 (기존 세그 컬링과 동치)
+                bool have=false; float px=0,py=0;
+                for(int i=c.i0;i+1<c.i1;i+=2){
+                    float qx=(float)((KR_OSM_COAST[i+1]-v.lon0)/lonsp*W);   // LL2PX 와 동일식, p0 상대
+                    float qy=(float)((v.lat1-KR_OSM_COAST[i])/latsp*H);
+                    if(have){
+                        bool out=(px<0&&qx<0)||(px>W&&qx>W)||(py<0&&qy<0)||(py>H&&qy>H);
+                        if(!out){ v._coast.push_back(px); v._coast.push_back(py);
+                                  v._coast.push_back(qx); v._coast.push_back(qy); }
+                    }
+                    px=qx; py=qy; have=true;
+                }
             }
-            prev=cur; have=true;
         }
+        for(size_t i=0;i+3<v._coast.size();i+=4)
+            dl->AddLine(ImVec2(p0.x+v._coast[i],  p0.y+v._coast[i+1]),
+                        ImVec2(p0.x+v._coast[i+2],p0.y+v._coast[i+3]),
+                        IM_COL32(120,150,175,255), 1.2f);
     }
     dl->PopClipRect();   // KR bbox 클립 해제 (격자/마커는 전체 캔버스에)
 

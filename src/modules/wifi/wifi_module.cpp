@@ -74,6 +74,9 @@ static void on_ch_stop(FFTViewer& v, int ch){
 
 // ── 표시 로그 append (진단 레코드는 1/s, dedup 불필요) ──────────────────────
 void append_log(const WifiRecord& m){
+#ifdef BEWE_HEADLESS
+    (void)m; return;  // CLI: 뷰 없음 — 표시 로그 RAM 미적재 (JOIN 은 Central 히스토리로 시드)
+#endif
     std::lock_guard<std::mutex> lk(mtx);
     if((int)log.size() >= LOG_MAX) log.erase(log.begin());
     log.push_back(m);

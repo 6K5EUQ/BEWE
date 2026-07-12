@@ -56,7 +56,8 @@ constexpr float DEFAULT_DB_MIN = -120.0f;
 constexpr float DEFAULT_DB_MAX = 0.0f;
 
 // Start the host-side worker. Idempotent: subsequent calls are no-op.
-// Worker terminates only on stop_worker(). Records only when v.tm_iq_on=true.
+// Worker terminates only on stop_worker(). Records while a mission is active
+// (v.active_hist_dir() non-empty; TM IQ 롤링과 독립).
 void start_worker(FFTViewer* v);
 void stop_worker();
 

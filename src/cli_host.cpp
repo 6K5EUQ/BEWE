@@ -64,7 +64,7 @@ void FFTViewer::update_channel_squelch(){
     float nyq_mhz = header.sample_rate / 2e6f;
     if(nyq_mhz < 0.001f) return;
     int hf = fft_size / 2;
-    int fi = (total_ffts > 0 ? total_ffts - 1 : 0) % MAX_FFTS_MEMORY;
+    int fi = (total_ffts > 0 ? total_ffts - 1 : 0) % FFT_HISTORY_ROWS;
     const float* rowp = fft_data.data() + fi * fft_size;
     // 같은 FFT 행이면 채널별 peak 재스캔 생략 (행 갱신은 ~1.5-37Hz, 호출은 ~50Hz)
     bool same_row = (total_ffts == sq_last_total_ffts);
@@ -380,7 +380,7 @@ void run_cli_host(){
         v.header.power_max = 0.f;
         v.display_power_min = -80.f;
         v.display_power_max = 0.f;
-        v.fft_data.assign((size_t)MAX_FFTS_MEMORY * DEFAULT_FFT_SIZE * FFT_PAD_FACTOR, 0);
+        v.fft_data.assign((size_t)FFT_HISTORY_ROWS * DEFAULT_FFT_SIZE * FFT_PAD_FACTOR, 0);
         v.current_spectrum.assign(DEFAULT_FFT_SIZE * FFT_PAD_FACTOR, -80.f);
         v.autoscale_active = false;
         v.create_waterfall_texture();
@@ -934,6 +934,9 @@ void run_cli_host(){
                 if(fread(buf.data() + sizeof(PktDbSaveData), 1, n, fp) != n) break;
                 auto data_pkt = make_packet(PacketType::DB_SAVE_DATA, buf.data(), sizeof(PktDbSaveData)+n);
                 srv->cb.on_relay_broadcast(data_pkt.data(), data_pkt.size(), true);
+                // backpressure: 큐 2MB 초과 시 대기 (파일 전체 RAM 상주 방지)
+                while(central_cli.uplink_backlogged())
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 sent += (long)n;
             }
             bewe_log_push(0,"[SCHED-DB] uploaded %s (%ld bytes) by %s\n", base, total, op.c_str());
@@ -1472,6 +1475,7 @@ void run_cli_host(){
     // time_point{} 이면 대기 없음, 그 외 값이면 그 시각에 autoscale_active=true 적용.
     clk::time_point pending_autoscale_at{};
     auto loop_last     = clk::now();
+    auto next_tick     = clk::now();  // 절대 데드라인 pacing 기준점
 
     // SDR reconnect state
     bool     bg_join_started = false;
@@ -1502,7 +1506,11 @@ void run_cli_host(){
         auto now = clk::now();
         float dt = std::chrono::duration<float>(now - loop_last).count();
         loop_last = now;
-        int sleep_ms = 20 - (int)(dt * 1000);
+        // 절대 데드라인 pacing — 기존 dt 기반 계산은 dt 에 이전 iteration 의 poll
+        // sleep 이 포함되어 sleep/no-sleep 교대 발생, 실 루프가 ~95Hz 였음.
+        next_tick += std::chrono::milliseconds(20);
+        if(next_tick < now) next_tick = now; // 장시간 블록(rx stop join 등) 후 burst 방지
+        int sleep_ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(next_tick - now).count();
         if(sleep_ms > 0){
             struct pollfd pfd{STDIN_FILENO, POLLIN, 0};
             poll(&pfd, 1, sleep_ms);
@@ -1574,7 +1582,8 @@ void run_cli_host(){
         if(v.net_srv){
             static auto sq_update_last = clk::now();
             float el_up = std::chrono::duration<float>(clk::now()-sq_update_last).count();
-            if(el_up >= 0.02f){
+            // 0.018f: 20ms 격자와의 beat 방지 — 경계 지터로 격회 스킵(25Hz화) 막음
+            if(el_up >= 0.018f){
                 sq_update_last = clk::now();
                 v.update_channel_squelch();
             }
@@ -1583,7 +1592,7 @@ void run_cli_host(){
             float el = std::chrono::duration<float>(clk::now()-sq_sync_last).count();
             if(el >= 0.1f){
                 sq_sync_last = clk::now();
-                v.net_srv->broadcast_channel_sync(v.channels, MAX_CHANNELS);
+                v.net_srv->broadcast_channel_sync(v.channels, MAX_CHANNELS, /*periodic=*/true);
             }
         }
 

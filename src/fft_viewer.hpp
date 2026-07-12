@@ -159,6 +159,8 @@ public:
     // 워터폴/스펙트럼: 항상 2500행 메모리 유지 (위 MAX_FFTS_MEMORY)
     // IQ 롤링: T키로 활성화
     std::atomic<bool> tm_iq_on{false};     // T키: IQ SSD 롤링 활성
+    // HIST(.bewehist) 기록은 TM IQ 롤링과 독립 — 미션 활성(active_hist_dir)이면 기록
+    // (게이트는 long_waterfall.cpp worker_loop)
     // ── Signal Library / Emitter DB ───────────────────────────────────
     bool                            sig_lib_panel_open = false;   // M키 토글
     std::mutex                      sig_lib_mtx;                  // emitters/sightings 보호
@@ -284,11 +286,23 @@ public:
     // TM_IQ_DIR: BEWEPaths::time_temp_dir() 로 런타임 결정
     static constexpr size_t      TM_IQ_SECS = 60;     // 롤링 길이 (초)
     int      tm_iq_fd=-1;   // unbuffered POSIX fd
-    // IQ 배치 버퍼: 65536샘플 모아서 한 번에 pwrite (syscall 최소화)
-    static constexpr int TM_IQ_BATCH = 65536;
-    std::vector<int16_t> tm_iq_batch_buf;
-    int tm_iq_batch_cnt=0;
-    int64_t  tm_iq_write_sample=0;         // 현재 파일 내 쓰기 샘플 위치
+    // TM IQ 비동기 writer: 캡처 스레드는 복사+enqueue만, ×16 스케일링/pwrite 는 전용
+    // 스레드. 디스크가 느리면(SD 실속) 큐 초과분 drop-oldest — 캡처는 절대 블로킹 안 함.
+    static constexpr size_t TM_IQ_QUEUE_MAX_BYTES = 64ull<<20; // 64 MiB
+    struct TmIqChunk { int64_t start_sample; std::vector<int16_t> data; };
+    std::thread             tm_iq_wr_thr;
+    std::atomic<bool>       tm_iq_wr_run{false};
+    std::mutex              tm_iq_q_mtx;
+    std::condition_variable tm_iq_q_cv;
+    std::deque<TmIqChunk>   tm_iq_q;          // tm_iq_q_mtx 보호
+    size_t                  tm_iq_q_bytes=0;  // tm_iq_q_mtx 보호
+    std::atomic<uint64_t>   tm_iq_dropped_bytes{0}; // 디스크 지연으로 버린 바이트 누계
+    std::atomic<bool>       tm_iq_write_failed{0};  // writer pwrite 실패 → 다음 open 이 close/재생성
+    std::mutex              tm_iq_oc_mtx;     // open/close 직렬화 (동시 토글 → thread 이중 assign 방지)
+    std::atomic<int64_t> tm_iq_write_sample{0}; // 현재 파일 내 쓰기 샘플 위치 (enqueue 시 증가)
+    // 디스크에 실제 기록 완료된 샘플 위치 (writer 갱신) — 읽기(region/TM replay)는
+    // enqueue 카운터가 아니라 이 워터마크까지만 신뢰해야 함 (큐 적체분은 아직 파일에 없음)
+    std::atomic<int64_t> tm_iq_flushed_sample{0};
     int64_t  tm_iq_total_samples=0;        // 파일 전체 샘플 수 (미리 할당)
     // 초 단위 타임스탬프 배열 [0..TM_IQ_SECS-1]: 각 초 청크의 시작 시각
     time_t   tm_iq_chunk_time[TM_IQ_SECS]={};
@@ -307,8 +321,9 @@ public:
 
     void tm_iq_open();
     void tm_iq_close();
+    void tm_iq_close_locked();   // tm_iq_oc_mtx 보유 상태에서만 호출 (open 의 실패복구 경로)
     void tm_iq_write(const int16_t* samples, int n_pairs);
-    void tm_iq_flush_batch();
+    void tm_iq_writer_loop();
     void tm_mark_rows(int fft_idx);
     void tm_update_display();
     bool tm_rec_start();
@@ -563,6 +578,7 @@ public:
 
     // ── Undo/Redo 시스템 ──────────────────────────────────────────────
     struct EidUndoEntry {
+        bool has_data = true;   // false = 대형 배열 7개 미보관 (뷰/태그 전용 light 엔트리)
         std::vector<float> envelope, ch_i, ch_q, phase, inst_freq;
         std::vector<float> orig_ch_i, orig_ch_q;
         std::vector<EidTag> tags;
@@ -587,9 +603,9 @@ public:
     std::deque<EidUndoEntry> eid_undo_stack;
     std::deque<EidUndoEntry> eid_redo_stack;
     static constexpr int EID_UNDO_MAX = 10;
-    EidUndoEntry eid_snapshot() const;
+    EidUndoEntry eid_snapshot(bool with_data = true) const;
     void eid_restore(const EidUndoEntry& e);
-    void eid_push_undo();
+    void eid_push_undo(bool with_data = true);
     void eid_do_undo();
     void eid_do_redo();
 

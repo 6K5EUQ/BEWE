@@ -29,8 +29,11 @@
 namespace guard_mod {
 
 static std::mutex            g_mtx;
-static std::vector<AlertRow> g_log;      // aid 별 최신상태 (upsert; 시간순 append)
+static std::vector<AlertRow> g_log;      // aid 별 최신상태 (upsert; 시간순 append) — 변형 시 반드시 g_gen++
 constexpr int LOG_MAX = 20000;
+// g_log/g_overlays 변경 세대 — 뷰(ais_view) 스냅샷 캐시 무효화용. 변형 지점마다 ++.
+static std::atomic<uint64_t> g_gen{0};
+uint64_t generation(){ return g_gen.load(std::memory_order_relaxed); }
 
 // ── 경로 (계약 고정) ───────────────────────────────────────────────────────
 static std::string guard_data_dir(){ return BEWEPaths::data_dir()+"/BEAE/ais/data/guard"; }
@@ -114,7 +117,7 @@ static std::map<uint32_t, guard_mod::OverlayPath>            g_ovmeta;     // ai
 
 static void overlay_ingest(const GuardAlert& a){
     std::lock_guard<std::mutex> lk(g_mtx);
-    if(a.state==3){ g_overlays.erase(a.aid); g_ovchunks.erase(a.aid); g_ovmeta.erase(a.aid); return; }
+    if(a.state==3){ g_overlays.erase(a.aid); g_ovchunks.erase(a.aid); g_ovmeta.erase(a.aid); g_gen++; return; }
     uint32_t idx=a.mmsi, total=a.mmsi2? a.mmsi2 : 1;
     auto& meta = g_ovmeta[a.aid];
     meta.aid=a.aid; meta.typ=a.typ; meta.kind=a.sev;
@@ -138,7 +141,7 @@ static void overlay_ingest(const GuardAlert& a){
             s = (*e==';')? e+1 : e;
         }
     }
-    if(p.ll.size()>=4) g_overlays[a.aid]=std::move(p);    // 최소 2점
+    if(p.ll.size()>=4){ g_overlays[a.aid]=std::move(p); g_gen++; }    // 최소 2점
     g_ovchunks.erase(a.aid);
 }
 
@@ -149,10 +152,12 @@ static void upsert(const GuardAlert& a){
         if(g_log[i].a.aid != a.aid) continue;
         g_log[i].a = a;                             // 같은 사건 갱신 (UPDATE/CLEAR)
         g_log[i].active = (a.state != 3);
+        g_gen++;
         return;
     }
     if((int)g_log.size() >= LOG_MAX) g_log.erase(g_log.begin());
     g_log.push_back(AlertRow{a, a.state != 3});
+    g_gen++;
 }
 
 // ── 뷰 접근자 (ais_view 오버레이 / guard_view 가 사용) ───────────────────────
@@ -209,12 +214,13 @@ bool demo_on(){ return g_demo_on; }
 static void demo_path(uint32_t aid, uint32_t mmsi, const char* name,
                       const float* ll, int n, bool on){
     if(!on){ std::lock_guard<std::mutex> lk(g_mtx);
-             g_overlays.erase(aid); return; }
+             g_overlays.erase(aid); g_gen++; return; }
     OverlayPath p; p.aid=aid; p.typ=7; p.kind=1; p.mmsi=mmsi;
     strncpy(p.name,name,sizeof(p.name)-1);
     p.ll.assign(ll, ll+n*2);
     std::lock_guard<std::mutex> lk(g_mtx);
     g_overlays[aid]=std::move(p);
+    g_gen++;
 }
 static void demo_alert(uint8_t typ, uint8_t sev, uint32_t m1, uint32_t m2,
                        float lat, float lon, float score, float cpa, float tcpa,
@@ -456,9 +462,13 @@ static void on_data(FFTViewer& v, const char* station, const uint8_t* d, size_t 
     GuardWireMsg w; memcpy(&w, d, sizeof(w));
     GuardAlert a; guard_wire_to_msg(w, a);
     bewe_mod_stat_bump("guard", station, 0, a.t_ms);   // 채널 없음 → ch 0 고정
+#ifdef BEWE_HEADLESS
+    // CLI: 지도/경보 뷰 없음 — g_log/g_overlays 미적재 (store/emit 은 tail_loop 이 수행)
+#else
     station_disp(station, a.station, sizeof(a.station));
     if(a.typ>=6) overlay_ingest(a);                    // 위험구역/데모항적 → 오버레이 조립
     else         upsert(a);                            // 경보/보고 → log
+#endif
 }
 
 // ── HOST: ais_guard 데몬 확보 (ais_ai.cpp ai_ensure_daemon 패턴) ─────────────

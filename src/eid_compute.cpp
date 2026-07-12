@@ -577,15 +577,18 @@ void FFTViewer::eid_cleanup(){
 }
 
 // ── Undo/Redo 시스템 ──────────────────────────────────────────────────────
-FFTViewer::EidUndoEntry FFTViewer::eid_snapshot() const {
+FFTViewer::EidUndoEntry FFTViewer::eid_snapshot(bool with_data) const {
     EidUndoEntry e;
-    e.envelope   = eid_envelope;
-    e.ch_i       = eid_ch_i;
-    e.ch_q       = eid_ch_q;
-    e.phase      = eid_phase;
-    e.inst_freq  = eid_inst_freq;
-    e.orig_ch_i  = eid_orig_ch_i;
-    e.orig_ch_q  = eid_orig_ch_q;
+    e.has_data = with_data;
+    if(with_data){
+        e.envelope   = eid_envelope;
+        e.ch_i       = eid_ch_i;
+        e.ch_q       = eid_ch_q;
+        e.phase      = eid_phase;
+        e.inst_freq  = eid_inst_freq;
+        e.orig_ch_i  = eid_orig_ch_i;
+        e.orig_ch_q  = eid_orig_ch_q;
+    }
     e.tags       = eid_tags;
     e.view_stack = eid_view_stack;
     e.sa_history = sa_view_history;
@@ -610,28 +613,33 @@ FFTViewer::EidUndoEntry FFTViewer::eid_snapshot() const {
 }
 
 void FFTViewer::eid_restore(const EidUndoEntry& e){
-    eid_edit_gen++;   // IQ 복원(undo/redo) → 복조 캐시 무효화
-    bool data_changed = (e.total_samples != eid_total_samples ||
+    // light 엔트리(has_data=false)는 IQ 미보관 — 배열 대입하면 파형이 지워지므로
+    // 데이터 복원 블록 전체를 has_data 로 게이트. 뷰/태그 스칼라는 항상 복원.
+    bool data_changed = e.has_data &&
+                        (e.total_samples != eid_total_samples ||
                          e.ch_i.size() != eid_ch_i.size() ||
                          e.bpf_active != eid_bpf_active);
-    {
-        std::lock_guard<std::mutex> lk(eid_data_mtx);
-        eid_envelope  = e.envelope;
-        eid_ch_i      = e.ch_i;
-        eid_ch_q      = e.ch_q;
-        eid_phase     = e.phase;
-        eid_inst_freq = e.inst_freq;
-        eid_total_samples = e.total_samples;
+    if(e.has_data){
+        eid_edit_gen++;   // IQ 복원(undo/redo) → 복조 캐시 무효화
+        {
+            std::lock_guard<std::mutex> lk(eid_data_mtx);
+            eid_envelope  = e.envelope;
+            eid_ch_i      = e.ch_i;
+            eid_ch_q      = e.ch_q;
+            eid_phase     = e.phase;
+            eid_inst_freq = e.inst_freq;
+            eid_total_samples = e.total_samples;
+        }
+        eid_orig_ch_i = e.orig_ch_i;
+        eid_orig_ch_q = e.orig_ch_q;
+        eid_bpf_active = e.bpf_active;
     }
-    eid_orig_ch_i = e.orig_ch_i;
-    eid_orig_ch_q = e.orig_ch_q;
     eid_tags      = e.tags;
     eid_view_stack = e.view_stack;
     sa_view_history = e.sa_history;
     eid_view_t0 = e.view_t0;  eid_view_t1 = e.view_t1;
     sa_view_x0 = e.sa_vx0;  sa_view_x1 = e.sa_vx1;
     sa_view_y0 = e.sa_vy0;  sa_view_y1 = e.sa_vy1;
-    eid_bpf_active = e.bpf_active;
     eid_baud_mode = e.baud_mode;
     eid_baud_s0 = e.baud_s0;  eid_baud_s1 = e.baud_s1;
     eid_baud_click = e.baud_click;
@@ -647,8 +655,11 @@ void FFTViewer::eid_restore(const EidUndoEntry& e){
     if(data_changed) sa_recompute_from_iq();
 }
 
-void FFTViewer::eid_push_undo(){
-    eid_undo_stack.push_back(eid_snapshot());
+// 불변식: eid_ch_i/q 등 IQ 데이터를 변경하는 모든 op 는 반드시 with_data=true(기본값)로
+// push 할 것 — light(뷰/태그) 엔트리 정합성의 전제 (light undo 시점의 현재 데이터가
+// push 시점 데이터와 동일하다는 보장은 FULL push 선행에서 나옴).
+void FFTViewer::eid_push_undo(bool with_data){
+    eid_undo_stack.push_back(eid_snapshot(with_data));
     if((int)eid_undo_stack.size() > EID_UNDO_MAX)
         eid_undo_stack.pop_front();
     eid_redo_stack.clear();
@@ -656,7 +667,8 @@ void FFTViewer::eid_push_undo(){
 
 void FFTViewer::eid_do_undo(){
     if(eid_undo_stack.empty()) return;
-    eid_redo_stack.push_back(eid_snapshot());
+    // light 엔트리를 undo 할 땐 현재 데이터 == 스냅샷 시점 데이터 → redo 미러도 light 로 충분
+    eid_redo_stack.push_back(eid_snapshot(eid_undo_stack.back().has_data));
     if((int)eid_redo_stack.size() > EID_UNDO_MAX)
         eid_redo_stack.pop_front();
     EidUndoEntry e = std::move(eid_undo_stack.back());
@@ -666,7 +678,7 @@ void FFTViewer::eid_do_undo(){
 
 void FFTViewer::eid_do_redo(){
     if(eid_redo_stack.empty()) return;
-    eid_undo_stack.push_back(eid_snapshot());
+    eid_undo_stack.push_back(eid_snapshot(eid_redo_stack.back().has_data));
     if((int)eid_undo_stack.size() > EID_UNDO_MAX)
         eid_undo_stack.pop_front();
     EidUndoEntry e = std::move(eid_redo_stack.back());

@@ -10,6 +10,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <climits>
+#include <algorithm>
 #include <sys/stat.h>
 
 #ifndef M_PI
@@ -439,10 +441,30 @@ void sat_view_draw(GlobeRenderer& globe, ImGuiIO& io, time_t now_utc) {
     }
 
     // ── Satellite markers (1-second propagate cache) ─────────────────────
+    // SAT ALL: 초 경계마다 ~11k SGP4 전파가 한 프레임에 몰려 주기적 히치 발생 →
+    // 프레임당 예산제로 분산 (전 카탈로그 ≤30프레임=0.5s 내 일순, 좌표값은 동일 초 기준).
+    // 라운드로빈 커서 — fps 가 낮아도 카탈로그 뒤쪽 위성이 굶지 않고 공평하게 갱신됨.
+    {
+        size_t N = g_sats.size();
+        int budget = (g_mode == SAT_ALL) ? std::max(256, (int)N/30) : INT_MAX;
+        static size_t s_rr = 0;
+        size_t k = 0;
+        for (; k < N && budget > 0; k++) {
+            size_t i = (s_rr + k) % N;
+            if (!sat_visible(i)) continue;
+            PosCache& pc = g_pos_cache[i];
+            if (pc.valid_at != now_utc) {
+                bool first = (pc.valid_at == 0);      // 최초 채움: 1회 버스트 유지 (예산 미차감)
+                update_position(i, now_utc);
+                if (!first) budget--;
+            }
+        }
+        if (N) s_rr = (s_rr + k) % N;
+    }
     for (size_t i = 0; i < g_sats.size(); i++) {
         if (!sat_visible(i)) continue;
-        update_position(i, now_utc);
         const PosCache& pc = g_pos_cache[i];
+        if (pc.valid_at == 0) continue;   // 아직 미전파 (예산 패스 대기 — 최대 0.5s)
         float sx, sy;
         if (!globe.project_world(pc.wx, pc.wy, pc.wz, sx, sy)) continue;
 
@@ -478,13 +500,13 @@ void sat_view_draw(GlobeRenderer& globe, ImGuiIO& io, time_t now_utc) {
 
 bool sat_view_handle_click(GlobeRenderer& globe, float mx, float my) {
     if (g_sats.empty()) return false;
-    time_t now = time(nullptr);
     int best_idx = -1;
     float best_d2 = 25.f * 25.f;
     for (size_t i = 0; i < g_sats.size(); i++) {
         if (!sat_visible(i)) continue;
-        update_position(i, now);
+        // 재전파 금지 — 클릭 좌표는 화면에 그려진(캐시된) 좌표와 일치해야 함
         const PosCache& pc = g_pos_cache[i];
+        if (pc.valid_at == 0) continue;
         float sx, sy;
         if (!globe.project_world(pc.wx, pc.wy, pc.wz, sx, sy)) continue;
         float dx = sx - mx, dy = sy - my;
@@ -497,7 +519,7 @@ bool sat_view_handle_click(GlobeRenderer& globe, float mx, float my) {
         orbit_cache_clear();
     } else {
         g_selected = best_idx;
-        orbit_cache_build(best_idx, now);
+        orbit_cache_build(best_idx, time(nullptr));   // 선택 시 1회 — 궤도 캐시
     }
     return true;
 }

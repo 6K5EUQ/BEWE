@@ -41,6 +41,11 @@ struct MapView {
     double _fl_lat0=1, _fl_lat1=0, _fl_lon0=0, _fl_lon1=0;  // 마지막 계산 시점 카메라
     float  _fl_W=0, _fl_H=0;
     std::vector<float> _fill;   // (dx0, yy, dx1) 막대, p0 상대 픽셀 (1px 높이)
+
+    // 해안선 캐시 (카메라/크기 변경 시만 재투영; _fill 과 동일 패턴) — 내부 전용
+    double _co_lat0=1, _co_lat1=0, _co_lon0=0, _co_lon1=0;
+    float  _co_W=0, _co_H=0;
+    std::vector<float> _coast;   // (x0,y0,x1,y1) 가시 세그먼트, p0 상대 픽셀
 };
 
 // 수신소(기지) 마커 — 실제 복조한 기지 위치+이름 오버레이용.

@@ -116,7 +116,7 @@ if(CLI)
         m
     )
 
-    target_compile_options(BEWE PRIVATE -O3 -march=native)
+    target_compile_options(BEWE PRIVATE -O3 -march=native -DNDEBUG)
 
 else()
     # ── GUI build (original, unchanged) ───────────────────────────────────
@@ -212,6 +212,6 @@ else()
         m
     )
 
-    target_compile_options(BEWE PRIVATE -O3 -march=native)
+    target_compile_options(BEWE PRIVATE -O3 -march=native -DNDEBUG)
 
 endif()

@@ -4,7 +4,7 @@
 
 // ── BEWE version (창 제목 및 About 표시용) ──────────────────────────────────
 // SemVer: vMAJOR.MINOR.PATCH — 자세한 정책은 CLAUDE.md 참조
-#define BEWE_VERSION "v11.7.0"
+#define BEWE_VERSION "v11.8.0"
 
 #ifdef BEWE_HEADLESS
   typedef uint32_t ImU32;
@@ -24,6 +24,14 @@
 #define FFT_PAD_FACTOR         4      // zero-padding 배수 (시각적 해상도 향상)
 #define TIME_AVERAGE           200
 #define MAX_FFTS_MEMORY        2500   // ~1분
+// fft_data 히스토리 깊이: GUI 는 워터폴 스크롤백/TM 용 2500행, 헤드리스 CLI 는
+// 최신행 소비자(스퀄치/브로드캐스트) + LWF catch-up 마진(~24-56s)만 필요 → 1024행.
+// 메타 배열(row_write_pos/row_wall_ms/iq_row_avail)은 양쪽 모두 MAX_FFTS_MEMORY 유지.
+#ifdef BEWE_HEADLESS
+  #define FFT_HISTORY_ROWS     1024
+#else
+  #define FFT_HISTORY_ROWS     MAX_FFTS_MEMORY
+#endif
 #define HANN_WINDOW_CORRECTION 2.67f
 #define NUTTALL_WINDOW_CORRECTION 3.91f  // 1/(a0²+(a1²+a2²+a3²)/2) for Nuttall
 #define COLORMAP_LUT_SIZE      65536  // 워터폴 컬러맵 해상도 (was 4096)
@@ -34,6 +42,14 @@
 // ── IQ Ring ───────────────────────────────────────────────────────────────
 #define IQ_RING_CAPACITY       (1 << 22)
 #define IQ_RING_MASK           (IQ_RING_CAPACITY - 1)
+// TM IQ 롤링 활성화 허용 디스크 지속쓰기 예산 (MB/s). sr×4B/s 가 이를 초과하면
+// 활성화 거부 (SD 실속 시 캡처 블로킹 → USB 오버런 방지). env BEWE_TM_DISK_MBPS 오버라이드.
+// 헤드리스(Pi5 SD)만 기본 제한. GUI 데스크톱(NVMe)은 0 = 무제한 (v11.7.0 동작 유지).
+#ifdef BEWE_HEADLESS
+  #define TM_IQ_DISK_BUDGET_MBPS 40
+#else
+  #define TM_IQ_DISK_BUDGET_MBPS 0
+#endif
 
 // ── Audio ─────────────────────────────────────────────────────────────────
 #define AUDIO_SR               48000u

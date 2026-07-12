@@ -211,6 +211,11 @@ bool push_one(const QueueItem& it){
         auto pkt = make_bewe(0x4F /*MISSION_FILE_PUSH_DATA*/,
                               bewe_payload.data(), (uint32_t)bewe_payload.size());
         g_cli->enqueue_relay_broadcast(pkt.data(), pkt.size(), /*no_drop=*/true);
+        // backpressure: 업링크 속도에 맞춰 enqueue — 큐 상한 2MB.
+        // (파일 전체 RAM 상주 방지 + 4MB cap 아래 유지로 FFT/audio 드롭 방지)
+        // running 가드 필수: stop() 이 worker join 하므로 대기 중 탈출 가능해야 함.
+        while(running.load() && g_cli->uplink_backlogged())
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         off += want;
         sent_any = true;
         if(want == 0) break;  // 빈 파일 1 chunk만

@@ -421,34 +421,45 @@ static long host_today_count(const char* id, int ch){
     }
     fclose(f); return cnt;
 }
-// 오늘 jsonl 을 1회 파싱해 전 채널 카운트 배열로 캐시 (3초 TTL, 모듈 id 별).
-//  decstat 폴링이 채널마다 파일을 재파싱하지 않도록 — 파일 1회 read 로 ch0~ 전부.
+// 오늘 jsonl 채널 카운트 캐시 (3초 TTL, 모듈 id 별) — 오프셋 기반 증분 파싱.
+//  기존엔 3초마다 당일 파일 '전체' 를 재파싱 (파일이 하루 종일 자람 → 수십 MB 반복 읽기).
+//  이제 마지막 파싱 오프셋을 기억하고 append 된 바이트만 읽는다.
 static long host_today_count_cached(const char* id, int ch){
     if(ch<0 || ch>=MAX_CHANNELS) return 0;
     static std::mutex m;
-    static std::map<std::string, std::pair<int64_t,std::array<long,MAX_CHANNELS>>> cache;
+    struct Ent { int64_t t=0; char date[9]={0}; long off=0; std::array<long,MAX_CHANNELS> cnt{}; };
+    static std::map<std::string, Ent> cache;
     std::lock_guard<std::mutex> lk(m);
     int64_t now = mod_now_ms();
     auto& e = cache[id];
-    if(now - e.first >= 3000 || e.first==0){
-        e.first = now; e.second.fill(0);
+    if(now - e.t >= 3000 || e.t==0){
+        e.t = now;
         const char* home = getenv("HOME");
         std::string base = home ? std::string(home) : std::string(".");
         int64_t s = (int64_t)std::chrono::duration_cast<std::chrono::seconds>(
                         std::chrono::system_clock::now().time_since_epoch()).count();
         struct tm tmv{}; KST::to_tm((time_t)s, tmv);
         char d[9]; snprintf(d,sizeof(d),"%04d%02d%02d",tmv.tm_year+1900,tmv.tm_mon+1,tmv.tm_mday);
+        if(strncmp(e.date,d,8)!=0){ memcpy(e.date,d,9); e.off=0; e.cnt.fill(0); }  // KST 자정 → 새 파일
         std::string path = base + "/BEWE/modules/" + id + "/" + id + "_" + d + ".jsonl";
         FILE* f = fopen(path.c_str(),"rb");
-        if(f){ char line[1024];
+        if(!f){ e.off=0; e.cnt.fill(0); }                    // 파일 없음/삭제 — 기존 동작과 동일하게 0
+        else {
+            fseek(f,0,SEEK_END); long sz=ftell(f);
+            if(sz < e.off){ e.off=0; e.cnt.fill(0); }        // truncate/교체 → 처음부터 재파싱
+            fseek(f,e.off,SEEK_SET);
+            char line[1024];
             while(fgets(line,sizeof(line),f)){
+                size_t L=strlen(line);
+                if(L && line[L-1]!='\n' && feof(f)) break;   // 미완성 tail 라인 — off 유지, 다음 틱 재시도
                 const char* p = strstr(line,"\"ch\":");
-                if(p){ int c=atoi(p+5); if(c>=0 && c<MAX_CHANNELS) e.second[c]++; }
+                if(p){ int c=atoi(p+5); if(c>=0 && c<MAX_CHANNELS) e.cnt[c]++; }
+                e.off = ftell(f);
             }
             fclose(f);
         }
     }
-    return e.second[ch];
+    return e.cnt[ch];
 }
 static void host_decstat_start(const char* id, int ch){
     if(ch<0 || ch>=MAX_CHANNELS) return;

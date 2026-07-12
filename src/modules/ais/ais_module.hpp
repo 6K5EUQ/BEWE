@@ -13,6 +13,7 @@ namespace ais_mod {
 
 extern std::mutex              mtx;
 extern std::vector<AisRecord>  log;
+extern uint64_t                log_gen;   // log 구조 변경 세대 (mtx 보호 — 뷰 캐시 무효화)
 extern char                    filter[64];
 constexpr int LOG_MAX = 100000;
 

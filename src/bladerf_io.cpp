@@ -101,7 +101,7 @@ bool FFTViewer::initialize_bladerf(float cf_mhz, float sr_msps){
     live_cf_hz.store((uint64_t)(cf_mhz*1e6), std::memory_order_release);
     time_average=hw.compute_time_average(fft_input_size);
     header.time_average=time_average; header.power_min=-100; header.power_max=0; header.num_ffts=0;
-    fft_data.resize(MAX_FFTS_MEMORY*fft_size);
+    fft_data.resize((size_t)FFT_HISTORY_ROWS*fft_size);
     current_spectrum.resize(fft_size,-100.0f);
 
     char title[256]; snprintf(title,256,"BEWE (" BEWE_VERSION ")");
@@ -183,7 +183,7 @@ void FFTViewer::capture_and_process(){
              fft_size=new_fft_sz;
              time_average=hw.compute_time_average(fft_input_size);
              header.fft_size=fft_size;
-             fft_data.assign(MAX_FFTS_MEMORY*fft_size,0);
+             fft_data.assign((size_t)FFT_HISTORY_ROWS*fft_size,0);
              current_spectrum.assign(fft_size,-80.0f);
              total_ffts=0; current_fft_idx=0; cached_sp_idx=-1;}
             texture_needs_recreate=true;
@@ -245,7 +245,7 @@ void FFTViewer::capture_and_process(){
             {std::lock_guard<std::mutex> lk(data_mtx);
              header.sample_rate = actual_sr;
              header.time_average = time_average;
-             fft_data.assign(MAX_FFTS_MEMORY*fft_size,0);
+             fft_data.assign((size_t)FFT_HISTORY_ROWS*fft_size,0);
              current_spectrum.assign(fft_size,-80.0f);
              total_ffts=0; current_fft_idx=0; cached_sp_idx=-1;}
             {std::lock_guard<std::mutex> lk(wf_events_mtx);
@@ -261,7 +261,8 @@ void FFTViewer::capture_and_process(){
             // TM IQ: SC8 모드(122.88M)에서는 롤링 IQ 비활성화
             if(tm_was_on && !sc8_mode){
                 tm_iq_open();
-                tm_iq_on.store(true);
+                // open 거부(디스크 예산 초과) 시 OFF 유지
+                if(tm_iq_file_ready) tm_iq_on.store(true);
             }
             // SR 변경 후 게인 재적용 (BladeRF가 SR 변경 시 게인을 리셋할 수 있음)
             set_gain(gain_db);
@@ -383,7 +384,7 @@ void FFTViewer::capture_and_process(){
                     rx_pos+=fft_input_size; rx_avail-=fft_input_size;
                     continue;
                 }
-                int fi=total_ffts%MAX_FFTS_MEMORY;
+                int fi=total_ffts%FFT_HISTORY_ROWS;
                 float* rowp=fft_data.data()+fi*fft_size;
                 {std::lock_guard<std::mutex> lk(data_mtx);
                  // current_spectrum은 UI 스레드 전용(픽셀별 peak) > 캡처가 절대 쓰지 않음
@@ -433,7 +434,7 @@ void FFTViewer::capture_and_process(){
                      }
                  }
                  total_ffts++; current_fft_idx=total_ffts-1;
-                 header.num_ffts=std::min(total_ffts,MAX_FFTS_MEMORY);
+                 header.num_ffts=std::min(total_ffts,FFT_HISTORY_ROWS);
                  row_write_pos[current_fft_idx%MAX_FFTS_MEMORY]=tm_iq_write_sample;
                  row_wall_ms[current_fft_idx%MAX_FFTS_MEMORY]=(int64_t)(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
                  if(tm_iq_on.load(std::memory_order_relaxed))

@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <algorithm>
@@ -31,13 +32,37 @@ static void write_rolling_wav_header(int fd, uint32_t sample_rate, uint32_t n_fr
 }
 
 void FFTViewer::tm_iq_open(){
-    if(tm_iq_file_ready) return;
+    // open/close 직렬화 — 두 JOIN 이 동시에 토글하거나 SR 변경(캡처 스레드)과
+    // 토글(net/UI 스레드)이 겹치면 tm_iq_wr_thr 이중 assign → std::terminate 방지.
+    std::lock_guard<std::mutex> oc(tm_iq_oc_mtx);
+    if(tm_iq_file_ready){
+        // writer pwrite 실패로 멈춘 상태에서 재토글 → close/재생성으로 복구
+        // (아니면 file_ready 가 true 라 조용히 전량 drop 상태로 재개장됨)
+        if(!tm_iq_write_failed.load()) return;
+        tm_iq_close_locked();
+    }
     struct stat st{};
     std::string tm_dir=BEWEPaths::time_temp_dir();
     const char* TM_IQ_DIR=tm_dir.c_str();
     if(stat(TM_IQ_DIR,&st)!=0) mkdir(TM_IQ_DIR,0755);
     uint32_t sr=header.sample_rate;
     if(sr==0){ fprintf(stderr,"TM: sample_rate 0\n"); return; }
+    // 디스크 지속쓰기 예산 초과 시 활성화 거부 — sr×4B/s 가 디스크 실속도를 넘으면
+    // 큐가 영구 적자(전량 drop)라 시작 자체가 무의미. (Pi5 SD + 61.44MSPS 스터터 방지)
+    // budget 0 = 무제한 (GUI 데스크톱 기본 — v11.7.0 동작 유지)
+    {
+        static const uint64_t budget_mbps = []{
+            const char* e = getenv("BEWE_TM_DISK_MBPS");
+            long v = e ? atol(e) : -1;
+            return (uint64_t)(v >= 0 ? v : TM_IQ_DISK_BUDGET_MBPS);
+        }();
+        uint64_t need_bps = (uint64_t)sr * 4ull;
+        if(budget_mbps > 0 && need_bps > budget_mbps*1000000ull){
+            bewe_log_push(0,"TM IQ: refused - need %.1f MB/s (%.2f MSPS x 4B) > disk budget %llu MB/s (env BEWE_TM_DISK_MBPS)\n",
+                          need_bps/1e6, sr/1e6, (unsigned long long)budget_mbps);
+            return;
+        }
+    }
     tm_iq_total_samples=(int64_t)sr*(int64_t)TM_IQ_SECS;
     snprintf(s_iq_path,sizeof(s_iq_path),"%s/iq_rolling_%uMSPS.wav",TM_IQ_DIR,sr/1000000);
     // 기존 파일 항상 삭제 후 새로 생성
@@ -46,10 +71,14 @@ void FFTViewer::tm_iq_open(){
     if(tm_iq_fd<0){ fprintf(stderr,"TM: open failed: %s\n",strerror(errno)); return; }
     // WAV 헤더 placeholder (n_frames=0, Stop 시 갱신)
     write_rolling_wav_header(tm_iq_fd, sr, 0);
-    tm_iq_write_sample=0; tm_iq_chunk_write=0; tm_iq_chunk_sample_start=0;
+    tm_iq_write_sample=0; tm_iq_flushed_sample=0;
+    tm_iq_chunk_write=0; tm_iq_chunk_sample_start=0;
     memset(tm_iq_chunk_time,0,sizeof(tm_iq_chunk_time));
-    tm_iq_batch_buf.assign(TM_IQ_BATCH*2, 0);
-    tm_iq_batch_cnt=0;
+    { std::lock_guard<std::mutex> lk(tm_iq_q_mtx); tm_iq_q.clear(); tm_iq_q_bytes=0; }
+    tm_iq_dropped_bytes.store(0);
+    tm_iq_write_failed.store(false);
+    tm_iq_wr_run.store(true);
+    tm_iq_wr_thr = std::thread(&FFTViewer::tm_iq_writer_loop, this);
     tm_iq_file_ready=true;
     bewe_log_push(0,"TM IQ rolling: ready (wav)  max %.1f GB\n",
            (double)(tm_iq_total_samples*2*sizeof(int16_t))/1e9);
@@ -57,58 +86,116 @@ void FFTViewer::tm_iq_open(){
 }
 
 void FFTViewer::tm_iq_close(){
-    if(tm_iq_fd>=0 && tm_iq_batch_cnt>0) tm_iq_flush_batch();
+    std::lock_guard<std::mutex> oc(tm_iq_oc_mtx);
+    tm_iq_close_locked();
+}
+
+void FFTViewer::tm_iq_close_locked(){
+    // writer 스레드 종료 — 큐 잔여분을 모두 쓴 뒤 빠져나옴 (flush 보장)
+    if(tm_iq_wr_run.load()){
+        tm_iq_wr_run.store(false);
+        tm_iq_q_cv.notify_all();
+    }
+    if(tm_iq_wr_thr.joinable()) tm_iq_wr_thr.join();
     if(tm_iq_fd>=0){
         // Stop: WAV 헤더를 실제 샘플 수로 갱신
-        uint32_t actual = (uint32_t)std::min(tm_iq_write_sample, tm_iq_total_samples);
+        uint32_t actual = (uint32_t)std::min((int64_t)tm_iq_write_sample, tm_iq_total_samples);
         write_rolling_wav_header(tm_iq_fd, header.sample_rate, actual);
         close(tm_iq_fd); tm_iq_fd=-1;
+        uint64_t dropped = tm_iq_dropped_bytes.load();
+        if(dropped)
+            bewe_log_push(0,"TM IQ rolling: %.1f MB dropped total (disk too slow)\n",dropped/1e6);
         bewe_log_push(0,"TM IQ rolling: closed  %.2f sec\n",(double)actual/header.sample_rate);
     }
-    tm_iq_file_ready=false; tm_iq_write_sample=0; tm_iq_batch_cnt=0;
+    tm_iq_file_ready=false; tm_iq_write_sample=0; tm_iq_flushed_sample=0;
     memset(tm_iq_chunk_time,0,sizeof(tm_iq_chunk_time));
     LongWaterfall::request_rotate();   // close current long-waterfall file
 }
 
-// 배치 버퍼 → 파일 플러시 (내부용)
-void FFTViewer::tm_iq_flush_batch(){
-    if(tm_iq_fd<0||tm_iq_batch_cnt<=0) return;
-    int n=tm_iq_batch_cnt;
-    int written=0;
-    int16_t* buf=tm_iq_batch_buf.data();
-    while(written<n){
-        int64_t max_total=tm_iq_total_samples;
-        int64_t pos=(tm_iq_write_sample<max_total)
-                    ? tm_iq_write_sample
-                    : tm_iq_write_sample % max_total;
-        int64_t avail=max_total-pos;
-        int chunk=(int)std::min((int64_t)(n-written),(int64_t)avail);
-        off_t offset = WAV_HDR_SIZE + pos*2*(off_t)sizeof(int16_t);
-        ssize_t bytes=(ssize_t)chunk*2*(ssize_t)sizeof(int16_t);
-        pwrite(tm_iq_fd, buf+written*2, (size_t)bytes, offset);
-        written+=chunk; tm_iq_write_sample+=chunk;
-        int64_t cur_sec=tm_iq_write_sample/(int64_t)header.sample_rate;
-        int ci=(int)(cur_sec%(int64_t)TM_IQ_SECS);
-        if(ci!=tm_iq_chunk_write){ tm_iq_chunk_write=ci; tm_iq_chunk_time[ci]=time(nullptr); }
+// writer 스레드: 큐에서 청크를 꺼내 ×16 스케일링 후 링 위치에 pwrite.
+// tm_iq_wr_run=false 후에도 큐 잔여분을 모두 쓰고 종료.
+void FFTViewer::tm_iq_writer_loop(){
+    bool write_failed=false;
+    for(;;){
+        TmIqChunk ck;
+        {
+            std::unique_lock<std::mutex> lk(tm_iq_q_mtx);
+            tm_iq_q_cv.wait(lk,[&]{
+                return !tm_iq_q.empty() || !tm_iq_wr_run.load(std::memory_order_relaxed); });
+            if(tm_iq_q.empty()){
+                if(!tm_iq_wr_run.load(std::memory_order_relaxed)) return;
+                continue;
+            }
+            ck=std::move(tm_iq_q.front());
+            tm_iq_q.pop_front();
+            tm_iq_q_bytes -= ck.data.size()*sizeof(int16_t);
+        }
+        if(write_failed){ // pwrite 실패 후: 큐만 비움 (재개는 close→open)
+            tm_iq_dropped_bytes.fetch_add(ck.data.size()*sizeof(int16_t),std::memory_order_relaxed);
+            continue;
+        }
+        // SC16_Q11 → ×16 스케일링: ±2048 → ±32768 (URH 풀스케일 정규화)
+        for(size_t i=0;i<ck.data.size();i++){
+            int32_t v=(int32_t)ck.data[i]*16;
+            ck.data[i]=(int16_t)std::max(-32768,std::min(32767,v));
+        }
+        int n=(int)(ck.data.size()/2);
+        int written=0;
+        int64_t sample_pos=ck.start_sample;
+        while(written<n){
+            int64_t max_total=tm_iq_total_samples;
+            int64_t pos=(sample_pos<max_total)?sample_pos:sample_pos%max_total;
+            int64_t avail=max_total-pos;
+            int chunk=(int)std::min((int64_t)(n-written),avail);
+            off_t offset = WAV_HDR_SIZE + pos*2*(off_t)sizeof(int16_t);
+            ssize_t bytes=(ssize_t)chunk*2*(ssize_t)sizeof(int16_t);
+            if(pwrite(tm_iq_fd, ck.data.data()+written*2, (size_t)bytes, offset)!=bytes){
+                bewe_log_push(0,"TM IQ: pwrite failed (%s) - rolling stopped\n",strerror(errno));
+                write_failed=true;
+                tm_iq_write_failed.store(true);   // 다음 tm_iq_open 이 close/재생성으로 복구
+                tm_iq_on.store(false);
+                break;
+            }
+            written+=chunk; sample_pos+=chunk;
+            int64_t cur_sec=sample_pos/(int64_t)header.sample_rate;
+            int ci=(int)(cur_sec%(int64_t)TM_IQ_SECS);
+            if(ci!=tm_iq_chunk_write){ tm_iq_chunk_write=ci; tm_iq_chunk_time[ci]=time(nullptr); }
+        }
+        // 디스크 기록 완료 워터마크 — 읽기 소비자(region/TM replay)는 여기까지만 신뢰
+        if(!write_failed)
+            tm_iq_flushed_sample.store(ck.start_sample+n, std::memory_order_release);
     }
-    tm_iq_batch_cnt=0;
 }
 
 void FFTViewer::tm_iq_write(const int16_t* buf, int n_pairs){
-    if(!tm_iq_file_ready||tm_iq_fd<0) return;
-    int src=0;
-    while(src<n_pairs){
-        int space=TM_IQ_BATCH-tm_iq_batch_cnt;
-        int copy=std::min(n_pairs-src, space);
-        // SC16_Q11 → ×16 스케일링: ±2048 → ±32768 (URH 풀스케일 정규화)
-        const int16_t* src_ptr = buf + src*2;
-        int16_t* dst_ptr = tm_iq_batch_buf.data() + tm_iq_batch_cnt*2;
-        for(int i=0; i<copy*2; i++){
-            int32_t v = (int32_t)src_ptr[i] * 16;
-            dst_ptr[i] = (int16_t)std::max(-32768, std::min(32767, v));
+    if(!tm_iq_file_ready||n_pairs<=0) return;
+    // 캡처 스레드: 복사+enqueue만. 스케일링/디스크는 writer 스레드 (캡처 비블로킹).
+    TmIqChunk ck;
+    ck.start_sample = tm_iq_write_sample.load(std::memory_order_relaxed);
+    ck.data.assign(buf, buf+(size_t)n_pairs*2);
+    tm_iq_write_sample.store(ck.start_sample + n_pairs, std::memory_order_relaxed);
+    size_t bytes = ck.data.size()*sizeof(int16_t);
+    uint64_t dropped_now=0;
+    {
+        std::lock_guard<std::mutex> lk(tm_iq_q_mtx);
+        while(tm_iq_q_bytes+bytes > TM_IQ_QUEUE_MAX_BYTES && !tm_iq_q.empty()){
+            size_t b = tm_iq_q.front().data.size()*sizeof(int16_t);
+            tm_iq_q_bytes -= b; dropped_now += b;
+            tm_iq_q.pop_front();
         }
-        tm_iq_batch_cnt+=copy; src+=copy;
-        if(tm_iq_batch_cnt>=TM_IQ_BATCH) tm_iq_flush_batch();
+        tm_iq_q.push_back(std::move(ck));
+        tm_iq_q_bytes += bytes;
+    }
+    tm_iq_q_cv.notify_one();
+    if(dropped_now){
+        tm_iq_dropped_bytes.fetch_add(dropped_now, std::memory_order_relaxed);
+        static time_t s_last_drop_log=0;
+        time_t now=time(nullptr);
+        if(now!=s_last_drop_log){
+            s_last_drop_log=now;
+            bewe_log_push(0,"TM IQ: disk too slow - dropped %.1f MB total\n",
+                          (double)tm_iq_dropped_bytes.load()/1e6);
+        }
     }
 }
 
@@ -232,7 +319,12 @@ bool FFTViewer::tm_rec_start(){
     int fi=selected_ch;
     if(fi<0||!channels[fi].filter_active){ return false; }
     int64_t samp_offset=(int64_t)((double)header.sample_rate*tm_offset);
-    int64_t read_pos=tm_iq_write_sample-samp_offset;
+    // 비동기 writer: 디스크 기록 완료 지점(flushed)까지만 읽기 — 큐 적체분(아직
+    // 파일에 없는 최신 구간)을 읽으면 이전 pass 잔재가 나옴.
+    int64_t head = tm_iq_write_sample.load(std::memory_order_relaxed);
+    { int64_t flushed = tm_iq_flushed_sample.load(std::memory_order_acquire);
+      if(flushed > 0 && flushed < head) head = flushed; }
+    int64_t read_pos=head-samp_offset;
     if(read_pos<0) read_pos=tm_iq_total_samples+read_pos;
     read_pos=read_pos%tm_iq_total_samples;
     tm_rec_read_pos=read_pos; tm_rec_active=true;

@@ -82,10 +82,11 @@ std::vector<std::string> CentralClient::make_candidates(const std::string& prima
 // 하던 기존 방식의 round-trip 비용 (3-5s)을 제거 → 1초 주기 실효화.
 
 void CentralClient::start_polling(const std::string& host, int port,
-                                 std::function<void(const std::vector<Station>&)> cb){
+                                 std::function<void(const std::vector<Station>&)> cb,
+                                 int interval_ms){
     stop_polling();
     poll_running_.store(true);
-    poll_thr_ = std::thread(&CentralClient::poll_loop, this, host, port, std::move(cb));
+    poll_thr_ = std::thread(&CentralClient::poll_loop, this, host, port, std::move(cb), interval_ms);
 }
 
 void CentralClient::stop_polling(){
@@ -94,7 +95,8 @@ void CentralClient::stop_polling(){
 }
 
 void CentralClient::poll_loop(std::string host, int port,
-                             std::function<void(const std::vector<Station>&)> cb){
+                             std::function<void(const std::vector<Station>&)> cb,
+                             int interval_ms){
     while(poll_running_.load()){
         // 1) connect (실패 시 backoff 후 재시도)
         auto cands = make_candidates(host);
@@ -148,8 +150,9 @@ void CentralClient::poll_loop(std::string host, int port,
             }
             cb(stations);
 
-            // 700ms sleep — cb 간격이 grace 1초보다 짧도록 보장 (RTT 여유 300ms)
-            for(int i = 0; i < 7 && poll_running_.load(); i++)
+            // interval sleep — parent globe(700ms)는 cb 간격이 grace 1초보다
+            // 짧도록 보장 (RTT 여유 300ms). 자식 세션은 5s (geo 캐시 갱신용).
+            for(int i = 0; i < interval_ms/100 && poll_running_.load(); i++)
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         close(fd);
@@ -338,14 +341,61 @@ void CentralClient::mux_loop(int central_fd,
         stats_last=now; sp_tot=t; sp_fft=f; sp_aud=a; sp_file=fl; sp_hist=hi;
     };
 
-    // SO_RCVTIMEO 루프 밖에서 한 번만 설정 (HB 주기 3초)
+    // SO_RCVTIMEO 루프 밖에서 한 번만 설정. idle FFT 스트림 게이트 후 룸 생존이
+    // HB 에만 의존하므로 체크 granularity 1s + HB 2s 로 Central 워치독(3s) 대비 여유 확보.
     {
-        timeval tv{3,0};
+        timeval tv{1,0};
         setsockopt(central_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     }
 
+    // 주기 송신 (HB 3s / HOST_STATE 5s) — recv EAGAIN 분기에만 두면 Central→HOST
+    // 인바운드 패킷이 3s 미만 간격으로 이어질 때 HB 기아 → Central 워치독(3s) 룸 flap.
+    // idle FFT 스트림 게이트(has_relay) 이후 룸 생존이 HB 에만 의존하므로 매 iteration 체크.
+    auto maybe_send_periodic = [&](){
+        auto now = std::chrono::steady_clock::now();
+        if(std::chrono::duration_cast<std::chrono::seconds>(now-last_hb).count() >= 2){
+            last_hb = now;
+            CentralMuxHdr hb{}; hb.type = 0x00; hb.len = sizeof(CentralHostHb);
+            CentralHostHb hbp{}; hbp.user_count = count_fn ? count_fn() : 0;
+            uint64_t hb_tot = CENTRAL_MUX_HDR_SIZE + sizeof(CentralHostHb);
+            stat_tx_total_bytes.fetch_add(hb_tot, std::memory_order_relaxed);
+            stat_tx_hb_bytes.fetch_add(hb_tot, std::memory_order_relaxed);
+            enqueue_central(&hb, CENTRAL_MUX_HDR_SIZE, &hbp, sizeof(hbp));
+        }
+        // HOST_STATE every 5 s for status page v2 (skipped if no state_fn)
+        if(state_fn_ &&
+           std::chrono::duration_cast<std::chrono::seconds>(now-last_state).count() >= 5){
+            last_state = now;
+            CentralHostStateFull st{};
+            state_fn_(st);
+            // Optional HIST trailer (live waterfall recording info)
+            CentralHostHistInfo hi{};
+            bool has_hi = hist_state_fn_ && hist_state_fn_(hi);
+            CentralMuxHdr smh{}; smh.conn_id = 0xFFFF;
+            smh.type = static_cast<uint8_t>(CentralMuxType::HOST_STATE);
+            if(has_hi){
+                std::vector<uint8_t> payload(sizeof(st) + sizeof(hi));
+                memcpy(payload.data(), &st, sizeof(st));
+                memcpy(payload.data() + sizeof(st), &hi, sizeof(hi));
+                smh.len = (uint32_t)payload.size();
+                uint64_t st_tot = CENTRAL_MUX_HDR_SIZE + payload.size();
+                stat_tx_total_bytes.fetch_add(st_tot, std::memory_order_relaxed);
+                stat_tx_hb_bytes.fetch_add(st_tot, std::memory_order_relaxed);
+                enqueue_central(&smh, CENTRAL_MUX_HDR_SIZE,
+                                payload.data(), payload.size());
+            } else {
+                smh.len = sizeof(st);
+                uint64_t st_tot = CENTRAL_MUX_HDR_SIZE + sizeof(st);
+                stat_tx_total_bytes.fetch_add(st_tot, std::memory_order_relaxed);
+                stat_tx_hb_bytes.fetch_add(st_tot, std::memory_order_relaxed);
+                enqueue_central(&smh, CENTRAL_MUX_HDR_SIZE, &st, sizeof(st));
+            }
+        }
+    };
+
     while(mux_running_.load()){
         print_host_stats();
+        maybe_send_periodic();
         CentralMuxHdr mux{};
         ssize_t r = recv(central_fd, &mux, CENTRAL_MUX_HDR_SIZE, MSG_WAITALL);
         if(r <= 0){
@@ -358,47 +408,7 @@ void CentralClient::mux_loop(int central_fd,
                        errno, strerror(errno));
                 break;
             }
-            // EAGAIN/ETIMEDOUT → heartbeat enqueue 후 계속
-            // enqueue_central는 블로킹 없음 (central_sender_thr_가 실제 write)
-            auto now = std::chrono::steady_clock::now();
-            if(std::chrono::duration_cast<std::chrono::seconds>(now-last_hb).count() >= 3){
-                last_hb = now;
-                CentralMuxHdr hb{}; hb.type = 0x00; hb.len = sizeof(CentralHostHb);
-                CentralHostHb hbp{}; hbp.user_count = count_fn ? count_fn() : 0;
-                uint64_t hb_tot = CENTRAL_MUX_HDR_SIZE + sizeof(CentralHostHb);
-                stat_tx_total_bytes.fetch_add(hb_tot, std::memory_order_relaxed);
-                stat_tx_hb_bytes.fetch_add(hb_tot, std::memory_order_relaxed);
-                enqueue_central(&hb, CENTRAL_MUX_HDR_SIZE, &hbp, sizeof(hbp));
-            }
-            // HOST_STATE every 5 s for status page v2 (skipped if no state_fn)
-            if(state_fn_ &&
-               std::chrono::duration_cast<std::chrono::seconds>(now-last_state).count() >= 5){
-                last_state = now;
-                CentralHostStateFull st{};
-                state_fn_(st);
-                // Optional HIST trailer (live waterfall recording info)
-                CentralHostHistInfo hi{};
-                bool has_hi = hist_state_fn_ && hist_state_fn_(hi);
-                CentralMuxHdr smh{}; smh.conn_id = 0xFFFF;
-                smh.type = static_cast<uint8_t>(CentralMuxType::HOST_STATE);
-                if(has_hi){
-                    std::vector<uint8_t> payload(sizeof(st) + sizeof(hi));
-                    memcpy(payload.data(), &st, sizeof(st));
-                    memcpy(payload.data() + sizeof(st), &hi, sizeof(hi));
-                    smh.len = (uint32_t)payload.size();
-                    uint64_t st_tot = CENTRAL_MUX_HDR_SIZE + payload.size();
-                    stat_tx_total_bytes.fetch_add(st_tot, std::memory_order_relaxed);
-                    stat_tx_hb_bytes.fetch_add(st_tot, std::memory_order_relaxed);
-                    enqueue_central(&smh, CENTRAL_MUX_HDR_SIZE,
-                                    payload.data(), payload.size());
-                } else {
-                    smh.len = sizeof(st);
-                    uint64_t st_tot = CENTRAL_MUX_HDR_SIZE + sizeof(st);
-                    stat_tx_total_bytes.fetch_add(st_tot, std::memory_order_relaxed);
-                    stat_tx_hb_bytes.fetch_add(st_tot, std::memory_order_relaxed);
-                    enqueue_central(&smh, CENTRAL_MUX_HDR_SIZE, &st, sizeof(st));
-                }
-            }
+            // EAGAIN/ETIMEDOUT → 주기 송신은 루프 상단에서 처리
             continue;
         }
         if(r != CENTRAL_MUX_HDR_SIZE){

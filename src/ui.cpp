@@ -1748,8 +1748,15 @@ void FFTViewer::draw_waterfall_area(ImDrawList* dl, float full_x, float full_y, 
     if(!waterfall_texture) create_waterfall_texture();
     // 타임머신 모드 아닐 때만 텍스처 업데이트
     // 워터폴 텍스처 업데이트: TM 모드 중에도 계속 갱신 (복귀 시 검은화면 방지)
+    // catch-up 루프: 프레임 사이 새 행이 2개 이상 생겨도(행 18/s > 저프레임)
+    // 빠짐없이 업로드 — 최소화 15fps 스로틀·순간 프레임드랍 시 줄무늬 방지.
     if(total_ffts>0&&last_wf_update_idx!=current_fft_idx){
-        update_wf_row(current_fft_idx); last_wf_update_idx=current_fft_idx;
+        int cur = current_fft_idx;
+        int from = last_wf_update_idx + 1;
+        // from>cur: SR/FFT size 변경으로 카운터 리셋 → 현재 행만 업로드
+        if(last_wf_update_idx < 0 || from > cur || cur - from >= MAX_FFTS_MEMORY) from = cur;
+        for(int fi = from; fi <= cur; fi++) update_wf_row(fi);
+        last_wf_update_idx = cur;
     }
     if(waterfall_texture){
         float ds,de; get_disp(ds,de);
@@ -2404,6 +2411,8 @@ void run_streaming_viewer(){
     // Relay 클라이언트: Relay 주소가 설정돼 있으면 인터넷 스테이션 폴링
     CentralClient central_cli;
     if(s_central_host[0] != '\0'){
+        // 자식 세션(join/host)은 geo 캐시 갱신용이라 5s 로 충분 — parent globe 만
+        // 700ms 유지 (last_seen grace 1s 커플링, 기지 마커 깜빡임 방지)
         central_cli.start_polling(s_central_host, s_central_port,
             [&](const std::vector<CentralClient::Station>& stations){
                 std::lock_guard<std::mutex> lk(v.discovered_stations_mtx);
@@ -2440,7 +2449,7 @@ void run_streaming_viewer(){
                         v.discovered_stations.push_back(ns);
                     }
                 }
-            });
+            }, g_session_args.mode_set ? 5000 : 700);
     }
 
     // Pop-up state machine
@@ -5032,24 +5041,26 @@ void run_streaming_viewer(){
 
     // ── TM IQ(롤링 IQ 녹음) 기본 OFF — T키/패널 토글 시 lazy open ─────────
 
-    // 모든 모드: VSync OFF, 60fps 자체 캡 (포커스 여부 무관)
-    // 워터폴 연속성 보장을 위해 백그라운드도 동일 프레임레이트 유지
+    // 모든 모드: VSync OFF, 60fps 자체 캡. 비포커스-가시 창도 60fps 유지(듀얼모니터
+    // 저더 방지). 최소화(iconified) 시에만 15fps — 워터폴은 catch-up 루프가 복원 시
+    // 누락 행을 채우므로 연속성 유지.
     glfwSwapInterval(0);
     // ── Main loop ─────────────────────────────────────────────────────────
     using clk = std::chrono::steady_clock;
-    static constexpr float FRAME_TARGET = 1.0f / 60.0f; // 60fps
     clk::time_point frame_last = clk::now();
     extern std::atomic<bool> g_signal_shutdown;
     while(!glfwWindowShouldClose(win) && !do_logout && !do_main_menu){
         // SIGINT/SIGTERM 받으면 윈도우 닫기 트리거 → 루프 탈출 후 cleanup 경로 거침
         if(g_signal_shutdown.load()) glfwSetWindowShouldClose(win, GLFW_TRUE);
-        // 60fps 캡: 포커스/백그라운드 구분 없이 동일
+        // 60fps 캡 (최소화 시 15fps)
         {
+            bool iconified = glfwGetWindowAttrib(win, GLFW_ICONIFIED) == GLFW_TRUE;
+            float frame_target = iconified ? (1.0f/15.0f) : (1.0f/60.0f);
             auto now = clk::now();
             float elapsed = std::chrono::duration<float>(now - frame_last).count();
-            if(elapsed < FRAME_TARGET)
+            if(elapsed < frame_target)
                 std::this_thread::sleep_for(std::chrono::microseconds(
-                    (int)((FRAME_TARGET - elapsed) * 1e6f)));
+                    (int)((frame_target - elapsed) * 1e6f)));
             frame_last = clk::now();
         }
         glfwPollEvents();
@@ -5090,7 +5101,7 @@ void run_streaming_viewer(){
             float el2=std::chrono::duration<float>(now2-sq_sync_last).count();
             if(el2>=0.1f){
                 sq_sync_last=now2;
-                v.net_srv->broadcast_channel_sync(v.channels, MAX_CHANNELS);
+                v.net_srv->broadcast_channel_sync(v.channels, MAX_CHANNELS, /*periodic=*/true);
             }
         }
 
@@ -5658,6 +5669,7 @@ void run_streaming_viewer(){
                     v.header.num_ffts = std::min(v.total_ffts, MAX_FFTS_MEMORY);
                 }
                 v.update_wf_row(v.current_fft_idx);
+                v.last_wf_update_idx = v.current_fft_idx;  // 렌더 catch-up 중복 업로드 방지
             }
         }
 
@@ -9497,7 +9509,7 @@ void run_streaming_viewer(){
                             float sx0=std::min(sa_sel_sx0,sa_sel_sx1);
                             float sx1=std::max(sa_sel_sx0,sa_sel_sx1);
                             if(sx1-sx0>5.f){
-                                v.eid_push_undo();
+                                v.eid_push_undo(false);  // 뷰 줌만 — IQ 미변경 (light)
                                 v.sa_view_history.push_back({v.sa_view_x0,v.sa_view_x1,v.sa_view_y0,v.sa_view_y1,false});
                                 float f0=v.sa_view_y0+((sx0-ea_x0)/ea_w)*(v.sa_view_y1-v.sa_view_y0);
                                 float f1=v.sa_view_y0+((sx1-ea_x0)/ea_w)*(v.sa_view_y1-v.sa_view_y0);
@@ -9592,6 +9604,9 @@ void run_streaming_viewer(){
 
                     // Home 키: 전체 보기
                     if(in_sa && ImGui::IsKeyPressed(ImGuiKey_Home,false)){
+                        // BPF 해제(eid_undo_bpf)는 push 없는 유일한 IQ 변경 경로 —
+                        // light 엔트리 정합성 위해 FULL 스냅샷 선행 (Home 도 undo 가능해짐)
+                        if(v.eid_bpf_active) v.eid_push_undo();
                         v.sa_view_y0=0.f; v.sa_view_y1=1.f;
                         v.sa_view_x0=0.f; v.sa_view_x1=1.f;
                         v.sa_view_history.clear();
@@ -9602,11 +9617,11 @@ void run_streaming_viewer(){
                     // Delete 키 / 더블클릭: 임시 영역 또는 태그 삭제 (마우스 위치 기반)
                     auto sa_delete_at = [&](double ms){
                         if(v.eid_pending_active && ms>=v.eid_pending_s0 && ms<=v.eid_pending_s1){
-                            v.eid_push_undo();
+                            v.eid_push_undo(false);  // 태그/영역만 — IQ 미변경 (light)
                             v.eid_pending_active=false;
                         } else {
                             for(auto it=v.eid_tags.begin();it!=v.eid_tags.end();++it){
-                                if(ms>=it->s0&&ms<=it->s1){ v.eid_push_undo(); v.eid_tags.erase(it); break; }
+                                if(ms>=it->s0&&ms<=it->s1){ v.eid_push_undo(false); v.eid_tags.erase(it); break; }
                             }
                         }
                     };
@@ -10840,11 +10855,11 @@ void run_streaming_viewer(){
                 // Delete 키 / 더블클릭: 임시 영역 또는 태그 삭제
                 auto eid_delete_at = [&](double ms){
                     if(v.eid_pending_active && ms>=v.eid_pending_s0 && ms<=v.eid_pending_s1){
-                        v.eid_push_undo();
+                        v.eid_push_undo(false);  // 태그/영역만 — IQ 미변경 (light)
                         v.eid_pending_active=false;
                     } else {
                         for(auto it=v.eid_tags.begin();it!=v.eid_tags.end();++it){
-                            if(ms>=it->s0&&ms<=it->s1){ v.eid_push_undo(); v.eid_tags.erase(it); break; }
+                            if(ms>=it->s0&&ms<=it->s1){ v.eid_push_undo(false); v.eid_tags.erase(it); break; }
                         }
                     }
                 };
@@ -10951,7 +10966,7 @@ void run_streaming_viewer(){
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 8));
                 if(ImGui::BeginPopup("##baud_ctx")){
                     if(ImGui::MenuItem("Make Baseline")){
-                        v.eid_push_undo();
+                        v.eid_push_undo(false);  // baseline 만 — IQ 미변경 (light)
                         v.eid_baseline_active = true;
                     }
                     ImGui::EndPopup();
@@ -11546,7 +11561,7 @@ void run_streaming_viewer(){
                 } else if(eid_tag_ctx.is_pending){
                     // ── 임시 선택 영역 메뉴 ──
                     if(ImGui::Selectable("  Make Tag")){
-                        v.eid_push_undo();
+                        v.eid_push_undo(false);  // 태그만 — IQ 미변경 (light)
                         static const ImU32 tc[]={IM_COL32(255,180,60,200),IM_COL32(100,200,255,200),
                             IM_COL32(255,100,255,200),IM_COL32(100,255,180,200),
                             IM_COL32(255,255,100,200),IM_COL32(180,140,255,200)};
@@ -11581,11 +11596,11 @@ void run_streaming_viewer(){
                 } else {
                     // ── 확정 태그 메뉴 ──
                     if(ImGui::Selectable("  Rename Tag")){
-                        v.eid_push_undo();
+                        v.eid_push_undo(false);  // 태그만 — IQ 미변경 (light)
                         eid_tag_ctx.renaming=true; eid_tag_ctx.rename_focused=false;
                     }
                     if(ImGui::Selectable("  Remove Tag")){
-                        v.eid_push_undo();
+                        v.eid_push_undo(false);  // 태그만 — IQ 미변경 (light)
                         v.eid_tags.erase(v.eid_tags.begin()+eid_tag_ctx.tag_idx);
                         eid_tag_ctx.open=false;
                     }

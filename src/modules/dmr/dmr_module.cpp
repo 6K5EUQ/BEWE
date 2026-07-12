@@ -71,6 +71,9 @@ static void on_ch_stop(FFTViewer& v, int ch){
 
 // ── 로그 (dedup) ────────────────────────────────────────────────────────────
 void append_log(const DmrRecord& m){
+#ifdef BEWE_HEADLESS
+    (void)m; return;  // CLI: 뷰 없음 — 표시 로그 RAM 미적재 (JOIN 은 Central 히스토리로 시드)
+#endif
     std::lock_guard<std::mutex> lk(mtx);
     int n = (int)log.size();
     for(int i=n-1; i>=0 && i>=n-64; i--){

@@ -310,14 +310,14 @@ bool ingest_new_rows(FFTViewer* v){
     }
 
     int new_rows = now - g_last_total_ffts;
-    // Clamp: if we fell behind by > MAX_FFTS_MEMORY, only the last ring window is valid.
-    if(new_rows > MAX_FFTS_MEMORY) new_rows = MAX_FFTS_MEMORY;
+    // Clamp: if we fell behind by > FFT_HISTORY_ROWS, only the last ring window is valid.
+    if(new_rows > FFT_HISTORY_ROWS) new_rows = FFT_HISTORY_ROWS;
 
     // Capture writes rowp at fi=total_ffts, then increments total_ffts (under data_mtx).
     // So after we observe total_ffts==now, valid rows are at fi for abs_idx in [g_last, now-1].
     int start_abs = now - new_rows;
     for(int abs_idx = start_abs; abs_idx < now; abs_idx++){
-        int fi = abs_idx % MAX_FFTS_MEMORY;
+        int fi = abs_idx % FFT_HISTORY_ROWS;
         const float* rowp = v->fft_data.data() + (size_t)fi * src_fft;
         if(pad == 1){
             for(int i=0; i<dst_fft; i++){
@@ -342,6 +342,9 @@ bool ingest_new_rows(FFTViewer* v){
 void worker_loop(){
     using clk = std::chrono::steady_clock;
     auto next_flush = clk::now() + std::chrono::milliseconds(200); // 5 Hz default
+    // active_hist_dir() 폴링 캐시 (500ms) — 아래 게이트 참조
+    clk::time_point s_dir_check{};
+    bool s_hist_active = false;
 
     while(g_running.load(std::memory_order_relaxed)){
         if(!g_v){ std::this_thread::sleep_for(std::chrono::milliseconds(100)); continue; }
@@ -359,18 +362,22 @@ void worker_loop(){
               g_last_total_ffts = g_v->total_ffts; }
         }
 
-        // Only record while TM IQ is rolling.
-        bool tm_on = g_v->tm_iq_on.load(std::memory_order_relaxed);
-        if(!tm_on){
+        // Record while a mission is active. (HIST 는 TM IQ 롤링과 분리 —
+        // 풀레이트 IQ 링 없이도 미션 HIST 기록. 미션 종료 시 dir 이 비어
+        // 여기서 파일 close, 지연 ≤500ms.)
+        // active_hist_dir() 은 mission mutex + string 힙할당이라 20ms 루프에서
+        // 매번 부르지 않고 500ms 캐시로 폴링.
+        {
+            auto nowc = clk::now();
+            if(s_dir_check == clk::time_point{} ||
+               nowc - s_dir_check >= std::chrono::milliseconds(500)){
+                s_dir_check = nowc;
+                s_hist_active = !g_v->active_hist_dir().empty();
+            }
+        }
+        if(!s_hist_active){
             if(g_fp){ flush_row_locked(); close_file_locked(); }
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            continue;
-        }
-
-        // Open file lazily once TM is on. mission IDLE 이면 hist 디렉토리 자체가 없어
-        // open_new_file 이 매번 실패 → 500ms 마다 헛 재시도 + 로그. IDLE 이면 통째로 스킵.
-        if(!g_fp && g_v->active_hist_dir().empty()){
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
         if(!g_fp){

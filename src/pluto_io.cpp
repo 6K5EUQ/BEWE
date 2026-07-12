@@ -117,7 +117,7 @@ bool FFTViewer::initialize_pluto(float cf_mhz, float sr_msps){
     live_cf_hz.store((uint64_t)(cf_mhz*1e6), std::memory_order_release);
     time_average=hw.compute_time_average(fft_input_size);
     header.time_average=time_average; header.power_min=-100; header.power_max=0; header.num_ffts=0;
-    fft_data.resize(MAX_FFTS_MEMORY*fft_size);
+    fft_data.resize((size_t)FFT_HISTORY_ROWS*fft_size);
     current_spectrum.resize(fft_size,-100.0f);
 
     char title[256]; snprintf(title,256,"BEWE (" BEWE_VERSION ")");
@@ -211,7 +211,7 @@ void FFTViewer::capture_and_process_pluto(){
              fft_size=new_fft_sz;
              time_average=hw.compute_time_average(fft_input_size);
              header.fft_size=fft_size;
-             fft_data.assign(MAX_FFTS_MEMORY*fft_size,0);
+             fft_data.assign((size_t)FFT_HISTORY_ROWS*fft_size,0);
              current_spectrum.assign(fft_size,-80.0f);
              total_ffts=0; current_fft_idx=0; cached_sp_idx=-1;}
             texture_needs_recreate=true;
@@ -277,7 +277,7 @@ void FFTViewer::capture_and_process_pluto(){
             {std::lock_guard<std::mutex> lk(data_mtx);
              header.sample_rate = actual_sr;
              header.time_average = time_average;
-             fft_data.assign(MAX_FFTS_MEMORY*fft_size,0);
+             fft_data.assign((size_t)FFT_HISTORY_ROWS*fft_size,0);
              current_spectrum.assign(fft_size,-80.0f);
              total_ffts=0; current_fft_idx=0; cached_sp_idx=-1;}
             {std::lock_guard<std::mutex> lk(wf_events_mtx);
@@ -291,7 +291,8 @@ void FFTViewer::capture_and_process_pluto(){
             // TM IQ 재시작 (Pluto는 모든 SR 허용 — 고 SR은 USB2 드롭 감수)
             if(tm_was_on){
                 tm_iq_open();
-                tm_iq_on.store(true);
+                // open 거부(디스크 예산 초과) 시 OFF 유지
+                if(tm_iq_file_ready) tm_iq_on.store(true);
             }
             dem_restart_needed.store(true); // demod가 새 SR로 재초기화되도록
             bewe_log_push(0,"SR > %.3f MSPS\n", actual_sr/1e6f);
@@ -407,7 +408,7 @@ void FFTViewer::capture_and_process_pluto(){
                     rx_pos+=fft_input_size; rx_avail-=fft_input_size;
                     continue;
                 }
-                int fi=total_ffts%MAX_FFTS_MEMORY;
+                int fi=total_ffts%FFT_HISTORY_ROWS;
                 float* rowp=fft_data.data()+fi*fft_size;
                 {std::lock_guard<std::mutex> lk(data_mtx);
                  // current_spectrum은 UI 스레드 전용 > 캡처 쓰기 금지 (race 유발)
@@ -454,7 +455,7 @@ void FFTViewer::capture_and_process_pluto(){
                      }
                  }
                  total_ffts++; current_fft_idx=total_ffts-1;
-                 header.num_ffts=std::min(total_ffts,MAX_FFTS_MEMORY);
+                 header.num_ffts=std::min(total_ffts,FFT_HISTORY_ROWS);
                  row_write_pos[current_fft_idx%MAX_FFTS_MEMORY]=tm_iq_write_sample;
                  row_wall_ms[current_fft_idx%MAX_FFTS_MEMORY]=(int64_t)(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
                  if(tm_iq_on.load(std::memory_order_relaxed))

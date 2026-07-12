@@ -203,6 +203,9 @@ void NetServer::handle_packet(std::shared_ptr<ClientConn> c,
         bewe_log_push(0, "[NetServer] AUTH_ACK sent op=%d ok=%u\n", idx, ack.ok);
         if(ack.ok){
             broadcast_operator_list();
+            // 신규 JOIN 이 CHANNEL_SYNC 해시 게이트에 걸려 최대 1초 기다리지 않도록
+            // 다음 주기 틱(≤100ms)에 전체 테이블 강제 송신
+            chsync_force_.store(true, std::memory_order_relaxed);
         }
         break;
     }
@@ -600,11 +603,12 @@ void NetServer::broadcast_audio_all(uint8_t ch_idx, int8_t pan,
 
 
 // ── Broadcast channel sync ────────────────────────────────────────────────
-void NetServer::broadcast_channel_sync(const Channel* chs, int n){
+void NetServer::broadcast_channel_sync(const Channel* chs, int n, bool periodic){
     // 주의: 무구독(JOIN 0)이라도 early-return 금지. 이 함수는 Central 로도 relay 되어
     // 타 기지 demod 통합목록(cached_ch_sync 기반 CH_LIST)을 채운다. JOIN 0 기지가 여기서
-    // 빠지면 그 기지 채널이 다른 기지 목록에서 사라짐. 배터리(decstat 500/s)는 메인루프의
-    // 10Hz 주기 호출이 client_count>0 게이트로 이미 막음 — 여긴 채널 op 시점에만 호출됨.
+    // 빠지면 그 기지 채널이 다른 기지 목록에서 사라짐.
+    // periodic=true(메인루프 10Hz)만 아래 해시/relay 감속 게이트를 타고,
+    // 이벤트성 호출(채널 op)은 항상 즉시 송신 — Central 캐시에 바로 반영돼야 함.
     PktChannelSync sync{};
     for(int i=0; i<n && i<MAX_CHANNELS; i++){
         sync.ch[i].idx        = (uint8_t)i;
@@ -625,11 +629,35 @@ void NetServer::broadcast_channel_sync(const Channel* chs, int n){
         sync.ch[i].sq_total_secs  = (uint32_t)chs[i].sq_total_time;
         sync.ch[i].iq_rec_on      = chs[i].iq_rec_on.load() ? 1 : 0;
         sync.ch[i].audio_rec_on   = chs[i].audio_rec_on.load() ? 1 : 0;
-        { uint32_t dc=0,dr=0; bewe_mod_host_ch_decstat(i,dc,dr); sync.ch[i].dec_count=dc; sync.ch[i].dec_runtime_s=dr; }  // 디코드 통계
+        // 디코드 통계 — 활성 슬롯만 (비활성 슬롯은 디코더가 없어 항상 0; sync{} zero-init).
+        // decstat 는 호출당 락 2회 + 자정 롤오버 검사라 50슬롯×10Hz 는 순수 낭비였음.
+        if(sync.ch[i].active){
+            uint32_t dc=0,dr=0; bewe_mod_host_ch_decstat(i,dc,dr);
+            sync.ch[i].dec_count=dc; sync.ch[i].dec_runtime_s=dr;
+        }
+    }
+    auto now = std::chrono::steady_clock::now();
+    if(periodic){
+        // 내용 동일 시 1Hz 감속. 활성 채널이 있으면 sq_sig/초 카운터가 매 틱 변해
+        // 항상 통과 → 라이브 뷰어 10Hz 유지. (해시 게이트는 유휴 상태 전용)
+        uint64_t h = 1469598103934665603ull;                    // FNV-1a 64
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&sync);
+        for(size_t k=0;k<sizeof(sync);k++){ h ^= p[k]; h *= 1099511628211ull; }
+        bool force = chsync_force_.exchange(false, std::memory_order_relaxed); // 신규 JOIN 즉시 시드
+        float since = std::chrono::duration<float>(now - chsync_last_send_).count();
+        if(!force && h == chsync_last_hash_ && since < 1.0f) return;           // 1Hz keepalive 하한
+        chsync_last_hash_ = h; chsync_last_send_ = now;
     }
     auto pkt = make_packet(PacketType::CHANNEL_SYNC, &sync, sizeof(sync));
-    if(cb.on_relay_broadcast)
-        cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
+    if(cb.on_relay_broadcast){
+        // 원격 JOIN 없으면 주기분 relay 는 1Hz (Central cached_ch_sync/CH_LIST 통계 갱신용).
+        bool send_relay = !periodic || has_relay()
+            || std::chrono::duration<float>(now - chsync_relay_last_).count() >= 1.0f;
+        if(send_relay){
+            cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
+            if(periodic) chsync_relay_last_ = now;
+        }
+    }
     std::lock_guard<std::mutex> lk(clients_mtx_);
     for(auto& c : clients_){
         if(c->is_relay || !c->authed || !c->alive.load()) continue;
