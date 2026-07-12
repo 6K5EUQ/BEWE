@@ -254,11 +254,19 @@ static std::string prompt_input(const char* label, const char* def=nullptr){
 }
 
 // ── stdin readline (non-blocking) ────────────────────────────────────────
+// stdin EOF 플래그: printf 파이프 기동(fleet 표준) 시 로그인 입력 후 파이프가 닫혀
+// EOF 가 된다. EOF 파이프에 poll(STDIN, timeout) 은 즉시 POLLHUP 리턴이라 메인 루프
+// sleep 이 전혀 안 걸려 코어 하나를 통째로 스핀 — EOF 감지 후엔 plain sleep 사용.
+static bool g_stdin_eof = false;
 static bool read_line_nb(std::string& out){
+    if(g_stdin_eof) return false;
     struct pollfd pfd{STDIN_FILENO, POLLIN, 0};
     if(poll(&pfd,1,0)<=0) return false;
     char buf[512];
-    if(!fgets(buf,sizeof(buf),stdin)) return false;
+    if(!fgets(buf,sizeof(buf),stdin)){
+        if(feof(stdin)) g_stdin_eof = true;   // 파이프 닫힘 — 이후 키보드 입력 없음
+        return false;
+    }
     size_t len=strlen(buf);
     while(len>0 && (buf[len-1]=='\n'||buf[len-1]=='\r')) buf[--len]=0;
     out=buf;
@@ -1512,8 +1520,16 @@ void run_cli_host(){
         if(next_tick < now) next_tick = now; // 장시간 블록(rx stop join 등) 후 burst 방지
         int sleep_ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(next_tick - now).count();
         if(sleep_ms > 0){
-            struct pollfd pfd{STDIN_FILENO, POLLIN, 0};
-            poll(&pfd, 1, sleep_ms);
+            if(g_stdin_eof){
+                // 파이프 기동: EOF stdin 에 poll 하면 즉시 POLLHUP 리턴 → 스핀. plain sleep.
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+            } else {
+                struct pollfd pfd{STDIN_FILENO, POLLIN, 0};
+                int pr = poll(&pfd, 1, sleep_ms);
+                // 데이터 없이 HUP/ERR 만 = 파이프 닫힘 확정
+                if(pr > 0 && (pfd.revents & (POLLHUP|POLLERR)) && !(pfd.revents & POLLIN))
+                    g_stdin_eof = true;
+            }
         }
 
         // ── System monitor (1s) ──────────────────────────────────────────
