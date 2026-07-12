@@ -167,7 +167,9 @@ void FFTViewer::capture_and_process_pluto(){
     // 내부 RX 버퍼 내 포지션
     int rx_pos = 0, rx_avail = 0;
 
-    while(is_running){
+    // sdr_stream_error 를 루프 조건에 포함: watchdog 등 외부에서 에러를 세팅했을 때
+    // 캡처 스레드가 스스로 빠져나와야 재연결 경로의 cap.join() 이 영구 블록되지 않는다.
+    while(is_running && !sdr_stream_error.load(std::memory_order_relaxed)){
         if(capture_pause.load(std::memory_order_relaxed)){
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             rx_pos=0; rx_avail=0;

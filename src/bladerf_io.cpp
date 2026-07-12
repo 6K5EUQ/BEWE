@@ -142,7 +142,28 @@ void FFTViewer::capture_and_process(){
     static constexpr int MAX_ROW_FFTS = 32;
     int win_skip = 0;
 
-    while(is_running){
+    // ── 스트림 에러 시 장치 정리 (핸들 누수 방지) ────────────────────────
+    // 예전엔 dev_blade 를 nullptr 로 만들기만 하고 bladerf_close() 를 안 했다.
+    // 그러면 libbladeRF 핸들이 누수돼 USB 장치가 이 프로세스에 claim 된 채 남고,
+    // 재연결 경로의 `if(dev_blade){ bladerf_close(...) }` 는 이미 nullptr 이라 안 돌며,
+    // hw_detect 의 bladerf_get_device_list() 가 0 을 반환 → "No SDR device found" 를
+    // 프로세스 재시작 전까지 무한 반복한다 (2026-07-12 DGS-5 실장애: 일시적 RX 에러
+    // 하나가 64분 영구 장애로 굳음). 반드시 닫고 나간다.
+    auto blade_teardown = [&](){
+        if(dev_blade){
+            bladerf_enable_module(dev_blade, BLADERF_CHANNEL_RX(0), false);
+            bladerf_close(dev_blade);
+        }
+        dev_blade = nullptr;
+    };
+    // sync_rx 연속 타임아웃 상한 (3s x 3 = 9s). FFT-stall watchdog(10s)보다 먼저 스스로 감지.
+    static constexpr int RX_TIMEOUT_MAX = 3;
+    int rx_timeouts = 0;
+
+    // sdr_stream_error 를 루프 조건에 포함: watchdog 등 외부에서 에러를 세팅했을 때
+    // 캡처 스레드가 스스로 빠져나와야 cap.join() 이 걸리지 않는다 (안 그러면 재연결
+    // 스레드가 join 에서 영구 블록 → USB reset/재초기화가 아예 실행되지 않음).
+    while(is_running && !sdr_stream_error.load(std::memory_order_relaxed)){
         // ── Pause (타임머신 모드) ─────────────────────────────────────────
         if(capture_pause.load(std::memory_order_relaxed)){
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -295,10 +316,25 @@ void FFTViewer::capture_and_process(){
             int status=bladerf_sync_rx(dev_blade,iq_buf,rx_chunk,nullptr,3000);
             if(status){
                 if(status==BLADERF_ERR_TIMEOUT){
-                    // 타임아웃 중 장치 분리 확인
-                    if(!dev_blade || !bladerf_is_fpga_configured(dev_blade)){
-                        fprintf(stderr,"BladeRF: device lost during timeout\n");
-                        dev_blade = nullptr;
+                    // is_fpga_configured: 1=정상, 0=미구성, <0=조회 실패(장치 이상).
+                    // 예전 코드는 `!bladerf_is_fpga_configured(...)` 라 음수(조회 실패)를
+                    // 0(=거짓) 이 아닌 참으로 봐서 "정상" 으로 오판 → 타임아웃 루프에 갇힘.
+                    int fc = dev_blade ? bladerf_is_fpga_configured(dev_blade) : 0;
+                    if(fc <= 0){
+                        fprintf(stderr,"BladeRF: device lost during timeout (fpga=%d)\n", fc);
+                        bewe_log("BladeRF: device lost (fpga=%d)\n", fc);
+                        blade_teardown();
+                        sdr_stream_error.store(true);
+                        break;
+                    }
+                    // 연속 타임아웃 = 스트림 사망. 예전엔 여기서 무한히 10ms sleep 만 돌아
+                    // CPU ~0% 로 조용히 멎은 채 sdr_stream_error 도 안 세워 재연결이 영영
+                    // 트리거되지 않았다 (silent death).
+                    if(++rx_timeouts >= RX_TIMEOUT_MAX){
+                        fprintf(stderr,"BladeRF: RX stalled (%d consecutive timeouts) - reconnecting\n",
+                                rx_timeouts);
+                        bewe_log("BladeRF: RX stalled (%dx timeout) - reconnecting\n", rx_timeouts);
+                        blade_teardown();
                         sdr_stream_error.store(true);
                         break;
                     }
@@ -307,10 +343,11 @@ void FFTViewer::capture_and_process(){
                 }
                 bewe_log("RX error: %s\n",bladerf_strerror(status));
                 fprintf(stderr,"BladeRF: fatal RX error (%d) - SDR disconnected\n", status);
-                dev_blade = nullptr;
+                blade_teardown();
                 sdr_stream_error.store(true);
                 break;
             }
+            rx_timeouts = 0;   // 정상 수신 → 연속 타임아웃 카운터 리셋
             // SC8_Q7: int8 샘플을 int16으로 확장 (뒤에서부터 > in-place 안전)
             if(sc8_mode){
                 int8_t* i8 = (int8_t*)iq_buf;
