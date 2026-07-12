@@ -125,6 +125,11 @@ void FFTViewer::update_channel_squelch(){
     const float* rowp = fft_data.data() + fi * fft_size;
     // 같은 FFT 행이면 채널별 peak 재스캔 생략 (행 갱신은 ~1.5-37Hz, 호출은 ~60Hz)
     bool same_row = (total_ffts == sq_last_total_ffts);
+    {
+        int64_t now_ms_row = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now().time_since_epoch()).count();
+        if(!same_row || sq_row_change_ms == 0) sq_row_change_ms = now_ms_row;
+    }
     sq_last_total_ffts = total_ffts;
 
     auto freq_to_bin = [&](float rel_mhz) -> int {
@@ -210,6 +215,28 @@ void FFTViewer::update_channel_squelch(){
             }
         }
         ch.sq_gate.store(gate, std::memory_order_relaxed);
+
+        // ── 디코더 전용 게이트 (관대) ─────────────────────────────────────
+        // CLI 구현(cli_host.cpp)과 동일 로직 — GUI HOST 도 디코드 워커를 돌리므로 필요.
+        {
+            int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now().time_since_epoch()).count();
+            // fail-open: FFT 행이 멎으면(spectrum_pause / rx stop / SDR 에러 / render off)
+            // peak 가 갱신되지 않아 게이트가 영구히 닫힌 채 굳는다 → 디코더가 조용히 정지.
+            // 행이 stale 하면 무조건 열어 둔다 (구동작 = 풀레이트 복조로 안전 복귀).
+            bool rows_stale = (now_ms - sq_row_change_ms) > DEC_GATE_HOLD_MS;
+            if(rows_stale || !ch.sq_calibrated.load(std::memory_order_relaxed)){
+                ch.dec_gate.store(true, std::memory_order_relaxed);
+                ch.dec_gate_until_ms.store(0, std::memory_order_relaxed);
+            } else {
+                int64_t until = ch.dec_gate_until_ms.load(std::memory_order_relaxed);
+                if(peak_db >= thr - DEC_GATE_MARGIN_DB){
+                    until = now_ms + DEC_GATE_HOLD_MS;
+                    ch.dec_gate_until_ms.store(until, std::memory_order_relaxed);
+                }
+                ch.dec_gate.store(now_ms < until, std::memory_order_relaxed);
+            }
+        }
 
         // 스컬치 누적 시간 추적 (프레임 기반 — SDR 멈추면 시간도 정지)
         // Holding(dem_paused) 상태에서는 증가 정지 — JOIN도 HOST 값이 멈춘 상태로 받음
@@ -684,14 +711,38 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
             int b=(fd>=0)?(int)((fd/nyq)*hf+0.5f):fft_size+(int)((fd/nyq)*hf-0.5f);
             return std::max(0,std::min(fft_size-1,b));
         };
-        for(int px=0;px<np;px++){
-            float fd0=ds+(float)px/np*(de-ds);
-            float fd1=ds+(float)(px+1)/np*(de-ds);
-            int b0=freq_to_bin(fd0), b1=freq_to_bin(fd1);
-            if(b0>b1) std::swap(b0,b1);
-            float mx=-200.0f;
-            for(int b=b0;b<=b1;b++) if(rowp[b]>mx) mx=rowp[b];
-            current_spectrum[px]=mx;
+        // pad=1 HOST(헤드리스) 프레임은 zero-pad sinc 보간이 없어 bin 당 픽셀이 1 미만인
+        // 깊은 줌에서 계단이 보인다 → Catmull-Rom 으로 bin 사이를 메워 pad=4 의 시각적
+        // 부드러움을 근사. pad=4 프레임(fft_size>fft_input_size)은 이 분기를 타지 않아
+        // 기존 픽셀값과 완전히 동일.
+        bool pad1 = (fft_input_size > 0 && fft_input_size == fft_size);
+        float bins_per_px = ((de-ds)/(2.0f*nyq)) * (float)fft_size / (float)np;
+        if(pad1 && bins_per_px < 1.0f){
+            int hfl = fft_size/2;
+            auto row_at=[&](int k)->float{        // k = 주파수순 인덱스 (0 = -nyq)
+                k = std::max(0, std::min(fft_size-1, k));
+                return rowp[(k + hfl) % fft_size];
+            };
+            for(int px=0;px<np;px++){
+                float fd = ds + ((float)px + 0.5f)/np*(de-ds);
+                float kf = (fd + nyq)/(2.0f*nyq)*(float)fft_size;   // freq_to_bin 과 동일 규약 (half-bin 오프셋 없음)
+                int   k1 = (int)floorf(kf);
+                float t  = kf - (float)k1;
+                float p0=row_at(k1-1), p1=row_at(k1), p2=row_at(k1+1), p3=row_at(k1+2);
+                current_spectrum[px] = p1 + 0.5f*t*((p2-p0)
+                                       + t*((2.0f*p0-5.0f*p1+4.0f*p2-p3)
+                                       + t*(3.0f*(p1-p2)+p3-p0)));
+            }
+        } else {
+            for(int px=0;px<np;px++){
+                float fd0=ds+(float)px/np*(de-ds);
+                float fd1=ds+(float)(px+1)/np*(de-ds);
+                int b0=freq_to_bin(fd0), b1=freq_to_bin(fd1);
+                if(b0>b1) std::swap(b0,b1);
+                float mx=-200.0f;
+                for(int b=b0;b<=b1;b++) if(rowp[b]>mx) mx=rowp[b];
+                current_spectrum[px]=mx;
+            }
         }
         cached_sp_idx=sp_idx; cached_pan=freq_pan; cached_zoom=freq_zoom;
         cached_px=np; cached_pmin=display_power_min; cached_pmax=display_power_max;
@@ -1023,15 +1074,36 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
                 };
                 // ─ Pass 1: 모든 픽셀을 기존 peak-detection으로 계산 (노치 영역 포함)
                 // > 노치 밖 값 확정 + 노치 영역의 "edge 인접 픽셀 값"도 이 결과에서 조회
-                for(int px = 0; px < np; px++){
-                    float fd0 = ds + (float)px    / np * (de-ds);
-                    float fd1 = ds + (float)(px+1)/ np * (de-ds);
-                    int b0 = freq_to_bin2(fd0), b1 = freq_to_bin2(fd1);
-                    if(b0 > b1) std::swap(b0, b1);
-                    float mx = -200.0f;
-                    for(int b = b0; b <= b1; b++)
-                        if(max_hold_spectrum[b] > mx) mx = max_hold_spectrum[b];
-                    mh_vals[px] = mx;
+                // (pad=1 프레임 깊은 줌에서는 base 스펙트럼과 동일하게 Catmull-Rom 보간)
+                bool mh_pad1 = (fft_input_size > 0 && fft_input_size == fft_size);
+                float mh_bpp = ((de-ds)/(2.0f*nyq2)) * (float)fft_size / (float)np;
+                if(mh_pad1 && mh_bpp < 1.0f){
+                    int hfl2 = fft_size/2;
+                    auto mh_at=[&](int k)->float{
+                        k = std::max(0, std::min(fft_size-1, k));
+                        return max_hold_spectrum[(k + hfl2) % fft_size];
+                    };
+                    for(int px = 0; px < np; px++){
+                        float fd = ds + ((float)px + 0.5f)/np*(de-ds);
+                        float kf = (fd + nyq2)/(2.0f*nyq2)*(float)fft_size;   // freq_to_bin2 와 동일 규약
+                        int   k1 = (int)floorf(kf);
+                        float t  = kf - (float)k1;
+                        float p0=mh_at(k1-1), p1=mh_at(k1), p2=mh_at(k1+1), p3=mh_at(k1+2);
+                        mh_vals[px] = p1 + 0.5f*t*((p2-p0)
+                                      + t*((2.0f*p0-5.0f*p1+4.0f*p2-p3)
+                                      + t*(3.0f*(p1-p2)+p3-p0)));
+                    }
+                } else {
+                    for(int px = 0; px < np; px++){
+                        float fd0 = ds + (float)px    / np * (de-ds);
+                        float fd1 = ds + (float)(px+1)/ np * (de-ds);
+                        int b0 = freq_to_bin2(fd0), b1 = freq_to_bin2(fd1);
+                        if(b0 > b1) std::swap(b0, b1);
+                        float mx = -200.0f;
+                        for(int b = b0; b <= b1; b++)
+                            if(max_hold_spectrum[b] > mx) mx = max_hold_spectrum[b];
+                        mh_vals[px] = mx;
+                    }
                 }
                 // ─ Pass 2: 노치 영역은 base 보간 곡선(sp_dB)과 동일하게 덮어써서
                 //   Max Decay 노란 선이 사실상 안 보이게 (잔상 제거)
@@ -5105,6 +5177,17 @@ void run_streaming_viewer(){
             }
         }
 
+        // ── HOST: FFT_META (입력 크기) 1초 주기 + 신규 JOIN auth 시 즉시 ────
+        if(v.net_srv && (v.net_srv->client_count() > 0 || v.net_srv->has_relay())){
+            static auto fm_last = std::chrono::steady_clock::now() - std::chrono::seconds(2);
+            auto fnow = std::chrono::steady_clock::now();
+            bool force = v.net_srv->fftmeta_force_.exchange(false, std::memory_order_relaxed);
+            if(force || fnow - fm_last >= std::chrono::seconds(1)){
+                fm_last = fnow;
+                v.net_srv->broadcast_fft_meta(v.fft_size, v.fft_input_size);
+            }
+        }
+
         // ── HOST: 1초마다 STATUS 브로드캐스트 ───────────────────────────────
         if(v.net_srv && v.net_srv->client_count()>0){
             auto now=std::chrono::steady_clock::now();
@@ -5585,8 +5668,12 @@ void run_streaming_viewer(){
                     v.current_spectrum.assign(fsz, -80.f);
                     v.texture_needs_recreate = true;
                 }
-                // padded fft_size가 우연히 일치해도 input size는 다를 수 있어 매 프레임 동기화
-                v.fft_input_size = fsz / FFT_PAD_FACTOR;
+                // padded fft_size가 우연히 일치해도 input size는 다를 수 있어 매 프레임 동기화.
+                // proto v2: HOST 가 실제 입력 크기를 보내줌 (헤드리스는 pad=1 이라 역산 불가).
+                // 0 = 구 HOST → 기존 방식(/FFT_PAD_FACTOR)으로 폴백.
+                v.fft_input_size = (frm.fft_input_size > 0)
+                                     ? (int)frm.fft_input_size
+                                     : fsz / FFT_PAD_FACTOR;
                 v.header.center_frequency = frm.cf_hz;
                 v.header.sample_rate      = frm.sr;
                 v.header.power_min        = frm.pmin;

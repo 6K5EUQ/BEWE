@@ -206,6 +206,7 @@ void NetServer::handle_packet(std::shared_ptr<ClientConn> c,
             // 신규 JOIN 이 CHANNEL_SYNC 해시 게이트에 걸려 최대 1초 기다리지 않도록
             // 다음 주기 틱(≤100ms)에 전체 테이블 강제 송신
             chsync_force_.store(true, std::memory_order_relaxed);
+            fftmeta_force_.store(true, std::memory_order_relaxed);  // FFT 메타도 즉시 재송신
         }
         break;
     }
@@ -601,6 +602,22 @@ void NetServer::broadcast_audio_all(uint8_t ch_idx, int8_t pan,
     }
 }
 
+
+// ── Broadcast FFT meta (입력 크기) ────────────────────────────────────────
+void NetServer::broadcast_fft_meta(int fft_size, int fft_input_size){
+    if(bcast_pause_.load(std::memory_order_relaxed)) return;
+    PktFftMeta m{};
+    m.fft_input_size = (uint32_t)fft_input_size;
+    m.fft_size       = (uint32_t)fft_size;
+    auto pkt = make_packet(PacketType::FFT_META, &m, sizeof(m));
+    if(cb.on_relay_broadcast && has_relay())
+        cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
+    std::lock_guard<std::mutex> lk(clients_mtx_);
+    for(auto& c : clients_){
+        if(c->is_relay || !c->authed || !c->alive.load()) continue;
+        c->enqueue(pkt, false);
+    }
+}
 
 // ── Broadcast channel sync ────────────────────────────────────────────────
 void NetServer::broadcast_channel_sync(const Channel* chs, int n, bool periodic){

@@ -284,6 +284,16 @@ void NetClient::handle_packet(PacketType type,
                                const uint8_t* payload, uint32_t len){
     switch(type){
 
+    case PacketType::FFT_META: {
+        // HOST 의 실제 입력 FFT 크기 (pad 역산 불가한 헤드리스 HOST 대응).
+        // 구 HOST 는 이 패킷을 안 보내므로 fft_input_size_ 가 0 으로 남고 → 역산 폴백.
+        if(len < sizeof(PktFftMeta)) break;
+        auto* mm = reinterpret_cast<const PktFftMeta*>(payload);
+        if(mm->fft_input_size > 0 && mm->fft_size > 0)
+            host_fft_input_size.store(mm->fft_input_size, std::memory_order_relaxed);
+        break;
+    }
+
     case PacketType::FFT_FRAME: {
         if(len < sizeof(PktFftFrame)) break;
         // 수직바가 왼쪽 끝으로 밀려있으면 FFT 패킷 드롭 (큐에 쌓지 않음)
@@ -296,6 +306,8 @@ void NetClient::handle_packet(PacketType type,
             ? real_fft_size                       // uint8 1 byte/bin
             : real_fft_size * (uint32_t)sizeof(float);
         if(data_bytes != expected) break;
+        const size_t hsz = sizeof(PktFftFrame);
+        uint32_t fis = host_fft_input_size.load(std::memory_order_relaxed);
 
         // 수신 시각 (steady_clock μs)
         auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -305,20 +317,20 @@ void NetClient::handle_packet(PacketType type,
         frm.data.resize(real_fft_size);
         if(quantized){
             // uint8 → float dequantize
-            const uint8_t* qd = payload + sizeof(PktFftFrame);
+            const uint8_t* qd = payload + hsz;
             float range = fh->power_max - fh->power_min;
             if(!(range > 0.f)) range = 1.f;
             float scale = range / 255.f;
             for(uint32_t i = 0; i < real_fft_size; i++)
                 frm.data[i] = fh->power_min + (float)qd[i] * scale;
         } else {
-            const float* fft_floats = reinterpret_cast<const float*>(
-                                          payload + sizeof(PktFftFrame));
+            const float* fft_floats = reinterpret_cast<const float*>(payload + hsz);
             std::copy(fft_floats, fft_floats + real_fft_size, frm.data.begin());
         }
         frm.cf_hz     = fh->center_freq_hz;
         frm.sr        = fh->sample_rate;
         frm.fft_sz    = real_fft_size;
+        frm.fft_input_size = fis;   // 0 = 구 HOST(FFT_META 없음) → 수신측이 /FFT_PAD_FACTOR 로 폴백
         frm.pmin      = fh->power_min;
         frm.pmax      = fh->power_max;
         frm.wall_time = fh->wall_time;

@@ -63,6 +63,10 @@ void write_default_info_file(const std::string& wav_path,
                              uint32_t sample_rate = 0);  // SigMF meta용 (IQ .sigmf-data); .wav는 무시
 
 // ── FFTViewer ─────────────────────────────────────────────────────────────
+// 캡처 FFT 플랜 (wisdom 캐시 + 플래너 thread-safe). learn=true 는 기동 시 MEASURE 학습,
+// false 는 런타임 size 변경 — wisdom 있으면 사용, 없으면 ESTIMATE 즉시 폴백(무정지).
+fftwf_plan bewe_fft_plan(int n, fftwf_complex* in, fftwf_complex* out, int sign, bool learn);
+
 class FFTViewer {
 public:
     // ── RAII: 모든 스레드 멤버가 joinable인 채로 파괴되지 않도록 방어 ────────
@@ -84,6 +88,10 @@ public:
     bool  sr_change_req=false; float pending_sr_msps=61.44f; // 샘플레이트 변경 요청
     bool  texture_needs_recreate=false;
     int   current_fft_idx=0, last_wf_update_idx=-1;
+    // 마지막으로 FFT 행이 갱신된 시각 (steady ms) — dec_gate fail-open 판정용.
+    // 행이 멎으면(spectrum_pause/rx stop/SDR 에러) 게이트를 강제로 열어 디코더가
+    // 조용히 정지하는 것을 막는다. update_channel_squelch 가 갱신.
+    int64_t sq_row_change_ms = 0;
     float freq_zoom=1, freq_pan=0;
     float display_power_min=-80, display_power_max=0;
     bool  join_manual_scale=false; // JOIN 수동 스케일: true면 HOST pmin/pmax 덮어쓰기 금지

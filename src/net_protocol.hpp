@@ -90,6 +90,7 @@ enum class PacketType : uint8_t {
     MISSION_FILE_SET_NOTE  = 0x57,  // any → central: archive 파일 note 갱신 (사이드카 Note + list 재발송)
     // ── Module data pipe (src/modules/ 선택형 모듈 공용 전송로) ─────────
     MODULE_PIPE            = 0x58,  // 양방향: PktModulePipe + payload (mod_id 다중화, Central opaque relay)
+    FFT_META               = 0x59,  // HOST → JOIN: FFT 입력 크기 메타. 구 JOIN 은 미지 타입이라 무시
 };
 
 // ── Packet header (9 bytes, packed) ──────────────────────────────────────
@@ -192,6 +193,20 @@ struct __attribute__((packed)) PktFftFrame {
     int64_t  iq_write_sample;   // HOST tm_iq_write_sample at broadcast (0=N/A)
     int64_t  iq_total_samples;  // HOST tm_iq_total_samples (rolling buffer capacity)
     // payload 따라옴: FFT_FLAG_QUANT_U8 set 이면 uint8[fft_size], 아니면 float[fft_size]
+};
+// 이 구조체는 절대 확장하지 말 것 — 크기가 바뀌면 구 JOIN 이 모든 FFT 프레임을 조용히
+// 버린다(엄격한 size 검사). 새 메타는 FFT_META 처럼 별도 패킷 타입으로 보낸다.
+static_assert(sizeof(PktFftFrame) == 48, "PktFftFrame wire size is frozen at 48B");
+
+// ── FFT_META ──────────────────────────────────────────────────────────────
+// HOST 의 실제 입력 FFT 크기(zero-pad 제외). 헤드리스 HOST 는 pad=1 로 돌기 때문에
+// JOIN 이 fft_size/FFT_PAD_FACTOR 로 역산하면 틀린다(행 레이트·시간 매핑이 4배 어긋남).
+// PktFftFrame 을 확장하면 구 JOIN 이 전 프레임을 버리므로 별도 타입으로 보낸다 —
+// 구 JOIN 은 미지 타입이라 default 로 무시하고 기존 역산 폴백을 계속 쓴다(무해).
+// 송신: JOIN auth 직후 1회 + fft_size 변경 시 + STATUS 와 함께 1초마다(재동기 보험).
+struct __attribute__((packed)) PktFftMeta {
+    uint32_t fft_input_size;   // 실제 입력 샘플 수 (윈도우 길이)
+    uint32_t fft_size;         // padded 크기 (검증용 — 불일치 시 JOIN 이 무시)
 };
 
 // ── AUDIO_FRAME ───────────────────────────────────────────────────────────

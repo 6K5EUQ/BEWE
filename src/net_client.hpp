@@ -103,6 +103,7 @@ public:
         int64_t  recv_us;    // steady_clock microseconds at receive time
         int64_t  iq_write_sample = 0;   // HOST IQ 좌표 (region_save용)
         int64_t  iq_total_samples = 0;  // HOST 롤링 버퍼 용량
+        uint32_t fft_input_size = 0;    // HOST 실제 입력 FFT 크기 (0 = 구 HOST, pad 역산 폴백)
     };
 
     mutable std::mutex   fft_mtx;
@@ -113,6 +114,8 @@ public:
     uint16_t             fft_sz  = 0;
     float                pmin    = -80.f, pmax = 0.f;
     std::atomic<int>     fft_seq{0};   // incremented each new buffered frame
+    // HOST 가 FFT_META 로 알려준 실제 입력 FFT 크기 (0 = 구 HOST → pad 역산 폴백)
+    std::atomic<uint32_t> host_fft_input_size{0};
 
     // Buffer queue: recv thread enqueues, UI dequeues after DISPLAY_DELAY_US
     static constexpr int64_t DISPLAY_DELAY_US = 50'000;  // 50ms

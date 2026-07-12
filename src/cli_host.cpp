@@ -68,6 +68,9 @@ void FFTViewer::update_channel_squelch(){
     const float* rowp = fft_data.data() + fi * fft_size;
     // 같은 FFT 행이면 채널별 peak 재스캔 생략 (행 갱신은 ~1.5-37Hz, 호출은 ~50Hz)
     bool same_row = (total_ffts == sq_last_total_ffts);
+    int64_t now_ms_row = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             sq_now.time_since_epoch()).count();
+    if(!same_row || sq_row_change_ms == 0) sq_row_change_ms = now_ms_row;
     sq_last_total_ffts = total_ffts;
     auto freq_to_bin = [&](float rel_mhz) -> int {
         int bin = (rel_mhz >= 0)
@@ -133,6 +136,29 @@ void FFTViewer::update_channel_squelch(){
             }
         }
         ch.sq_gate.store(gate, std::memory_order_relaxed);
+
+        // ── 디코더 전용 게이트 (관대) ─────────────────────────────────────
+        // raw 행 peak 이 thr-6dB 만 넘으면 열고 2초 hold. 캘리브레이션 전엔 항상 열림.
+        // (오디오 게이트는 EMA sig >= thr — 그보다 훨씬 빨리/오래 열려 버스트 유실 방지)
+        {
+            int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 sq_now.time_since_epoch()).count();
+            // fail-open: FFT 행이 멎으면(spectrum_pause / rx stop / SDR 에러 / render off)
+            // peak 가 갱신되지 않아 게이트가 영구히 닫힌 채 굳는다 → 디코더가 조용히 정지.
+            // 행이 stale 하면 무조건 열어 둔다 (구동작 = 풀레이트 복조로 안전 복귀).
+            bool rows_stale = (now_ms - sq_row_change_ms) > DEC_GATE_HOLD_MS;
+            if(rows_stale || !ch.sq_calibrated.load(std::memory_order_relaxed)){
+                ch.dec_gate.store(true, std::memory_order_relaxed);
+                ch.dec_gate_until_ms.store(0, std::memory_order_relaxed);
+            } else {
+                int64_t until = ch.dec_gate_until_ms.load(std::memory_order_relaxed);
+                if(peak_db >= thr - DEC_GATE_MARGIN_DB){
+                    until = now_ms + DEC_GATE_HOLD_MS;
+                    ch.dec_gate_until_ms.store(until, std::memory_order_relaxed);
+                }
+                ch.dec_gate.store(now_ms < until, std::memory_order_relaxed);
+            }
+        }
 
         // 스컬치 누적 시간 — 실벽시계 delta 사용 (Holding 중에는 정지)
         if(ch.filter_active && !ch.dem_paused.load()){
@@ -1590,6 +1616,17 @@ void run_cli_host(){
                        (double)net_tx/(1024*1024),
                        (unsigned long long)net_drops);
                 fflush(stdout);
+            }
+        }
+
+        // ── FFT_META (입력 크기) 1초 주기 + 신규 JOIN auth 시 즉시 ──────────
+        // PktFftFrame 은 구 JOIN 호환 때문에 크기 동결 → 메타는 별도 패킷으로.
+        if(v.net_srv && (v.net_srv->client_count() > 0 || v.net_srv->has_relay())){
+            static auto fm_last = clk::now() - std::chrono::seconds(2);
+            bool force = v.net_srv->fftmeta_force_.exchange(false, std::memory_order_relaxed);
+            if(force || clk::now() - fm_last >= std::chrono::seconds(1)){
+                fm_last = clk::now();
+                v.net_srv->broadcast_fft_meta(v.fft_size, v.fft_input_size);
             }
         }
 

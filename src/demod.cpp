@@ -100,7 +100,10 @@ void FFTViewer::dem_worker(int ch_idx){
            && !ch.iq_rec_on.load(std::memory_order_relaxed)){
             idle_skip=true;
             ch.dem_rp.store(wp,std::memory_order_release);   // 무신호 버퍼 폐기
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            // 20ms: 닫힘 상주 채널이 수십 개면 5ms 폴링의 wakeup 비용이 무시 못 할 수준.
+            // 게이트 열림 감지는 FFT 스레드(~50Hz)가 하므로 여기 폴링을 늦춰도 유실 없고,
+            // 재개 시 폐기 시점부터의 백로그를 처리하므로 attack 지연만 최대 +15ms.
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
             continue;
         }
         if(idle_skip){   // idle→active 복귀: DSP 상태 리셋 (스컬치 열림 클릭/transient 방지)

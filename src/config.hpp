@@ -4,7 +4,7 @@
 
 // ── BEWE version (창 제목 및 About 표시용) ──────────────────────────────────
 // SemVer: vMAJOR.MINOR.PATCH — 자세한 정책은 CLAUDE.md 참조
-#define BEWE_VERSION "v11.8.1"
+#define BEWE_VERSION "v11.9.0"
 
 #ifdef BEWE_HEADLESS
   typedef uint32_t ImU32;
@@ -21,7 +21,15 @@
 
 // ── FFT / Display ─────────────────────────────────────────────────────────
 #define DEFAULT_FFT_SIZE       8192
-#define FFT_PAD_FACTOR         4      // zero-padding 배수 (시각적 해상도 향상)
+// zero-padding 배수 — 순수 시각용(bin 사이 sinc 보간). 헤드리스는 로컬 디스플레이가
+// 없으므로 1: FFT 크기 4배·행 변환/양자화/브로드캐스트 bin 수 4배·fft_data RAM 4배가
+// 전부 사라진다. JOIN 은 와이어의 fft_input_size 로 pad=1 프레임을 인지하고 깊은 줌에서
+// Catmull-Rom 보간으로 시각 해상도를 복원한다 (ui.cpp draw_spectrum_area).
+#ifdef BEWE_HEADLESS
+  #define FFT_PAD_FACTOR       1
+#else
+  #define FFT_PAD_FACTOR       4
+#endif
 #define TIME_AVERAGE           200
 #define MAX_FFTS_MEMORY        2500   // ~1분
 // fft_data 히스토리 깊이: GUI 는 워터폴 스크롤백/TM 용 2500행, 헤드리스 CLI 는
@@ -50,6 +58,13 @@
 #else
   #define TM_IQ_DISK_BUDGET_MBPS 0
 #endif
+
+// ── Decoder gate (dec_gate) — 디코드 워커 무신호 스킵용 ────────────────────
+// 오디오 스컬치(sq_gate)보다 관대하게 잡는다: 약신호 버스트를 절대 놓치지 않는 게
+// 우선이고, 절감은 "확실히 아무것도 없는 구간"에서만 취한다.
+#define DEC_GATE_MARGIN_DB     6.0f   // sq_threshold 대비 추가 여유 (thr-6dB 넘으면 열림)
+#define DEC_GATE_HOLD_MS       2000   // 마지막 검출 이후 유지 (버스트 간 짧은 공백 흡수)
+#define DEC_GATE_PREROLL_MS    300    // 열림 시 IQ ring 되감기 — FFT 검출지연 흡수
 
 // ── Audio ─────────────────────────────────────────────────────────────────
 #define AUDIO_SR               48000u

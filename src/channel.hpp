@@ -302,6 +302,16 @@ struct Channel {
     float sq_active_time = 0.0f; // 스컬치 열린 누적 시간(초)
     float sq_total_time  = 0.0f; // 전체 경과 시간 (프레임 기반 누적)
 
+    // ── 디코더 전용 게이트 (dec_gate) ─────────────────────────────────────
+    // 오디오용 sq_gate 보다 훨씬 관대: EMA(sq_sig) 가 아닌 raw 행 peak 기준 +
+    // thr-DEC_GATE_MARGIN_DB 임계 + 긴 hold. 무신호 구간에서 디코드 워커가
+    // 풀레이트 DDC 를 건너뛰되(배터리), 약신호 버스트는 놓치지 않게 하는 목적.
+    // 열림 순간 워커가 IQ ring 을 되감아(pre-roll) 버스트 선두를 복원한다.
+    // 기본 true(열림) — 캘리브레이션 전/미지원 상태에서는 항상 통과시켜 안전.
+    std::atomic<bool>    dec_gate{true};
+    std::atomic<int64_t> dec_gate_until_ms{0};  // hold 만료 (steady ms). reset_slot 이 타 스레드에서
+                                               // 쓰므로 atomic (스퀄치 스레드와 레이스 방지)
+
     // Filter move-drag state
     bool  move_drag=false;
     float move_anchor=0;
@@ -346,6 +356,7 @@ struct Channel {
         memset(sq_calib_buf, 0, sizeof(sq_calib_buf));
         sq_gate_hold=0;
         sq_active_time=0; sq_total_time=0;
+        dec_gate.store(true); dec_gate_until_ms.store(0);   // 디코더 게이트는 열림으로 리셋
         // drag state
         move_drag=false;
         move_anchor=0;

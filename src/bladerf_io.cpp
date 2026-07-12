@@ -110,7 +110,7 @@ bool FFTViewer::initialize_bladerf(float cf_mhz, float sr_msps){
     fft_in =fftwf_alloc_complex(fft_size);
     fft_out=fftwf_alloc_complex(fft_size);
     memset(fft_in, 0, fft_size*sizeof(fftwf_complex));  // zero-pad region
-    fft_plan=fftwf_plan_dft_1d(fft_size,fft_in,fft_out,FFTW_FORWARD,FFTW_ESTIMATE);
+    fft_plan=bewe_fft_plan(fft_size,fft_in,fft_out,FFTW_FORWARD,/*learn=*/true);
     memset(fft_in, 0, fft_size*sizeof(fftwf_complex)); // MEASURE가 입력 파괴 > 재초기화
     // Pre-compute Nuttall window + allocate VOLK mag_sq buffer
     if(win_buf) free(win_buf);
@@ -166,7 +166,7 @@ void FFTViewer::capture_and_process(){
             fft_in =fftwf_alloc_complex(new_fft_sz);
             fft_out=fftwf_alloc_complex(new_fft_sz);
             memset(fft_in, 0, new_fft_sz*sizeof(fftwf_complex));
-            fft_plan=fftwf_plan_dft_1d(new_fft_sz,fft_in,fft_out,FFTW_FORWARD,FFTW_ESTIMATE);
+            fft_plan=bewe_fft_plan(new_fft_sz,fft_in,fft_out,FFTW_FORWARD,/*learn=*/false);
             memset(fft_in, 0, new_fft_sz*sizeof(fftwf_complex)); // MEASURE가 입력 파괴 > 재초기화
             if(win_buf) volk_free(win_buf);
             win_buf=(float*)volk_malloc(new_input*sizeof(float), volk_get_alignment());
@@ -389,8 +389,14 @@ void FFTViewer::capture_and_process(){
                 {std::lock_guard<std::mutex> lk(data_mtx);
                  // current_spectrum은 UI 스레드 전용(픽셀별 peak) > 캡처가 절대 쓰지 않음
                  // (과거 bin별 avg를 여기에 덮어써 UI 파워스펙트럼에 1프레임 깨짐 유발했음)
-                 for(int i=0;i<fft_size;i++){
-                     rowp[i]=10.0f*log10f(pacc[i]/fcnt);
+                 // dB 변환: 10*log10(pacc/fcnt) = 3.0103*log2(pacc) - 10*log10(fcnt).
+                 // 스칼라 log10f 루프(bin 당 1회) → VOLK SIMD log2 로 교체 (NEON/AVX).
+                 // pacc 는 항상 >=1e-10 (누적 시 +1e-10f) 이라 -inf 없음. 오차 <1e-3 dB.
+                 {
+                     volk_32f_log2_32f(rowp, pacc.data(), (unsigned int)fft_size);
+                     volk_32f_s32f_multiply_32f(rowp, rowp, 3.01029996f, (unsigned int)fft_size);
+                     const float row_off = 10.0f*log10f((float)fcnt);
+                     for(int i=0;i<fft_size;i++) rowp[i] -= row_off;
                  }
                  // 비-캡처 스레드 요청 처리 (set_frequency/init) — 여기서만 autoscale 상태 변경 (레이스 X)
                  if(autoscale_req.exchange(false)){

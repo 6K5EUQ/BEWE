@@ -40,6 +40,7 @@ public:
         }
         for(int i=0;i<TAPS_MAX;i++){ bb_re[i]=bb_im[i]=0; }
         bb_pos=0; vco=0; sym_ph=0; pll=0; sym_n=0;
+        nco_r=1.0; nco_i=0.0; nco_dr=1.0; nco_di=0.0; nco_w=1e30; nco_norm=0;
         shifter=0; need=1; fr=WAIT_SYN; flen=0;
         d_n=0; d_e=0; d_bits=0; d_msgs=0;
     }
@@ -57,10 +58,20 @@ public:
 
         // ── carrier NCO @ 1800 Hz (+ loop correction) ──
         double w = 1800.0/sr*2.0*M_PI + pll;
-        vco += w; if(vco >= 2.0*M_PI) vco -= 2.0*M_PI;
+        if(w != nco_w){                     // pll 갱신(심볼 경계) 시에만 sincos
+            nco_w = w; nco_dr = std::cos(w); nco_di = std::sin(w);
+        }
+        { double r = nco_r*nco_dr - nco_i*nco_di;   // phasor 회전 = 위상 += w
+          double i = nco_r*nco_di + nco_i*nco_dr;
+          nco_r = r; nco_i = i; }
+        if(++nco_norm >= 4096){             // 드리프트 재정규화
+            double m = std::sqrt(nco_r*nco_r + nco_i*nco_i);
+            if(m > 1e-9){ nco_r/=m; nco_i/=m; }
+            nco_norm = 0;
+        }
         // mix audio down to complex baseband, store in the matched-filter delay line
-        bb_re[bb_pos] = (float)( a*std::cos(vco));
-        bb_im[bb_pos] = (float)(-a*std::sin(vco));
+        bb_re[bb_pos] = (float)( a*nco_r);
+        bb_im[bb_pos] = (float)(-a*nco_i);
         bb_pos = (bb_pos+1)%mf_taps;
 
         // ── symbol clock: NCO advances 3π/2 per symbol (1800/2400 = ¾ cycle) ──
@@ -115,6 +126,12 @@ private:
     float  bb_re[TAPS_MAX], bb_im[TAPS_MAX];
     int    bb_pos=0;
     double vco=0, sym_ph=0, pll=0; int sym_n=0;
+    // 1800Hz NCO: 샘플당 sin/cos 2회(48k/s) → 증분 복소 phasor 회전(4mul+2add).
+    // 회전계수(dr,di)는 w 가 바뀔 때만(=pll 갱신, 심볼 경계 2400/s) 재계산.
+    double nco_r=1.0, nco_i=0.0;     // 현재 위상 phasor (cos vco, sin vco)
+    double nco_dr=1.0, nco_di=0.0;   // 샘플당 회전 (cos w, sin w)
+    double nco_w=1e30;               // 마지막으로 회전계수를 만든 w (초기값=불일치 강제)
+    int    nco_norm=0;               // 주기적 재정규화 카운터 (부동소수 드리프트 방지)
     uint8_t shifter=0; int need=1;
     enum Fr{ WAIT_SYN, GOT_SYN1, WAIT_SOH, BODY, BCS_HI, BCS_LO } fr=WAIT_SYN;
     uint8_t frame[300]; int flen=0; uint8_t bcs[2]={0,0};

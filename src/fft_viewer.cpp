@@ -2,12 +2,48 @@
 #include "audio_playback.hpp"
 #include "net_protocol.hpp"
 #include "kst_time.hpp"
+#include "bewe_paths.hpp"
 #include <algorithm>
 #include <mutex>
 
 // 전역 DB 목록 (Central server에서 수신, ui.cpp + cli_host.cpp에서 접근)
 std::vector<DbFileEntry> g_db_list;
 std::mutex g_db_list_mtx;
+
+// ── 캡처 FFT 플랜 생성 (wisdom 캐시) ─────────────────────────────────────
+// 캡처 플랜은 프로세스 수명 내내(수 주) 재사용되므로 1회성 플래닝 비용을 아낄 이유가
+// 없다. FFTW_MEASURE 는 ESTIMATE 대비 20-37% 빠른 커널을 고르지만 Pi5 에서 수십 초가
+// 걸리므로 wisdom 파일에 캐시해 첫 기동에만 지불한다.
+//   learn=true  : 기동 시(캡처 루프 시작 전) — MEASURE 로 학습, 상한 10s
+//   learn=false : 런타임 FFT size 변경 — 학습된 wisdom 이 있으면 그것만 쓰고,
+//                 없으면 즉시 ESTIMATE (라이브 캡처를 절대 멈추지 않음).
+//                 학습되는 건 기동 시 size 뿐이므로, 런타임에 다른 size 로 바꾸면
+//                 그 size 는 계속 ESTIMATE (구동작과 동일 — 손해 없음).
+// 스레드 안전: FFTW 플래너는 비안전이라 캡처 플랜 생성은 아래 뮤텍스로 직렬화한다.
+// (fftwf_make_planner_thread_safe 는 libfftw3f_threads 링크가 필요해 fleet 의존성이
+//  늘어나므로 쓰지 않음. MEASURE 는 기동 시에만 실행되고 — 그 시점엔 EID/SA/WiFi 가
+//  아직 플랜을 만들지 않는다 — 런타임 size 변경 경로는 ESTIMATE 폴백이라 레이스 창이
+//  기존과 동일하다.)
+fftwf_plan bewe_fft_plan(int n, fftwf_complex* in, fftwf_complex* out, int sign, bool learn){
+    static std::mutex plan_mtx;
+    static std::once_flag once;
+    static std::string wpath;
+    std::lock_guard<std::mutex> lk(plan_mtx);
+    std::call_once(once, [&]{
+        wpath = BEWEPaths::data_dir() + "/fftw_wisdom.f";
+        if(fftwf_import_wisdom_from_filename(wpath.c_str()))
+            bewe_log_push(0,"[FFTW] wisdom loaded (%s)\n", wpath.c_str());
+        fftwf_set_timelimit(10.0);   // 첫 학습 상한 (Pi5 에서 MEASURE 는 수십 초까지 감)
+    });
+    if(!learn){
+        fftwf_plan p = fftwf_plan_dft_1d(n, in, out, sign, FFTW_WISDOM_ONLY|FFTW_MEASURE);
+        if(p) return p;                                  // 학습된 size → 즉시
+        return fftwf_plan_dft_1d(n, in, out, sign, FFTW_ESTIMATE);  // 미학습 → 무정지 폴백
+    }
+    fftwf_plan p = fftwf_plan_dft_1d(n, in, out, sign, FFTW_MEASURE);
+    fftwf_export_wisdom_to_filename(wpath.c_str());
+    return p;
+}
 #include <cfloat>
 #include <cstdarg>
 #include <ctime>

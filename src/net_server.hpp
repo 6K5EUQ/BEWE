@@ -269,6 +269,10 @@ public:
     void broadcast_iq_progress(const PktIqProgress& prog);
     void send_region_response(int op_index, bool allowed);
 
+    // FFT 입력 크기 메타 → 전 클라이언트. PktFftFrame 은 크기가 동결(구 JOIN 호환)이라
+    // 별도 패킷으로 보낸다. auth 직후 + fft_size 변경 시 + 1초 주기(재동기 보험).
+    void broadcast_fft_meta(int fft_size, int fft_input_size);
+
     // Channel state → all clients
     // periodic=true: 메인루프 10Hz 주기 호출 전용 — 내용 불변 시 1Hz 감속 +
     // 원격 JOIN 0 이면 relay 1Hz. 이벤트성 호출(채널 op)은 기본 false 로 항상 즉시.
@@ -351,6 +355,9 @@ private:
     std::chrono::steady_clock::time_point chsync_last_send_{};
     std::chrono::steady_clock::time_point chsync_relay_last_{};
     std::atomic<bool> chsync_force_{true};  // 신규 JOIN AUTH 시 즉시 시드 (client 스레드에서 set)
+public:
+    std::atomic<bool> fftmeta_force_{true}; // 신규 JOIN AUTH 시 FFT_META 즉시 재송신
+private:
 
     // ── Traffic stats ────────────────────────────────────────────────────
 public:
