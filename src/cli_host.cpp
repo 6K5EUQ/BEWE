@@ -343,24 +343,25 @@ void run_cli_host(){
         { "DGS-1", 35.1786f, 128.5553f },
         { "DGS-2", 35.2054f, 128.7076f },
         { "DGS-3", 35.8685f, 128.6046f },
-        { "DGS-4", 35.1559f, 128.6835f },
     };
+    const int n_preset = (int)(sizeof(presets)/sizeof(presets[0]));
+    const int etc_choice = n_preset + 1;   // ETC 는 항상 프리셋 다음 번호
     bewe_log_push(0,"\n=== SELECT HOSTING LOCATION ===\n");
-    for(int i=0;i<4;i++)
+    for(int i=0;i<n_preset;i++)
         bewe_log_push(0,"%d. %s\n", i+1, presets[i].name);
-    bewe_log_push(0,"5. ETC\n\n");
+    bewe_log_push(0,"%d. ETC\n\n", etc_choice);
 
     int loc_choice = 0;
-    while(loc_choice < 1 || loc_choice > 5){
+    while(loc_choice < 1 || loc_choice > etc_choice){
         std::string s = prompt_input("> ");
         loc_choice = atoi(s.c_str());
-        if(loc_choice < 1 || loc_choice > 5)
-            bewe_log_push(0,"Please enter 1-5.\n");
+        if(loc_choice < 1 || loc_choice > etc_choice)
+            bewe_log_push(0,"Please enter 1-%d.\n", etc_choice);
     }
 
     float lat, lon;
     std::string station_str;
-    if(loc_choice >= 1 && loc_choice <= 4){
+    if(loc_choice >= 1 && loc_choice <= n_preset){
         const StationPreset& p = presets[loc_choice - 1];
         station_str = p.name;
         lat = p.lat;
