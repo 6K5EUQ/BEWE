@@ -52,9 +52,11 @@ void save(const FFTViewer& v, const std::string& station){
         char own[33]={}; strncpy(own, ch.owner, 31);
         std::string oesc; json_escape(oesc, own);
         snprintf(buf, sizeof(buf),
-            "    {\"s\":%.6f,\"e\":%.6f,\"mode\":%d,\"audio_mask\":%u,\"pan\":%d,\"sq\":%.2f,\"owner\":\"",
+            "    {\"s\":%.6f,\"e\":%.6f,\"mode\":%d,\"audio_mask\":%u,\"pan\":%d,\"sq\":%.2f,"
+            "\"sq_manual\":%d,\"owner\":\"",
             ch.s, ch.e, effective_mode(ch),
-            (unsigned)ch.audio_mask.load(), ch.pan, ch.sq_threshold.load());
+            (unsigned)ch.audio_mask.load(), ch.pan, ch.sq_threshold.load(),
+            ch.sq_manual.load() ? 1 : 0);
         out += buf;
         out += oesc;
         // 이 채널에 켜진 디코드 모듈 id (host_mask 비트) — 재시작 시 디코드 재개용
@@ -121,6 +123,7 @@ Snapshot load(const std::string& station){
                     else if(k=="audio_mask"){ double d=0; js.read_number(d); c.audio_mask=(uint32_t)d; }
                     else if(k=="pan"){ double d=0; js.read_number(d); c.pan=(int)d; }
                     else if(k=="sq"){ double d=0; js.read_number(d); c.sq=(float)d; }
+                    else if(k=="sq_manual"){ double d=0; js.read_number(d); c.sq_manual=(d!=0); }
                     else if(k=="owner"){ std::string s; js.read_string(s); strncpy(c.owner, s.c_str(), 31); }
                     else if(k=="decode_mods"){ std::string s; js.read_string(s); strncpy(c.decode_mods, s.c_str(), sizeof(c.decode_mods)-1); }
                     else {  // 미지 키 — 문자열/숫자/배열/객체 모두 스킵
@@ -202,6 +205,10 @@ void apply_channels(FFTViewer& v, const Snapshot& st){
         v.channels[slot].audio_mask.store(c.audio_mask);
         v.channels[slot].pan = c.pan;
         v.channels[slot].sq_threshold.store(c.sq);
+        // 수동 조정값이면 그대로 확정(재캘리브 제외). 자동값이면 sq_calibrated=false 로 두어
+        // 다음 autoscale/캘리브에서 현재 노이즈플로어로 다시 잡히게 한다.
+        v.channels[slot].sq_manual.store(c.sq_manual);
+        v.channels[slot].sq_calibrated.store(c.sq_manual);
         v.local_ch_out[slot] = 3;
         Channel::DemodMode dm = (c.mode>=0 && c.mode<=2) ? (Channel::DemodMode)c.mode
                                                          : Channel::DM_NONE;

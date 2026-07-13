@@ -228,6 +228,26 @@ void FFTViewer::tm_add_event_tag(int type){
     wf_events.push_back(ev);
 }
 
+// IQ 롤링 토글 — 상단바 IQ LED 클릭과 I 키가 공용으로 부른다.
+// JOIN 이면 HOST 에 원격 요청만 보내고 로컬 상태는 CH/IQ 동기화로 따라간다.
+void FFTViewer::toggle_tm_iq(){
+    if(remote_mode && net_cli){ net_cli->cmd_toggle_tm_iq(); return; }
+    if(tm_iq_on.load()){
+        tm_iq_on.store(false);
+        tm_add_event_tag(2);
+        tm_iq_was_stopped = true;
+        if(net_srv) net_srv->broadcast_wf_event(0,(int64_t)time(nullptr),2,"IQ Stop");
+    } else {
+        if(tm_iq_was_stopped){ tm_iq_close(); tm_iq_was_stopped = false; }
+        tm_iq_open();
+        if(tm_iq_file_ready){          // open 거부(디스크 예산 초과) 시 OFF 유지
+            tm_iq_on.store(true);
+            tm_add_event_tag(1);
+            if(net_srv) net_srv->broadcast_wf_event(0,(int64_t)time(nullptr),1,"IQ Start");
+        }
+    }
+}
+
 time_t FFTViewer::fft_idx_to_wall_time(int fft_idx) const {
     std::lock_guard<std::mutex> lk(wf_events_mtx);
     if(wf_events.empty()) return 0;

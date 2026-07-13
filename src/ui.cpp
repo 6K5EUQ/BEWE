@@ -114,6 +114,19 @@ void FFTViewer::update_channel_squelch(){
     // JOIN 모드: 스컬치 계산은 HOST 전담. CH_SYNC로 받은 sq_threshold/sq_sig/sq_gate만 표시.
     if(remote_mode) return;
     if(total_ffts < 1 || fft_size < 1) return;
+
+    // SDR (재)시작/autoscale → 노이즈플로어가 달라졌으므로 자동 캘리브 채널만 다시 잡는다.
+    // 사용자가 손댄 채널(sq_manual)은 그 값을 유지.
+    if(sq_recalib_req.exchange(false, std::memory_order_relaxed)){
+        for(int c = 0; c < MAX_CHANNELS; c++){
+            Channel& ch = channels[c];
+            if(!ch.filter_active) continue;
+            if(ch.sq_manual.load(std::memory_order_relaxed)) continue;
+            ch.sq_calibrated.store(false, std::memory_order_relaxed);
+            ch.sq_calib_cnt = 0;
+        }
+    }
+
     std::lock_guard<std::mutex> lk(data_mtx);
     float cf_mhz = (float)(header.center_frequency / 1e6);
     float nyq_mhz = header.sample_rate / 2e6f;
@@ -4210,12 +4223,15 @@ void run_streaming_viewer(){
             srv->cb.on_set_sq_thresh = [&](int idx2, float thr){
                 if(idx2<0||idx2>=MAX_CHANNELS) return;
                 v.channels[idx2].sq_threshold.store(thr, std::memory_order_relaxed);
+                v.channels[idx2].sq_manual.store(true, std::memory_order_relaxed);
+                v.channels[idx2].sq_calibrated.store(true, std::memory_order_relaxed);
                 srv->broadcast_channel_sync(v.channels, MAX_CHANNELS);
             };
             srv->cb.on_set_autoscale = [&](){
                 bewe_log_push(0, "[CMD] Autoscale requested\n");
                 v.autoscale_active=true; v.autoscale_init=false;
                 v.autoscale_accum.clear();
+                v.sq_recalib_req.store(true, std::memory_order_relaxed);
             };
             srv->cb.on_toggle_tm_iq = [&](){
                 bool cur=v.tm_iq_on.load();
@@ -6315,6 +6331,8 @@ void run_streaming_viewer(){
                     if(v.remote_mode && v.net_cli) v.net_cli->cmd_set_sq_thresh(sci,nthr);
                     else {
                         sch.sq_threshold.store(nthr,std::memory_order_relaxed);
+                        sch.sq_manual.store(true,std::memory_order_relaxed);
+                        sch.sq_calibrated.store(true,std::memory_order_relaxed);
                         if(v.net_srv) v.net_srv->broadcast_channel_sync(v.channels,MAX_CHANNELS);
                     }
                 }
@@ -6326,6 +6344,8 @@ void run_streaming_viewer(){
                 if(v.remote_mode && v.net_cli) v.net_cli->cmd_set_sq_thresh(sci,nthr);
                 else {
                     sch.sq_threshold.store(nthr,std::memory_order_relaxed);
+                    sch.sq_manual.store(true,std::memory_order_relaxed);
+                    sch.sq_calibrated.store(true,std::memory_order_relaxed);
                     if(v.net_srv) v.net_srv->broadcast_channel_sync(v.channels,MAX_CHANNELS);
                 }
             }
@@ -6447,6 +6467,14 @@ void run_streaming_viewer(){
         // ── MISSION 토글 (M키) — 미션 모달 ────
         if(!viewer_open_blocking && ImGui::IsKeyPressed(ImGuiKey_M, false) && !io.WantTextInput){
             try_toggle(5, v.mission_modal_open);
+        }
+        // ── IQ 롤링 토글 (I키) — 상단바 IQ LED 클릭과 동일 동작.
+        // 메인 스펙트럼/워터폴 화면에서만: 오버레이(SA/LOG/HIST/SIG_LIB/MISSION/DEMOD)가
+        // 하나라도 떠 있거나 AIS 전체화면이면 무시. (self=-1 → 전부 검사)
+        if(ImGui::IsKeyPressed(ImGuiKey_I, false) && !io.WantTextInput
+           && !ImGui::IsAnyItemActive() && !v.ais_fullscreen
+           && !any_other_overlay_open(-1)){
+            v.toggle_tm_iq();
         }
         // ── BAND 토글 (B키) — SA overlay 열려있으면 baud-mode(노란 비트 구분선) 토글
         // viewer 떠 있는 동안엔 BAND 토글 무시 (사용자가 viewer 안에서 다른 글로벌 동작 방지)
@@ -8391,18 +8419,9 @@ void run_streaming_viewer(){
             // TM
             rx=draw_ind(rx,"TM", tm_on ? 1 : 0);
 
-            // IQ (클릭 가능)
+            // IQ (클릭 가능 — I 키와 동일 동작)
             if(click_ind(rx,"IQ", iq_on ? 1 : 0)){
-                if(v.remote_mode && v.net_cli) v.net_cli->cmd_toggle_tm_iq();
-                else {
-                    bool cur=v.tm_iq_on.load();
-                    if(cur){ v.tm_iq_on.store(false); v.tm_add_event_tag(2); v.tm_iq_was_stopped=true;
-                        if(v.net_srv) v.net_srv->broadcast_wf_event(0,(int64_t)time(nullptr),2,"IQ Stop"); }
-                    else { if(v.tm_iq_was_stopped){v.tm_iq_close();v.tm_iq_was_stopped=false;}
-                        v.tm_iq_open(); if(v.tm_iq_file_ready){
-                            v.tm_iq_on.store(true); v.tm_add_event_tag(1);
-                            if(v.net_srv) v.net_srv->broadcast_wf_event(0,(int64_t)time(nullptr),1,"IQ Start"); }}
-                }
+                v.toggle_tm_iq();
             }
 
             // AUD (3색)

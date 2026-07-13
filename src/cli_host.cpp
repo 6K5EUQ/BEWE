@@ -52,6 +52,19 @@ bool bladerf_usb_reset();
 // ── 채널 스컬치 (ui.cpp에서 추출 - GUI 의존성 없음) ──────────────────────
 void FFTViewer::update_channel_squelch(){
     if(total_ffts < 1 || fft_size < 1) return;
+
+    // SDR (재)시작/autoscale → 노이즈플로어가 달라졌으므로 자동 캘리브 채널만 다시 잡는다.
+    // 사용자가 손댄 채널(sq_manual)은 그 값을 유지.
+    if(sq_recalib_req.exchange(false, std::memory_order_relaxed)){
+        for(int c = 0; c < MAX_CHANNELS; c++){
+            Channel& ch = channels[c];
+            if(!ch.filter_active) continue;
+            if(ch.sq_manual.load(std::memory_order_relaxed)) continue;
+            ch.sq_calibrated.store(false, std::memory_order_relaxed);
+            ch.sq_calib_cnt = 0;
+        }
+    }
+
     // 호출 간격 기반 실 delta 시간 (시간 카운터용)
     static auto sq_last_tick = std::chrono::steady_clock::now();
     auto sq_now = std::chrono::steady_clock::now();
@@ -548,11 +561,14 @@ void run_cli_host(){
     srv->cb.on_set_sq_thresh = [&](int idx2, float thr){
         if(idx2<0||idx2>=MAX_CHANNELS) return;
         v.channels[idx2].sq_threshold.store(thr, std::memory_order_relaxed);
+        v.channels[idx2].sq_manual.store(true, std::memory_order_relaxed);
+        v.channels[idx2].sq_calibrated.store(true, std::memory_order_relaxed);
         srv->broadcast_channel_sync(v.channels, MAX_CHANNELS);
     };
     srv->cb.on_set_autoscale = [&](){
         v.autoscale_active=true; v.autoscale_init=false;
         v.autoscale_accum.clear();
+        v.sq_recalib_req.store(true, std::memory_order_relaxed);
     };
     srv->cb.on_toggle_tm_iq = [&](){
         bool cur=v.tm_iq_on.load();

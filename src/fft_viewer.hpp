@@ -328,6 +328,8 @@ public:
     int tm_display_fft_idx=0;
 
     void tm_iq_open();
+    // IQ 롤링 토글 (상단바 IQ LED 클릭 / I 키 공용). JOIN 이면 HOST 에 원격 요청.
+    void toggle_tm_iq();
     void tm_iq_close();
     void tm_iq_close_locked();   // tm_iq_oc_mtx 보유 상태에서만 호출 (open 의 실패복구 경로)
     void tm_iq_write(const int16_t* samples, int n_pairs);
@@ -941,6 +943,10 @@ public:
 
     // ── 채널 스컬치 (UI 스레드, FFT 기반) ──────────────────────────────────
     int  sq_last_total_ffts = -1;   // new-row guard: 같은 FFT 행 재스캔 방지
+    // SDR (재)시작/autoscale 로 노이즈플로어가 바뀌면 자동 캘리브 채널을 다시 잡는다.
+    // capture 스레드가 세우고 update_channel_squelch()(UI 스레드)가 소비 —
+    // 채널 상태를 capture 스레드에서 직접 만지지 않기 위한 요청 플래그.
+    std::atomic<bool> sq_recalib_req{false};
     void update_channel_squelch();
 
     // ── demod.cpp ─────────────────────────────────────────────────────────

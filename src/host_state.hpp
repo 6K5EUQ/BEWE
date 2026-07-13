@@ -25,6 +25,7 @@ struct ChanSnap {
     uint32_t audio_mask = 0xFFFFFFFFu;
     int      pan = 0;
     float    sq = -50.0f;
+    bool     sq_manual = false;      // 사용자가 직접 조정한 값? (구버전 파일엔 없음 → 자동으로 취급)
     char     decode_mods[64] = {};   // 이 채널에 켜진 디코드 모듈 id (콤마구분, 예 "wifi,acars")
 };
 

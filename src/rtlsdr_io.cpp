@@ -293,6 +293,7 @@ void FFTViewer::capture_and_process_rtl(){
             texture_needs_recreate=true;
             // SR 변경 > 신호 크기 스케일이 달라질 수 있어 오토스케일 재트리거
             autoscale_accum.clear(); autoscale_init=false; autoscale_active=true;
+            sq_recalib_req.store(true, std::memory_order_relaxed);  // 노이즈플로어 변동 → 자동 스컬치 재캘리브
             // TM IQ가 켜져 있었으면 새 SR로 롤링 파일 재시작
             if(tm_was_on){
                 tm_iq_open();
@@ -323,6 +324,7 @@ void FFTViewer::capture_and_process_rtl(){
             LongWaterfall::request_rotate();
             bewe_log_push(0,"Freq > %.2f MHz\n", pending_cf);
             autoscale_accum.clear(); autoscale_init=false; autoscale_active=true;
+            sq_recalib_req.store(true, std::memory_order_relaxed);  // 노이즈플로어 변동 → 자동 스컬치 재캘리브
             warmup_cnt=0;
             update_dem_by_freq(pending_cf);
             freq_req=false; freq_prog=false;
@@ -421,6 +423,7 @@ void FFTViewer::capture_and_process_rtl(){
                  // 비-캡처 스레드 요청 처리 (set_frequency/init) — 여기서만 autoscale 상태 변경 (레이스 X)
                  if(autoscale_req.exchange(false)){
                      autoscale_accum.clear(); autoscale_init=false; autoscale_active=true;
+                     sq_recalib_req.store(true, std::memory_order_relaxed);  // 노이즈플로어 변동 → 자동 스컬치 재캘리브
                  }
                  if(autoscale_active){
                      if(!autoscale_init){
