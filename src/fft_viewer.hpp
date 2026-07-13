@@ -42,6 +42,7 @@
 // ── Global log helper (ui.cpp에서 정의, 모든 .cpp에서 사용 가능) ─────────
 extern std::string g_sdr_force; // "" = 자동, "bladerf"|"rtlsdr"|"pluto"
 extern std::vector<std::string> scan_available_sdrs();
+extern bool scan_sdr_present_quiet();  // 상태표시 전용 저빈도 체크 (로그 스팸 없음, hw_detect.cpp 참고)
 extern void bewe_log(const char* fmt, ...);
 // LOG 오버레이용 글로벌 로그 (col: 0=HOST 1=SERVER 2=JOIN)
 extern void bewe_log_push(int col, const char* fmt, ...);
@@ -840,6 +841,7 @@ public:
     fftwf_complex  *fft_in=nullptr, *fft_out=nullptr;
     bool  is_running=true;
     std::atomic<bool> rx_stopped{false};  // /rx stop: SDR 의도적 중단 (자동 재연결 방지)
+    std::atomic<bool> sdr_hw_present{false};  // rx_stopped 중 저빈도 presence-only 스캔 결과 (자동 시작 안 함, 표시용)
     int   total_ffts=0;
     std::string window_title;
     std::mutex  data_mtx;

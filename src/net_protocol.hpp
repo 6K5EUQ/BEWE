@@ -551,7 +551,8 @@ struct __attribute__((packed)) PktDiskStat {
 struct __attribute__((packed)) PktHeartbeat {
     uint8_t host_state;      // 0=OK, 1=CHASSIS_RESETTING, 2=SPECTRUM_PAUSED
     uint8_t sdr_temp_c;      // SDR 온도 (°C 정수, 0=미지원/미측정)
-    uint8_t sdr_state;       // 0=streaming OK, 1=stream error
+    uint8_t sdr_state;       // 0=OK 1=중단·SDR없음(빨강) 2=중단·SDR감지됨(노랑,/rx start 대기) 3=스트림에러(빨강)
+                              // 구 JOIN 은 !=0 이면 전부 에러 취급 — 필드 크기 불변, 하위호환
     uint8_t iq_on;           // 0=IQ 롤링 off, 1=on
     uint8_t host_cpu_pct;    // HOST CPU % (0-100)
     uint8_t host_ram_pct;    // HOST RAM % (0-100)

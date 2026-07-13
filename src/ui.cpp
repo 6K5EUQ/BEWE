@@ -6192,8 +6192,8 @@ void run_streaming_viewer(){
             // Pluto  : 0.52/1/2/2.56/3.2/10/20/40/61.44 MSPS (3.2 초과는 USB2 드롭 전제, 파워 스펙트럼 관측 전용)
             static const float blade_srs[]  = {2.5f,5.0f,10.0f,20.0f,30.72f,61.44f,122.88f};
             static const char* blade_lbls[] = {"2.5M","5M","10M","20M","30.72M","61.44M","122.88M"};
-            static const float rtl_srs[]    = {0.25f,0.96f,1.44f,2.56f,3.2f};
-            static const char* rtl_lbls[]   = {"0.25M","0.96M","1.44M","2.56M","3.2M"};
+            static const float rtl_srs[]    = {0.25f,0.96f,1.44f,2.048f,2.56f,3.2f};
+            static const char* rtl_lbls[]   = {"0.25M","0.96M","1.44M","2.048M","2.56M","3.2M"};
             static const float pluto_srs[]  = {0.52f,1.0f,2.0f,2.56f,3.2f,10.0f,20.0f,40.0f,61.44f};
             static const char* pluto_lbls[] = {"0.52M","1M","2M","2.56M","3.2M","10M","20M","40M","61.44M"};
             // 0=blade, 1=rtl, 2=pluto
@@ -6208,7 +6208,7 @@ void run_streaming_viewer(){
             switch(hw_mode){
                 case 0: sr_list = blade_srs; sr_lbls = blade_lbls; sr_count = 7; break;
                 case 2: sr_list = pluto_srs; sr_lbls = pluto_lbls; sr_count = 9; break;
-                default: sr_list = rtl_srs;  sr_lbls = rtl_lbls;   sr_count = 5; break;
+                default: sr_list = rtl_srs;  sr_lbls = rtl_lbls;   sr_count = 6; break;
             }
 
             // 현재 SR에 맞는 인덱스 선택
@@ -8226,16 +8226,23 @@ void run_streaming_viewer(){
                 sdr_last_fft_idx = -1;
                 sdr_stall_timer  = 0.f;
             }
+            // SDR LED: 0=빨강(없음/에러) 1=초록(정상 스트리밍) 2=노랑(중단됐지만 하드웨어 감지됨 — /rx start 대기)
             bool sdr_on;
+            int  sdr_led;
             if(v.remote_mode && v.net_cli){
                 double lht = v.net_cli->last_heartbeat_time.load();
                 bool hb_received = (lht > 0.0);  // 한 번이라도 HB 수신
                 bool hb_ok = hb_received && (glfwGetTime() - lht) < 5.0;
-                bool sdr_ok = v.net_cli->remote_sdr_state.load() == 0;
-                sdr_on = v.net_cli->is_connected() && hb_ok && sdr_ok;
+                bool connected = v.net_cli->is_connected();
+                uint8_t rst = v.net_cli->remote_sdr_state.load();
+                sdr_on = connected && hb_ok && rst == 0;
+                sdr_led = (!connected || !hb_ok) ? 0 : (rst == 0 ? 1 : rst == 2 ? 2 : 0);
             } else {
                 bool stream_err = v.sdr_stream_error.load();
                 sdr_on = !v.remote_mode && !stream_err && capturing && (sdr_stall_timer < 2.0f);
+                sdr_led = sdr_on ? 1
+                        : (!stream_err && v.rx_stopped.load() && v.sdr_hw_present.load()) ? 2
+                        : 0;
             }
 
             // LINK: HOST=Central Server 연결 상태, JOIN=HOST 연결 상태, LOCAL=꺼짐
@@ -8305,9 +8312,9 @@ void run_streaming_viewer(){
                 fft_led = 0; wf_led = 0; aud_led = 0;
                 iq_on = false;
             }
-            // ── /rx stop: SDR/FFT/WF/AUD/IQ 모두 빨간 ──
+            // ── /rx stop: FFT/WF/AUD/IQ 모두 빨간 (SDR 표시등은 위에서 계산한 tri-state 유지 — 노랑 가능) ──
             if(!v.remote_mode && v.rx_stopped.load()){
-                sdr_on = false; fft_led = 0; wf_led = 0; aud_led = 0;
+                fft_led = 0; wf_led = 0; aud_led = 0;
                 iq_on = false;
             }
 
@@ -8454,7 +8461,7 @@ void run_streaming_viewer(){
             }
 
             // SDR
-            rx=draw_ind(rx,"SDR", sdr_on ? 1 : 0);
+            rx=draw_ind(rx,"SDR", sdr_led);
 
         }
         ImGui::End();

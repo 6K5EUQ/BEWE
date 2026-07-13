@@ -416,11 +416,19 @@ void run_cli_host(){
     }
 
     // ── SDR init ─────────────────────────────────────────────────────────
+    // 부팅 직후 USB 재열거/느린 부팅과 겹칠 수 있어 5회(2초 간격)까지 재시도 후 포기.
     std::thread cap;
-    if(!v.initialize(cf, init_sr)){
-        bewe_log_push(0,"[BEWE CLI] SDR init failed - running without hardware\n");
+    bool sdr_ok = v.initialize(cf, init_sr);
+    for(int retry = 2; retry <= 5 && !sdr_ok; retry++){
+        bewe_log_push(0,"[BEWE CLI] SDR init failed, retry %d/5 in 2s ...\n", retry);
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        sdr_ok = v.initialize(cf, init_sr);
+    }
+    if(!sdr_ok){
+        bewe_log_push(0,"[BEWE CLI] SDR init failed after 5 attempts - running without hardware\n");
         v.sdr_stream_error.store(true);
-        // 초기 SDR 없음 → 파일 분석 모드. 주기적 재탐지 비활성화 (CPU/로그 스팸 방지)
+        // SDR 없음 → 파일 분석 모드로 대기. 자동 재시도는 안 함 — 꽂히면 /rx start 로 수동 기동
+        // (사용자 방향: JOIN 에서 SDR 상태등 보고 직접 /rx start).
         v.rx_stopped.store(true);
         v.fft_size = DEFAULT_FFT_SIZE * FFT_PAD_FACTOR;
         v.fft_input_size = DEFAULT_FFT_SIZE;
@@ -434,6 +442,7 @@ void run_cli_host(){
         v.autoscale_active = false;
         v.create_waterfall_texture();
     } else {
+        v.sdr_hw_present.store(true);
         bewe_log_push(0,"[BEWE CLI] SDR: %s detected\n",
                v.hw.type==HWType::BLADERF ? "BladeRF" :
                v.hw.type==HWType::PLUTO   ? "ADALM-Pluto" : "RTL-SDR");
@@ -1732,6 +1741,16 @@ void run_cli_host(){
         }
 
         // ── Heartbeat (1s) ───────────────────────────────────────────────
+        // ── /rx stop 대기 중 저빈도 presence-only 스캔 (3초 간격) ────────────
+        // 자동 재시작은 안 함 — 표시(빨강/노랑)용. /rx start 는 사용자가 직접.
+        if(v.rx_stopped.load()){
+            static auto sdr_scan_last = clk::now() - std::chrono::seconds(3);
+            if(std::chrono::duration<float>(clk::now()-sdr_scan_last).count() >= 3.0f){
+                sdr_scan_last = clk::now();
+                v.sdr_hw_present.store(scan_sdr_present_quiet());
+            }
+        }
+
         if(v.net_srv){
             float el = std::chrono::duration<float>(clk::now()-heartbeat_last).count();
             bool cur_sdr_err = v.sdr_stream_error.load();
@@ -1747,7 +1766,11 @@ void run_cli_host(){
                     if(_t > 0.f) sdr_t_hb = (uint8_t)std::min(255.f, _t);
                 }
                 uint8_t hst = v.spectrum_pause.load() ? 2 : 0;
-                uint8_t sdr_st = (cur_sdr_err || v.rx_stopped.load()) ? 1 : 0;
+                // sdr_st: 0=OK(스트리밍 정상) 1=중단·SDR 없음(빨강) 2=중단·SDR 감지됨(노랑, /rx start 대기)
+                //         3=스트림 에러(빨강, 뽑힘/초기화실패 아닌 런타임 오류) — 구 JOIN 은 !=0 이면 전부 빨강 취급
+                uint8_t sdr_st = cur_sdr_err ? 3
+                               : v.rx_stopped.load() ? (v.sdr_hw_present.load() ? 2 : 1)
+                               : 0;
                 uint8_t iq_st = v.tm_iq_on.load() ? 1 : 0;
                 uint8_t cpu_pct  = (uint8_t)std::min(255.f, std::max(0.f, v.sysmon_cpu));
                 uint8_t ram_pct  = (uint8_t)std::min(255.f, std::max(0.f, v.sysmon_ram));

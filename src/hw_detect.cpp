@@ -44,6 +44,33 @@ std::vector<std::string> scan_available_sdrs(){
     return out;
 }
 
+// 상태표시 전용 저빈도 presence 체크 (/rx stop 대기 중 수초 간격 호출됨).
+// scan_available_sdrs() 의 Pluto usb: 폴백은 미검출 시 libiio 가 stderr 에 에러를 찍어
+// 반복 호출 시 로그 스팸이 된다 — 여기선 그 폴백을 빼고 조용한 scan-context 검사만 한다.
+// (실제 /rx start 초기화는 이 함수를 안 쓰고 기존 initialize()/scan_available_sdrs() 그대로.)
+bool scan_sdr_present_quiet(){
+    struct bladerf_devinfo* blade_list = nullptr;
+    int n_blade = bladerf_get_device_list(&blade_list);
+    if(blade_list) bladerf_free_device_list(blade_list);
+    if(n_blade > 0) return true;
+
+    if(rtlsdr_get_device_count() > 0) return true;
+
+    struct iio_scan_context* sc = iio_create_scan_context(nullptr, 0);
+    bool found = false;
+    if(sc){
+        struct iio_context_info** info = nullptr;
+        ssize_t n = iio_scan_context_get_info_list(sc, &info);
+        for(ssize_t i = 0; i < n; i++){
+            const char* desc = iio_context_info_get_description(info[i]);
+            if(desc && (strstr(desc, "PlutoSDR") || strstr(desc, "ADALM"))){ found = true; break; }
+        }
+        if(info) iio_context_info_list_free(info);
+        iio_scan_context_destroy(sc);
+    }
+    return found;
+}
+
 static bool detect_pluto(){
     struct iio_scan_context* sc = iio_create_scan_context(nullptr, 0);
     if(!sc) return false;
