@@ -12,6 +12,7 @@
 #include "mission_push.hpp"
 #include "net_protocol.hpp"
 #include "host_band_plan.hpp"
+#include <zstd.h>   // Central 릴레이 CHANNEL_SYNC 해제 (v13)
 #include "host_band_categories.hpp"
 #include "host_state.hpp"
 #include "long_waterfall.hpp"
@@ -1107,9 +1108,18 @@ void run_cli_host(){
                 });
                 // Relay CHANNEL_SYNC callback
                 central_cli.set_on_central_ch_sync([&v](const uint8_t* pkt, size_t len){
+                    if(len < 9) return;
                     size_t entry_sz = sizeof(ChSyncEntry); // 88 bytes
-                    if(len < 9 + entry_sz*MAX_CHANNELS) return;
-                    const uint8_t* payload = pkt + 9;
+                    const uint8_t* payload = pkt + 9;      // BEWE 헤더(9) 스킵
+                    size_t body_len = len - 9;
+                    // body_len == entry_sz*MAX_CHANNELS → raw, 아니면 zstd 압축본 (v13)
+                    static thread_local std::vector<uint8_t> dec;
+                    if(body_len != entry_sz*MAX_CHANNELS){
+                        dec.resize(entry_sz*MAX_CHANNELS);
+                        size_t d = ZSTD_decompress(dec.data(), dec.size(), payload, body_len);
+                        if(ZSTD_isError(d) || d != dec.size()) return;
+                        payload = dec.data();
+                    }
                     for(int i=0; i<MAX_CHANNELS; i++){
                         uint32_t old_mask = v.channels[i].audio_mask.load();
                         uint32_t mask;
@@ -1660,7 +1670,7 @@ void run_cli_host(){
         }
         if(v.net_srv && v.net_srv->client_count()>0){
             float el = std::chrono::duration<float>(clk::now()-sq_sync_last).count();
-            if(el >= 0.1f){
+            if(el >= 0.2f){   // 5Hz (구 10Hz/0.1f) — chsync 대역 절반. 통계/스컬치 UI 5Hz로 충분
                 sq_sync_last = clk::now();
                 v.net_srv->broadcast_channel_sync(v.channels, MAX_CHANNELS, /*periodic=*/true);
             }

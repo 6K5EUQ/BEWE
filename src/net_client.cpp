@@ -419,8 +419,16 @@ void NetClient::handle_packet(PacketType type,
     }
 
     case PacketType::CHANNEL_SYNC: {
-        if(len < sizeof(PktChannelSync)) break;
-        auto* sync = reinterpret_cast<const PktChannelSync*>(payload);
+        // len == sizeof(PktChannelSync) → raw, 아니면 zstd 압축본 (v13).
+        const uint8_t* body = payload;
+        static thread_local std::vector<uint8_t> dec;
+        if(len != sizeof(PktChannelSync)){
+            dec.resize(sizeof(PktChannelSync));
+            size_t d = ZSTD_decompress(dec.data(), dec.size(), payload, len);
+            if(ZSTD_isError(d) || d != sizeof(PktChannelSync)) break;
+            body = dec.data();
+        }
+        auto* sync = reinterpret_cast<const PktChannelSync*>(body);
         if(on_channel_sync) on_channel_sync(*sync);
         break;
     }

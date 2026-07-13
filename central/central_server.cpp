@@ -7,8 +7,10 @@
 #include <cstdio>
 #include <cstring>
 #include <cerrno>
+#include <cstdlib>
 #include <algorithm>
 #include <zlib.h>
+#include <zstd.h>        // CHANNEL_SYNC zstd 해제/압축 (v13)
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -22,6 +24,10 @@
 static constexpr int HOST_TIMEOUT_SEC  = 3;   // HB 간격 1s 가정, 3초 미수신 시 dead 처리 (globe에서 즉시 제거)
 static constexpr int HANDSHAKE_TIMEOUT = 10;
 static constexpr size_t PIPE_BUF_SZ    = 65536;
+
+// CHANNEL_SYNC raw body 크기 (BEWE 헤더 제외). 이 크기면 raw, 아니면 zstd 압축본 (v13).
+static constexpr size_t CH_SYNC_RAW_BODY = (size_t)CH_SYNC_ENTRY_SIZE * MAX_CHANNELS_RELAY;
+static bool chsync_zstd_enabled(){ const char* e=getenv("BEWE_CHSYNC_ZSTD"); return !(e && e[0]=='0'); }
 
 // enqueue_host_send: header (central_server.hpp)에 inline 정의 — 다른 TU(central_mission_archive.cpp)도 사용.
 
@@ -847,9 +853,23 @@ void CentralServer::dispatch_to_joins(std::shared_ptr<HostRoom> room,
     // ── CHANNEL_SYNC 인터셉트: 캐시 저장 → audio_mask 재작성 후 broadcast
     // (rebuild_and_broadcast_ch_sync 내부에서 cache_mtx를 잡으므로 여기서 중복 잠금 없이 처리)
     if(bewe_type == BEWE_TYPE_CH_SYNC){
+        if(bewe_len < BEWE_HDR_SIZE) return;
+        size_t body_len = (size_t)bewe_len - BEWE_HDR_SIZE;
         {
             std::lock_guard<std::mutex> clk(room->cache_mtx);
-            room->cached_ch_sync.assign(bewe_pkt, bewe_pkt + bewe_len);
+            if(body_len == CH_SYNC_RAW_BODY){
+                room->cached_ch_sync.assign(bewe_pkt, bewe_pkt + bewe_len);   // raw
+            } else {
+                // v13 zstd 압축본 → raw 로 해제해 캐시 (rebuild/CH_LIST 는 raw 위치기반 그대로).
+                std::vector<uint8_t> raw(BEWE_HDR_SIZE + CH_SYNC_RAW_BODY);
+                memcpy(raw.data(), bewe_pkt, BEWE_HDR_SIZE);                  // 9B BEWE 헤더 보존
+                size_t d = ZSTD_decompress(raw.data() + BEWE_HDR_SIZE, CH_SYNC_RAW_BODY,
+                                           bewe_pkt + BEWE_HDR_SIZE, body_len);
+                if(ZSTD_isError(d) || d != CH_SYNC_RAW_BODY) return;          // 손상 → drop
+                uint32_t rawlen = (uint32_t)CH_SYNC_RAW_BODY;
+                memcpy(raw.data() + 5, &rawlen, 4);                          // hdr len 필드 = raw body
+                room->cached_ch_sync = std::move(raw);
+            }
         }
         // host_mux_loop 경유: HOST에 send하면 데드락 → send_to_host=false
         rebuild_and_broadcast_ch_sync(room, /*send_to_host=*/false);
@@ -2163,6 +2183,21 @@ void CentralServer::handle_join_module_pipe(std::shared_ptr<JoinEntry> je,
     }
 }
 
+// raw = [9B BEWE hdr][CH_SYNC_RAW_BODY]. zstd 압축본 반환 (무이득/비활성 시 raw 사본).
+// 수신측(JOIN/HOST)은 body 크기로 감지: ==CH_SYNC_RAW_BODY → raw, else → 해제.
+static std::vector<uint8_t> compress_chsync(const std::vector<uint8_t>& raw){
+    static const bool on = chsync_zstd_enabled();
+    if(!on || raw.size() < BEWE_HDR_SIZE + CH_SYNC_RAW_BODY) return raw;
+    std::vector<uint8_t> out(BEWE_HDR_SIZE + ZSTD_compressBound(CH_SYNC_RAW_BODY));
+    memcpy(out.data(), raw.data(), BEWE_HDR_SIZE);
+    size_t z = ZSTD_compress(out.data() + BEWE_HDR_SIZE, out.size() - BEWE_HDR_SIZE,
+                             raw.data() + BEWE_HDR_SIZE, CH_SYNC_RAW_BODY, 1);
+    if(ZSTD_isError(z) || z >= CH_SYNC_RAW_BODY) return raw;   // 무이득 → raw
+    uint32_t zl = (uint32_t)z; memcpy(out.data() + 5, &zl, 4); // BEWE hdr len 필드 = 압축크기
+    out.resize(BEWE_HDR_SIZE + z);
+    return out;
+}
+
 void CentralServer::rebuild_and_broadcast_ch_sync(std::shared_ptr<HostRoom> room, bool send_to_host){
     std::vector<uint8_t> base_sync;
     {
@@ -2173,6 +2208,7 @@ void CentralServer::rebuild_and_broadcast_ch_sync(std::shared_ptr<HostRoom> room
     if(base_sync.size() < BEWE_HDR_SIZE + CH_SYNC_ENTRY_SIZE * MAX_CHANNELS_RELAY) return;
 
     uint8_t* payload = base_sync.data() + BEWE_HDR_SIZE;
+    std::vector<uint8_t> out;   // JOIN/HOST 로 보낼 압축본 (joins_mtx 안에서 채움)
     {
         std::lock_guard<std::mutex> jlk(room->joins_mtx);
         for(int ch = 0; ch < MAX_CHANNELS_RELAY; ch++){
@@ -2189,20 +2225,22 @@ void CentralServer::rebuild_and_broadcast_ch_sync(std::shared_ptr<HostRoom> room
             memcpy(entry + CH_SYNC_MASK_OFFSET, &new_mask, sizeof(new_mask));
         }
 
+        // JOIN/HOST 로는 zstd 압축본 전송 (v13). 캐시는 raw(base_sync) 유지 — CH_LIST 위치파싱용.
+        out = compress_chsync(base_sync);
         for(auto& je : room->joins){
             if(!je->alive.load() || je->fd < 0) continue;
-            je->enqueue_ctrl(base_sync.data(), base_sync.size());
+            je->enqueue_ctrl(out.data(), out.size());
         }
     }  // joins_mtx 해제 후 cache/host 작업
 
     {
         std::lock_guard<std::mutex> clk(room->cache_mtx);
-        room->cached_ch_sync = base_sync;
+        room->cached_ch_sync = base_sync;   // 캐시는 항상 raw
     }
 
-    // HOST에도 재작성된 CHANNEL_SYNC 전송 (큐 경유)
+    // HOST에도 재작성된 CHANNEL_SYNC 전송 (큐 경유) — 압축본
     if(send_to_host && room->alive.load() && room->fd >= 0)
-        enqueue_host_send(room, 0xFFFF, CentralMuxType::DATA, base_sync.data(), (uint32_t)base_sync.size());
+        enqueue_host_send(room, 0xFFFF, CentralMuxType::DATA, out.data(), (uint32_t)out.size());
 }
 
 // 자신의 LAN IPv4 주소 목록 수집 (루프백·링크로컬 제외)

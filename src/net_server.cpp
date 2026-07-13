@@ -32,6 +32,29 @@ static constexpr int OPUS_SR    = 48000;
 static constexpr int OPUS_FRAME = 960;   // 20ms @48kHz mono (Opus 합법 프레임)
 static bool audio_opus_enabled(){ const char* e=getenv("BEWE_OPUS");     return !(e && e[0]=='0'); }
 static bool fft_zstd_enabled(){   const char* e=getenv("BEWE_FFT_ZSTD"); return !(e && e[0]=='0'); }
+static bool chsync_zstd_enabled(){const char* e=getenv("BEWE_CHSYNC_ZSTD"); return !(e && e[0]=='0'); }
+
+// CHANNEL_SYNC 패킷 빌드. zstd_on 이면 body(ChSyncEntry×50) 를 압축.
+// 수신측 감지 = PktHdr.len(=body 크기): ==sizeof(PktChannelSync) → raw, else → zstd 해제.
+// 빈슬롯(비활성 35개)이 0이라 압축이 "활성만 전송" 효과 + 활성 엔트리도 무손실 압축.
+static std::vector<uint8_t> build_chsync_pkt(const PktChannelSync& sync, bool zstd_on){
+    const uint32_t raw = (uint32_t)sizeof(PktChannelSync);
+    const uint8_t* body = reinterpret_cast<const uint8_t*>(&sync);
+    uint32_t body_len = raw;
+    static thread_local std::vector<uint8_t> comp;
+    if(zstd_on){
+        comp.resize(ZSTD_compressBound(raw));
+        size_t z = ZSTD_compress(comp.data(), comp.size(), &sync, raw, 1);
+        if(!ZSTD_isError(z) && z < raw){ body = comp.data(); body_len = (uint32_t)z; }
+    }
+    std::vector<uint8_t> pkt(PKT_HDR_SIZE + body_len);
+    PktHdr* ph = reinterpret_cast<PktHdr*>(pkt.data());
+    memcpy(ph->magic, BEWE_MAGIC, 4);
+    ph->type = static_cast<uint8_t>(PacketType::CHANNEL_SYNC);
+    ph->len  = body_len;
+    memcpy(pkt.data() + PKT_HDR_SIZE, body, body_len);
+    return pkt;
+}
 static int  opus_bitrate(){
     const char* e=getenv("BEWE_OPUS_BR"); int b = e ? atoi(e) : 48000;
     if(b < 6000)   b = 6000;
@@ -772,7 +795,8 @@ void NetServer::broadcast_channel_sync(const Channel* chs, int n, bool periodic)
         if(!force && h == chsync_last_hash_ && since < 1.0f) return;           // 1Hz keepalive 하한
         chsync_last_hash_ = h; chsync_last_send_ = now;
     }
-    auto pkt = make_packet(PacketType::CHANNEL_SYNC, &sync, sizeof(sync));
+    static const bool chsync_zstd = chsync_zstd_enabled();
+    auto pkt = build_chsync_pkt(sync, chsync_zstd);
     if(cb.on_relay_broadcast){
         // 원격 JOIN 없으면 주기분 relay 는 1Hz (Central cached_ch_sync/CH_LIST 통계 갱신용).
         bool send_relay = !periodic || has_relay()
