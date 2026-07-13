@@ -231,7 +231,10 @@ void FFTViewer::update_channel_squelch(){
         float thr = ch.sq_threshold.load(std::memory_order_relaxed);
         bool gate = ch.sq_gate.load(std::memory_order_relaxed);
         const float HYS = 3.0f;
-        const int HOLD_FRAMES = 18;  // ~0.3초 @ 60fps
+        // AM/FM 뿐이라 교신 중 반송파가 끊기지 않는다 (FM 은 무변조 구간에 오히려 에너지가
+        // 한 빈에 몰려 peak 가 올라감) → 음절 공백용 긴 홀드가 필요 없다. 페이딩 널만 먹을
+        // 만큼만 남긴다. 홀드가 길수록 송신 종료 후 오픈스컬치 잡음이 그대로 복조돼 나간다.
+        const int HOLD_FRAMES = 4;  // ~70ms (GUI 프레임 / cli_host 18ms 틱)
 
         if(ch.sq_calibrated.load(std::memory_order_relaxed)){
             if(!gate && sig >= thr){
@@ -284,7 +287,7 @@ void FFTViewer::update_channel_squelch(){
             }
             bool have = (best_peak > -999.f) && (best_hi > best_lo);
             bool locked = ch.det_locked.load(std::memory_order_relaxed);
-            const int   DET_HOLD_FRAMES   = 18;      // 스컬치 홀드와 동일 (~0.3s) — 페이딩 시 깜빡임 방지
+            const int   DET_HOLD_FRAMES   = 18;      // ~0.3s — 페이딩 시 lock 깜빡임 방지 (스컬치 홀드와 별개)
             const float DET_GUARD_MHZ     = 0.002f;  // 2 kHz — run 양쪽에 붙이는 여유
             const int   DET_EXPAND_FRAMES = 3;       // 확장은 이만큼 연속 관측돼야 (1프레임 스파이크 방어)
 

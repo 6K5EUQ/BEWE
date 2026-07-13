@@ -151,7 +151,8 @@ void FFTViewer::update_channel_squelch(){
         float thr = ch.sq_threshold.load(std::memory_order_relaxed);
         bool gate = ch.sq_gate.load(std::memory_order_relaxed);
         const float HYS = 3.0f;
-        const int HOLD_FRAMES = 18;
+        // ui.cpp update_channel_squelch() 와 동일 정책 — 양쪽 같이 유지할 것.
+        const int HOLD_FRAMES = 4;  // ~70ms @ 18ms 틱
         if(ch.sq_calibrated.load(std::memory_order_relaxed)){
             if(!gate && sig >= thr){
                 gate = true;
