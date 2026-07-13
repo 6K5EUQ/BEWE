@@ -312,6 +312,9 @@ struct Channel {
     std::atomic<bool> det_locked{false};
     float det_s = 0, det_e = 0;   // 사용자가 그린 원래 탐색 대역 (복귀용)
     int   det_hold = 0;           // lock 유지 홀드 카운터 (프레임)
+    // 신호가 현재 대역보다 좁아진 상태의 연속 프레임 수. 곧바로 따라 좁히면 폭이 요동치므로
+    // 이 카운터가 찰 때까지 기다린다 (넓히는 쪽은 신호를 자르지 않기 위해 즉시 반영).
+    int   det_shrink_cnt = 0;
 
     // ── 디코더 전용 게이트 (dec_gate) ─────────────────────────────────────
     // 오디오용 sq_gate 보다 훨씬 관대: EMA(sq_sig) 가 아닌 raw 행 peak 기준 +
@@ -371,7 +374,7 @@ struct Channel {
         dec_gate.store(true); dec_gate_until_ms.store(0);   // 디코더 게이트는 열림으로 리셋
         // detect
         det_on.store(false); det_locked.store(false);
-        det_s=0; det_e=0; det_hold=0;
+        det_s=0; det_e=0; det_hold=0; det_shrink_cnt=0;
         // drag state
         move_drag=false;
         move_anchor=0;

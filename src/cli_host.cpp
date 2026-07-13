@@ -200,13 +200,31 @@ void FFTViewer::update_channel_squelch(){
             }
             bool have = (best_peak > -999.f) && (best_hi > best_lo);
             bool locked = ch.det_locked.load(std::memory_order_relaxed);
-            const int DET_HOLD_FRAMES = 18;
+            const int   DET_HOLD_FRAMES   = 18;
+            const float DET_GUARD_MHZ     = 0.002f;  // 2 kHz 가드밴드
+            const float DET_SHRINK_MHZ    = 0.005f;  // 5 kHz 이상 좁아져야 재설정
+            const int   DET_SHRINK_FRAMES = 30;      // 그 상태가 지속돼야 (순간 수축 무시)
 
             if(have){
                 ch.det_hold = DET_HOLD_FRAMES;
-                float bin_mhz = (nyq_mhz * 2.0f) / (float)fft_size;
-                if(!locked || fabsf(best_lo-ch.s) > bin_mhz || fabsf(best_hi-ch.e) > bin_mhz)
-                    det_pending.push_back({c, best_lo, best_hi, true});
+                if(!locked){
+                    det_pending.push_back({c, best_lo-DET_GUARD_MHZ, best_hi+DET_GUARD_MHZ, true});
+                    ch.det_shrink_cnt = 0;
+                } else if(best_lo < ch.s || best_hi > ch.e){
+                    // 신호가 대역 밖으로 삐져나감 → 즉시 확장 (자르면 안 된다)
+                    float ns = std::min(ch.s, best_lo - DET_GUARD_MHZ);
+                    float ne = std::max(ch.e, best_hi + DET_GUARD_MHZ);
+                    det_pending.push_back({c, ns, ne, true});
+                    ch.det_shrink_cnt = 0;
+                } else if((best_lo - ch.s) > DET_SHRINK_MHZ || (ch.e - best_hi) > DET_SHRINK_MHZ){
+                    // 안쪽으로 물러남 — 지속될 때만 좁힌다 (바로 따라가면 폭이 요동친다)
+                    if(++ch.det_shrink_cnt >= DET_SHRINK_FRAMES){
+                        det_pending.push_back({c, best_lo-DET_GUARD_MHZ, best_hi+DET_GUARD_MHZ, true});
+                        ch.det_shrink_cnt = 0;
+                    }
+                } else {
+                    ch.det_shrink_cnt = 0;   // 현재 대역 안에서 안정 → 유지
+                }
             } else if(locked && --ch.det_hold <= 0){
                 det_pending.push_back({c, ch.det_s, ch.det_e, false});
             }
@@ -253,10 +271,14 @@ void FFTViewer::update_channel_squelch(){
     }  // data_mtx 해제
 
     // ── Detect 적용: 채널 폭 조정 + 복조 시작/정지 (락 밖) ────────────────
-    for(const auto& d : det_pending){
+    for(auto d : det_pending){
         Channel& ch = channels[d.ch];
         if(!ch.det_on.load(std::memory_order_relaxed)) continue;
         if(d.lock){
+            // 가드밴드가 탐색 대역을 넘지 않도록 클램프
+            d.s = std::max(d.s, ch.det_s);
+            d.e = std::min(d.e, ch.det_e);
+            if(d.e <= d.s) continue;
             float mid = (d.s + d.e) * 0.5f;
             Channel::DemodMode md = (mid >= 118.0f && mid <= 137.0f)
                                         ? Channel::DM_AM : Channel::DM_FM;
@@ -292,7 +314,7 @@ void FFTViewer::set_channel_detect(int ch_idx, bool on){
     if(on){
         if(ch.det_on.load()) return;
         ch.det_s = ch.s; ch.det_e = ch.e;
-        ch.det_hold = 0;
+        ch.det_hold = 0; ch.det_shrink_cnt = 0;
         ch.det_locked.store(false);
         ch.det_on.store(true);
         ch.sq_calibrated.store(false); ch.sq_calib_cnt = 0;
