@@ -48,6 +48,8 @@ pkg_check_modules(LIBPNG  REQUIRED libpng)
 pkg_check_modules(VOLK REQUIRED volk)
 pkg_check_modules(IIO    REQUIRED libiio)
 pkg_check_modules(AD9361 REQUIRED libad9361)
+pkg_check_modules(OPUS   REQUIRED opus)      # 오디오 Opus 코덱 (HOST 인코드/JOIN 디코드)
+pkg_check_modules(ZSTD   REQUIRED libzstd)   # FFT uint8 무손실 추가압축
 
 if(CLI)
     # ── CLI build (no OpenGL/GLFW/ImGui) ──────────────────────────────────
@@ -99,6 +101,8 @@ if(CLI)
         ${VOLK_INCLUDE_DIRS}
         ${IIO_INCLUDE_DIRS}
         ${AD9361_INCLUDE_DIRS}
+        ${OPUS_INCLUDE_DIRS}
+        ${ZSTD_INCLUDE_DIRS}
     )
 
     target_link_libraries(BEWE PRIVATE
@@ -111,6 +115,8 @@ if(CLI)
         ${VOLK_LIBRARIES}
         ${IIO_LIBRARIES}
         ${AD9361_LIBRARIES}
+        ${OPUS_LIBRARIES}
+        ${ZSTD_LIBRARIES}
         ZLIB::ZLIB
         pthread
         m
@@ -190,6 +196,8 @@ else()
         ${VOLK_INCLUDE_DIRS}
         ${IIO_INCLUDE_DIRS}
         ${AD9361_INCLUDE_DIRS}
+        ${OPUS_INCLUDE_DIRS}
+        ${ZSTD_INCLUDE_DIRS}
         ${IMGUI_PATH}
         ${IMGUI_BACKENDS_PATH}
     )
@@ -207,6 +215,8 @@ else()
         ${VOLK_LIBRARIES}
         ${IIO_LIBRARIES}
         ${AD9361_LIBRARIES}
+        ${OPUS_LIBRARIES}
+        ${ZSTD_LIBRARIES}
         ZLIB::ZLIB
         pthread
         m

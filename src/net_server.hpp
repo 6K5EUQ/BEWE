@@ -1,6 +1,7 @@
 #pragma once
 #include "net_protocol.hpp"
 #include "channel.hpp"
+#include "config.hpp"   // MAX_CHANNELS (per-ch Opus 인코더 배열)
 #include <string>
 #include <vector>
 #include <deque>
@@ -254,6 +255,10 @@ public:
     void broadcast_audio_all(uint8_t ch_idx, int8_t pan,
                              const float* pcm, uint32_t n_samples);
 
+    // 채널 종료/모드전환 시 호출 — 해당 ch 의 Opus 인코더 상태 + 누적버퍼 리셋.
+    // (stop_dem(ch, stop_decoders=true) 에서 호출; 다음 스트림이 stale 잔여 없이 시작)
+    void reset_audio_ch(uint8_t ch_idx);
+
 
 
     void broadcast_wf_event(int32_t fft_offset, int64_t wall_time,
@@ -395,6 +400,19 @@ private:
     mutable std::mutex            clients_mtx_;
     std::vector<std::shared_ptr<ClientConn>> clients_;
     std::atomic<uint8_t>          next_idx_{1};
+
+    // ── Opus 오디오 인코더 (per-ch_idx) ───────────────────────────────────
+    // send_audio 가 256샘플씩 받아 960샘플(20ms)로 리버퍼 후 Opus 인코딩.
+    // 콜러(dem_worker/DMR)는 ch.ext_audio 인터록으로 ch_idx 당 한 스레드만 전송하나
+    // DMR on/off 핸드오프 순간 두 스레드가 겹칠 수 있어 per-slot mutex 로 보호.
+    // OpusEncoder* 를 헤더에 노출 안 하려고 void* 저장 (net_server.cpp 에서 캐스팅).
+    void*              audio_enc_[MAX_CHANNELS]     = {};
+    std::vector<float> audio_acc_[MAX_CHANNELS];
+    std::mutex         audio_enc_mtx_[MAX_CHANNELS];
+    void free_audio_encoders();   // stop() 에서 호출
+    // 완성된 오디오 패킷 1개를 relay + 매칭 클라이언트로 방출 (raw/opus 공용)
+    void emit_audio(uint32_t op_mask, uint8_t ch_idx, int8_t pan,
+                    const uint8_t* body, uint32_t body_len, uint32_t n_field);
 
     void accept_loop();
     void client_loop(std::shared_ptr<ClientConn> c);

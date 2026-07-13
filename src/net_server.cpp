@@ -18,8 +18,26 @@ static_assert(sizeof(((PktChannelSync*)0)->ch)/sizeof(ChSyncEntry) == MAX_CHANNE
 #include <netinet/tcp.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <cstdlib>        // getenv/atoi
+#include <opus/opus.h>    // 오디오 Opus 인코더
+#include <zstd.h>         // FFT uint8 무손실 추가압축
 
 extern void bewe_log_push(int col, const char* fmt, ...);
+
+// ── 압축 노브 (env 킬스위치) ────────────────────────────────────────────────
+// BEWE_OPUS=0 → 오디오 raw float32 (구동작). 기본 ON.
+// BEWE_OPUS_BR=<bps> → Opus 비트레이트 (기본 48000, 클램프 6k~256k).
+// BEWE_FFT_ZSTD=0 → FFT uint8 그대로 (zstd 미적용). 기본 ON.
+static constexpr int OPUS_SR    = 48000;
+static constexpr int OPUS_FRAME = 960;   // 20ms @48kHz mono (Opus 합법 프레임)
+static bool audio_opus_enabled(){ const char* e=getenv("BEWE_OPUS");     return !(e && e[0]=='0'); }
+static bool fft_zstd_enabled(){   const char* e=getenv("BEWE_FFT_ZSTD"); return !(e && e[0]=='0'); }
+static int  opus_bitrate(){
+    const char* e=getenv("BEWE_OPUS_BR"); int b = e ? atoi(e) : 48000;
+    if(b < 6000)   b = 6000;
+    if(b > 256000) b = 256000;
+    return b;
+}
 
 // IQ 파일 전송 속도: TCP send 실측 기반 적응형.
 // send_all이 blocking이므로 네트워크 병목(HOST 업로드, JOIN 다운로드)에 자동 적응.
@@ -68,14 +86,41 @@ void NetServer::stop(){
     if(server_fd_ >= 0){ shutdown(server_fd_, SHUT_RDWR); close(server_fd_); server_fd_=-1; }
     if(accept_thr_.joinable()) accept_thr_.join();
 
-    std::lock_guard<std::mutex> lk(clients_mtx_);
-    for(auto& c : clients_){
-        c->alive.store(false);
-        c->stop_send_worker();
-        if(c->fd >= 0){ shutdown(c->fd, SHUT_RDWR); close(c->fd); c->fd=-1; }
-        if(c->thr.joinable()) c->thr.join();
+    {
+        std::lock_guard<std::mutex> lk(clients_mtx_);
+        for(auto& c : clients_){
+            c->alive.store(false);
+            c->stop_send_worker();
+            if(c->fd >= 0){ shutdown(c->fd, SHUT_RDWR); close(c->fd); c->fd=-1; }
+            if(c->thr.joinable()) c->thr.join();
+        }
+        clients_.clear();
     }
-    clients_.clear();
+    // 반드시 clients_mtx_ 밖에서 — send_audio(opus) 는 audio_enc_mtx_→clients_mtx_ 순으로
+    // 잠그므로, 여기서 clients_mtx_ 잡은 채 audio_enc_mtx_ 를 잡으면 락순서 역전(데드락).
+    free_audio_encoders();
+}
+
+// per-ch Opus 인코더 해제.
+// ⚠ 불변조건: 호출 전에 모든 send_audio 생산자(FM dem_worker / DMR 워커)가 정지돼 있어야
+// 한다 — 이들은 NetServer 소유가 아니라 FFTViewer 파이프라인(stop_all_dem/on_ch_stop)이
+// 정지시킨다. CLI 종료는 cli_host 가 stop_all_dem() → net_srv->stop() 순서라 만족.
+// 뮤텍스는 직렬화만 보장하고 '정지'는 보장 못 하므로, 생산자가 살아있는 채로 부르면 UAF.
+void NetServer::free_audio_encoders(){
+    for(int i = 0; i < MAX_CHANNELS; i++){
+        std::lock_guard<std::mutex> elk(audio_enc_mtx_[i]);
+        if(audio_enc_[i]){ opus_encoder_destroy((OpusEncoder*)audio_enc_[i]); audio_enc_[i] = nullptr; }
+        audio_acc_[i].clear();
+    }
+}
+
+// 채널 종료/모드전환 시 per-ch Opus 인코더 상태 + 누적버퍼 리셋 (stale 잔여/warble 방지).
+void NetServer::reset_audio_ch(uint8_t ch_idx){
+    if(ch_idx >= MAX_CHANNELS) return;
+    std::lock_guard<std::mutex> elk(audio_enc_mtx_[ch_idx]);
+    audio_acc_[ch_idx].clear();
+    if(audio_enc_[ch_idx])
+        opus_encoder_ctl((OpusEncoder*)audio_enc_[ch_idx], OPUS_RESET_STATE);
 }
 
 
@@ -504,30 +549,12 @@ void NetServer::broadcast_fft(const float* data, int fft_size,
                                float pmin, float pmax,
                                int64_t iq_write_sample, int64_t iq_total_samples){
     if(bcast_pause_.load(std::memory_order_relaxed)) return;
-    // v3.24.x: uint8 quantize 로 4배 압축. dB 범위 [pmin..pmax] 를 0..255 mapping.
-    // 시각적 손실 거의 없음 (256 단계 = ~0.4 dB resolution). 헤더 fft_size 의 MSB
-    // 에 FFT_FLAG_QUANT_U8 set 하여 수신측이 dequantize 알 수 있게.
-    PktFftFrame hdr{};
-    hdr.center_freq_hz = center_hz;
-    hdr.sample_rate    = sr;
-    hdr.fft_size       = (uint32_t)fft_size | FFT_FLAG_QUANT_U8;
-    hdr.power_min      = pmin;
-    hdr.power_max      = pmax;
-    hdr.wall_time      = wall_time;
-    hdr.iq_write_sample  = iq_write_sample;
-    hdr.iq_total_samples = iq_total_samples;
-
-    uint32_t data_bytes = (uint32_t)fft_size;  // uint8 1 byte/bin
-    uint32_t total = (uint32_t)(sizeof(PktFftFrame) + data_bytes);
-    // payload + make_packet 이중 빌드 대신 wire 패킷을 재사용 버퍼에 직접 빌드
-    static thread_local std::vector<uint8_t> pkt;
-    pkt.resize(PKT_HDR_SIZE + total);
-    PktHdr* ph = reinterpret_cast<PktHdr*>(pkt.data());
-    memcpy(ph->magic, BEWE_MAGIC, 4);
-    ph->type = static_cast<uint8_t>(PacketType::FFT_FRAME);
-    ph->len  = total;
-    memcpy(pkt.data() + PKT_HDR_SIZE, &hdr, sizeof(PktFftFrame));
-    uint8_t* qdata = pkt.data() + PKT_HDR_SIZE + sizeof(PktFftFrame);
+    // uint8 quantize 로 4배 압축 (dB [pmin..pmax] → 0..255, ~0.4dB 해상도, 시각손실 거의0).
+    // v12: 그 위에 zstd 무손실 추가압축 옵션 (bit30 FFT_FLAG_ZSTD). 노이즈플로어 평탄+
+    // 신호 sparse 라 통상 2~3배 더 줄어듦. 실패/증가 시 raw uint8 로 폴백.
+    // ① 양자화본을 스크래치 버퍼에 생성
+    static thread_local std::vector<uint8_t> qbuf;
+    qbuf.resize(fft_size);
     float range = pmax - pmin;
     if(!(range > 0.f)) range = 1.f;  // 안전망
     float inv = 255.f / range;
@@ -535,8 +562,42 @@ void NetServer::broadcast_fft(const float* data, int fft_size,
         float v = (data[i] - pmin) * inv;
         if(v < 0.f) v = 0.f;
         if(v > 255.f) v = 255.f;
-        qdata[i] = (uint8_t)v;
+        qbuf[i] = (uint8_t)v;
     }
+    // ② 패킷 빌드 (payload = zstd 압축본 또는 raw uint8)
+    static const bool zstd_on = fft_zstd_enabled();
+    static thread_local std::vector<uint8_t> pkt;
+    size_t cap = zstd_on ? ZSTD_compressBound(fft_size) : (size_t)fft_size;
+    pkt.resize(PKT_HDR_SIZE + sizeof(PktFftFrame) + cap);   // 워스트케이스 확보
+    uint8_t* dst = pkt.data() + PKT_HDR_SIZE + sizeof(PktFftFrame);
+    uint32_t flags = FFT_FLAG_QUANT_U8;
+    uint32_t data_bytes;
+    if(zstd_on){
+        size_t z = ZSTD_compress(dst, cap, qbuf.data(), fft_size, 1);
+        if(!ZSTD_isError(z) && z < (size_t)fft_size){   // 실제로 줄었을 때만 채택
+            data_bytes = (uint32_t)z; flags |= FFT_FLAG_ZSTD;
+        } else {                                        // 압축 실패/무이득 → raw 폴백
+            memcpy(dst, qbuf.data(), fft_size); data_bytes = (uint32_t)fft_size;
+        }
+    } else {
+        memcpy(dst, qbuf.data(), fft_size); data_bytes = (uint32_t)fft_size;
+    }
+    uint32_t total = (uint32_t)(sizeof(PktFftFrame) + data_bytes);
+    pkt.resize(PKT_HDR_SIZE + total);   // 축소만 → 재할당 없음, dst 데이터 유지
+    PktHdr* ph = reinterpret_cast<PktHdr*>(pkt.data());
+    memcpy(ph->magic, BEWE_MAGIC, 4);
+    ph->type = static_cast<uint8_t>(PacketType::FFT_FRAME);
+    ph->len  = total;
+    PktFftFrame hdr{};
+    hdr.center_freq_hz = center_hz;
+    hdr.sample_rate    = sr;
+    hdr.fft_size       = (uint32_t)fft_size | flags;
+    hdr.power_min      = pmin;
+    hdr.power_max      = pmax;
+    hdr.wall_time      = wall_time;
+    hdr.iq_write_sample  = iq_write_sample;
+    hdr.iq_total_samples = iq_total_samples;
+    memcpy(pkt.data() + PKT_HDR_SIZE, &hdr, sizeof(PktFftFrame));
     if(cb.on_relay_broadcast){
         cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
     }
@@ -547,14 +608,12 @@ void NetServer::broadcast_fft(const float* data, int fft_size,
     }
 }
 
-// ── Send audio to specific operators (legacy, mask-based) ────────────────
-void NetServer::send_audio(uint32_t op_mask, uint8_t ch_idx, int8_t pan,
-                            const float* pcm, uint32_t n_samples){
-    if(!op_mask || !n_samples) return;
-    if(bcast_pause_.load(std::memory_order_relaxed)) return;
-
-    uint32_t payload_size = (uint32_t)(sizeof(PktAudioFrame) + n_samples*sizeof(float));
-    // payload + make_packet 이중 빌드 대신 wire 패킷을 재사용 버퍼에 직접 빌드
+// ── 완성된 오디오 패킷 1개 방출 (raw/opus 공용) ───────────────────────────
+// body = raw float32 PCM 바이트 또는 opus 프레임 바이트. n_field = PktAudioFrame.n_samples
+// (opus 면 AUDIO_FLAG_OPUS | 디코드샘플수). op_mask 매칭 클라이언트 + relay 로 전송.
+void NetServer::emit_audio(uint32_t op_mask, uint8_t ch_idx, int8_t pan,
+                           const uint8_t* body, uint32_t body_len, uint32_t n_field){
+    uint32_t payload_size = (uint32_t)(sizeof(PktAudioFrame) + body_len);
     static thread_local std::vector<uint8_t> pkt;
     pkt.resize(PKT_HDR_SIZE + payload_size);
     PktHdr* ph = reinterpret_cast<PktHdr*>(pkt.data());
@@ -564,8 +623,8 @@ void NetServer::send_audio(uint32_t op_mask, uint8_t ch_idx, int8_t pan,
     auto* ah = reinterpret_cast<PktAudioFrame*>(pkt.data() + PKT_HDR_SIZE);
     ah->ch_idx    = ch_idx;
     ah->pan       = (uint8_t)(int8_t)pan;
-    ah->n_samples = n_samples;
-    memcpy(pkt.data() + PKT_HDR_SIZE + sizeof(PktAudioFrame), pcm, n_samples*sizeof(float));
+    ah->n_samples = n_field;
+    memcpy(pkt.data() + PKT_HDR_SIZE + sizeof(PktAudioFrame), body, body_len);
 
     // relay JOIN이 있을 때만 중앙서버로 전송 (없으면 큐 낭비 방지)
     if(cb.on_relay_broadcast && has_relay())
@@ -577,6 +636,54 @@ void NetServer::send_audio(uint32_t op_mask, uint8_t ch_idx, int8_t pan,
         if(!(op_mask & (1u << c->op_index))) continue;
         c->enqueue(pkt, false, true);
     }
+}
+
+// ── Send audio to specific operators (legacy, mask-based) ────────────────
+// v12: 기본적으로 per-ch_idx Opus 인코딩 (48kHz mono, 20ms 프레임). 콜러는 256샘플씩
+// 넘기고, 여기서 960샘플로 리버퍼해 Opus 인코딩 → 오디오 대역 ~20배 절감. BEWE_OPUS=0
+// 이면 raw float32 (구동작). DMR 경로는 ~48.3kHz 라 미세 피치드리프트가 있으나 기존
+// raw 경로도 JOIN 이 48k 로 재생하던 것과 동일 (Opus 가 악화시키지 않음).
+void NetServer::send_audio(uint32_t op_mask, uint8_t ch_idx, int8_t pan,
+                            const float* pcm, uint32_t n_samples){
+    if(!op_mask || !n_samples) return;
+    if(bcast_pause_.load(std::memory_order_relaxed)) return;
+
+    static const bool opus_on = audio_opus_enabled();
+    if(opus_on && ch_idx < MAX_CHANNELS){
+        std::lock_guard<std::mutex> elk(audio_enc_mtx_[ch_idx]);
+        OpusEncoder* enc = (OpusEncoder*)audio_enc_[ch_idx];
+        if(!enc){
+            int err = OPUS_OK;
+            enc = opus_encoder_create(OPUS_SR, 1, OPUS_APPLICATION_AUDIO, &err);
+            if(err == OPUS_OK && enc){
+                opus_encoder_ctl(enc, OPUS_SET_BITRATE(opus_bitrate()));
+                audio_enc_[ch_idx] = enc;
+            } else {
+                if(enc){ opus_encoder_destroy(enc); enc = nullptr; }
+            }
+        }
+        if(enc){
+            auto& acc = audio_acc_[ch_idx];
+            acc.insert(acc.end(), pcm, pcm + n_samples);
+            unsigned char obuf[4000];
+            size_t off = 0;
+            while(acc.size() - off >= (size_t)OPUS_FRAME){
+                int nb = opus_encode_float(enc, acc.data() + off, OPUS_FRAME,
+                                           obuf, (opus_int32)sizeof(obuf));
+                off += OPUS_FRAME;
+                if(nb > 0)
+                    emit_audio(op_mask, ch_idx, pan, obuf, (uint32_t)nb,
+                               (uint32_t)OPUS_FRAME | AUDIO_FLAG_OPUS);
+                // nb<=0: 인코드 실패 프레임은 스킵 (해당 20ms 무음 처리)
+            }
+            if(off) acc.erase(acc.begin(), acc.begin() + off);
+            return;
+        }
+        // 인코더 생성 실패 → raw 폴백
+    }
+    // raw float32 PCM (구동작 / BEWE_OPUS=0 / 인코더 실패)
+    emit_audio(op_mask, ch_idx, pan, (const uint8_t*)pcm,
+               n_samples * (uint32_t)sizeof(float), n_samples);
 }
 
 void NetServer::broadcast_audio_all(uint8_t ch_idx, int8_t pan,

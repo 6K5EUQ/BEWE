@@ -213,11 +213,15 @@ void FFTViewer::stop_dem(int ch_idx, bool stop_decoders){
         for(auto& bm : bewe_modules())
             if(bm.on_ch_stop) bm.on_ch_stop(*this, ch_idx);
     }
-    if(!ch.dem_run.load()) return;
-    ch.dem_stop_req.store(true);
-    if(ch.dem_thr.joinable()) ch.dem_thr.join();
-    ch.dem_run.store(false);
-    ch.mode=Channel::DM_NONE;
+    if(ch.dem_run.load()){
+        ch.dem_stop_req.store(true);
+        if(ch.dem_thr.joinable()) ch.dem_thr.join();
+        ch.dem_run.store(false);
+        ch.mode=Channel::DM_NONE;
+    }
+    // demod(FM/AM) + DMR 워커 모두 정지된 뒤 → per-ch Opus 인코더 잔여/상태 리셋.
+    // 채널 삭제/모드전환(stop_decoders=true)에서만: 다음 스트림이 stale 없이 시작.
+    if(stop_decoders && net_srv) net_srv->reset_audio_ch((uint8_t)ch_idx);
 }
 
 void FFTViewer::stop_all_dem(){

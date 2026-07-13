@@ -220,6 +220,11 @@ public:
 
     // ── Audio rings (one per channel) ─────────────────────────────────────
     NetAudioRing audio[MAX_CHANNELS];
+    // per-ch Opus 디코더 (opus 프레임 수신 시 lazy 생성). recv 스레드 단독 접근이라
+    // 락 불필요. OpusDecoder* 를 헤더에 노출 안 하려고 void* 저장 (.cpp 에서 캐스팅).
+    // recv 스레드 join 후 disconnect()/dtor 에서 free_audio_decoders() 로 해제.
+    void* audio_dec[MAX_CHANNELS] = {};
+    void  free_audio_decoders();
 
     // ── 모듈 파이프 송신 (JOIN→HOST) ──────────────────────────────────────
     bool send_module_pipe(const void* payload, uint32_t len){

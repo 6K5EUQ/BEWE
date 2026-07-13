@@ -177,11 +177,17 @@ struct __attribute__((packed)) PktAuthAck {
 
 // ── FFT_FRAME ─────────────────────────────────────────────────────────────
 // header followed by float[fft_size] (dB values)
-// fft_size 의 MSB(0x80000000) 가 set 이면 payload 가 uint8 quantized — 4배 압축.
-// uint8 value v → dB = power_min + (v/255.0) * (power_max - power_min).
-// MSB clear 시 기존 float32 payload (구버전 호환).
+// fft_size 의 상위 2비트 = 압축 플래그, 하위 30비트 = 실제 fft_size.
+//   bit31 FFT_FLAG_QUANT_U8: payload 가 uint8 quantized — 4배 압축.
+//     uint8 value v → dB = power_min + (v/255.0) * (power_max - power_min).
+//   bit30 FFT_FLAG_ZSTD: payload 가 uint8 양자화본을 ZSTD_compress 한 것 (무손실 추가압축).
+//     ZSTD 는 QUANT_U8 위에만 얹힘 (uint8[fft_size] 를 압축) — 둘 다 set 이 정상.
+//     수신측은 ZSTD_decompress → uint8[fft_size] → 기존 dequant. HOST+JOIN 만 관여
+//     (Central 은 payload opaque 릴레이). 구 JOIN 은 이 프레임을 조용히 버림 → v12 major.
+//   두 플래그 clear 시 기존 float32 payload (구버전 호환).
 static constexpr uint32_t FFT_FLAG_QUANT_U8 = 0x80000000u;
-static constexpr uint32_t FFT_FFT_SIZE_MASK = 0x7FFFFFFFu;
+static constexpr uint32_t FFT_FLAG_ZSTD     = 0x40000000u;
+static constexpr uint32_t FFT_FFT_SIZE_MASK = 0x3FFFFFFFu;
 
 struct __attribute__((packed)) PktFftFrame {
     uint64_t center_freq_hz;
@@ -210,12 +216,20 @@ struct __attribute__((packed)) PktFftMeta {
 };
 
 // ── AUDIO_FRAME ───────────────────────────────────────────────────────────
-// header followed by float[n_samples] PCM mono
+// header followed by float[n_samples] PCM mono (raw), 또는 Opus 프레임 (압축).
+// n_samples 의 MSB(0x80000000) 가 set 이면 payload 가 Opus 인코딩본 (48kHz mono,
+// 20ms/960샘플 프레임). 이때 하위 31비트 = 디코드 후 샘플 수(960), payload 바이트
+// 길이 = PktHdr.len - sizeof(PktAudioFrame). 수신측이 opus_decode_float 로 복원.
+// MSB clear 시 기존 float32 raw PCM (구버전 호환). ch_idx/pan 오프셋은 불변이라
+// Central mute 필터(ch_idx offset0 검사)는 그대로 동작. HOST 인코드/JOIN 디코드만
+// 관여 — v12 major (구 JOIN 은 이 프레임을 조용히 버림).
+static constexpr uint32_t AUDIO_FLAG_OPUS   = 0x80000000u;
+static constexpr uint32_t AUDIO_NSAMP_MASK  = 0x7FFFFFFFu;
 struct __attribute__((packed)) PktAudioFrame {
     uint8_t  ch_idx;
     uint8_t  pan;        // -1(L) 0(both) 1(R) cast as int8
-    uint32_t n_samples;
-    // float[n_samples] follows
+    uint32_t n_samples;  // MSB=AUDIO_FLAG_OPUS 이면 하위31=디코드 샘플수, payload=opus바이트
+    // float[n_samples] 또는 opus bytes follows
 };
 
 // ── CMD ───────────────────────────────────────────────────────────────────

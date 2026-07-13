@@ -3,6 +3,8 @@
 #include "login.hpp"
 #include "sigmf.hpp"
 #include <cstdio>
+#include <opus/opus.h>   // 오디오 Opus 디코더
+#include <zstd.h>        // FFT zstd 해제
 
 extern void bewe_log_push(int col, const char* fmt, ...);
 #include <cstdlib>
@@ -146,6 +148,13 @@ bool NetClient::pop_fft_frame(FftFrame& out){
     return true;
 }
 
+// per-ch Opus 디코더 해제. recv 스레드 join 후에만 호출 (진행중 디코드와 UAF 방지).
+void NetClient::free_audio_decoders(){
+    for(int i = 0; i < MAX_CHANNELS; i++){
+        if(audio_dec[i]){ opus_decoder_destroy((OpusDecoder*)audio_dec[i]); audio_dec[i] = nullptr; }
+    }
+}
+
 // ── disconnect ────────────────────────────────────────────────────────────
 void NetClient::disconnect(){
     connected_.store(false);
@@ -155,6 +164,7 @@ void NetClient::disconnect(){
         close(fd_); fd_=-1;
     }
     if(recv_thr_.joinable()) recv_thr_.join();
+    free_audio_decoders();   // recv 스레드 정지 후 → 안전. 재연결 시 fresh 생성.
 }
 
 // ── destructor (RAII safety net) ──────────────────────────────────────────
@@ -166,6 +176,7 @@ NetClient::~NetClient(){
         close(fd_); fd_ = -1;
     }
     if(recv_thr_.joinable()) recv_thr_.join();
+    free_audio_decoders();
 }
 
 // ── recv loop ─────────────────────────────────────────────────────────────
@@ -300,13 +311,25 @@ void NetClient::handle_packet(PacketType type,
         if(!fft_recv_enabled.load(std::memory_order_relaxed)) break;
         auto* fh = reinterpret_cast<const PktFftFrame*>(payload);
         bool quantized = (fh->fft_size & FFT_FLAG_QUANT_U8) != 0;
+        bool zstd_c    = (fh->fft_size & FFT_FLAG_ZSTD) != 0;
         uint32_t real_fft_size = fh->fft_size & FFT_FFT_SIZE_MASK;
         uint32_t data_bytes = len - (uint32_t)sizeof(PktFftFrame);
-        uint32_t expected   = quantized
-            ? real_fft_size                       // uint8 1 byte/bin
-            : real_fft_size * (uint32_t)sizeof(float);
-        if(data_bytes != expected) break;
         const size_t hsz = sizeof(PktFftFrame);
+        // zstd 는 uint8 양자화본만 감싼다 → 해제 후 uint8[real_fft_size]. u8src 로 통일.
+        const uint8_t* u8src = nullptr;   // quantized 일 때 uint8[real_fft_size] 를 가리킴
+        static thread_local std::vector<uint8_t> zdec;   // recv 스레드 단독 → thread_local 안전
+        if(zstd_c){
+            if(!quantized) break;                        // zstd 는 항상 quantized 위에만
+            zdec.resize(real_fft_size);
+            size_t d = ZSTD_decompress(zdec.data(), real_fft_size, payload + hsz, data_bytes);
+            if(ZSTD_isError(d) || d != real_fft_size) break;
+            u8src = zdec.data();
+        } else if(quantized){
+            if(data_bytes != real_fft_size) break;       // uint8 1 byte/bin
+            u8src = payload + hsz;
+        } else {
+            if(data_bytes != real_fft_size * (uint32_t)sizeof(float)) break;
+        }
         uint32_t fis = host_fft_input_size.load(std::memory_order_relaxed);
 
         // 수신 시각 (steady_clock μs)
@@ -316,8 +339,8 @@ void NetClient::handle_packet(PacketType type,
         FftFrame frm;
         frm.data.resize(real_fft_size);
         if(quantized){
-            // uint8 → float dequantize
-            const uint8_t* qd = payload + hsz;
+            // uint8 → float dequantize (u8src = raw uint8 또는 zstd 해제본)
+            const uint8_t* qd = u8src;
             float range = fh->power_max - fh->power_min;
             if(!(range > 0.f)) range = 1.f;
             float scale = range / 255.f;
@@ -350,7 +373,7 @@ void NetClient::handle_packet(PacketType type,
             std::lock_guard<std::mutex> lk(fft_mtx);
             cf_hz        = fh->center_freq_hz;
             sr           = fh->sample_rate;
-            fft_sz       = fh->fft_size;
+            fft_sz       = (uint16_t)real_fft_size;   // 플래그(bit30/31) 제거한 실제 크기
             pmin         = fh->power_min;
             pmax         = fh->power_max;
             fft_wall_time= fh->wall_time;
@@ -363,13 +386,30 @@ void NetClient::handle_packet(PacketType type,
         if(len < sizeof(PktAudioFrame)) break;
         auto* ah = reinterpret_cast<const PktAudioFrame*>(payload);
         if(ah->ch_idx >= MAX_CHANNELS) break;
-        uint32_t n = ah->n_samples;
-        if(len < sizeof(PktAudioFrame) + n*sizeof(float)) break;
-        const float* pcm = reinterpret_cast<const float*>(
-                               payload + sizeof(PktAudioFrame));
         int8_t pan = (int8_t)ah->pan;
         auto& ring = audio[ah->ch_idx];
-        for(uint32_t i=0; i<n; i++) ring.push(pcm[i], pan);
+        if(ah->n_samples & AUDIO_FLAG_OPUS){
+            // Opus 프레임: payload = opus 바이트, 길이 = len - header. 48kHz mono 복원.
+            const unsigned char* ob = payload + sizeof(PktAudioFrame);
+            uint32_t olen = len - (uint32_t)sizeof(PktAudioFrame);
+            OpusDecoder* dec = (OpusDecoder*)audio_dec[ah->ch_idx];
+            if(!dec){
+                int err = OPUS_OK;
+                dec = opus_decoder_create(48000, 1, &err);
+                if(err != OPUS_OK || !dec){ if(dec) opus_decoder_destroy(dec); break; }
+                audio_dec[ah->ch_idx] = dec;
+            }
+            float out[5760];   // Opus 최대 120ms @48k = 5760 샘플 (버퍼 여유)
+            int got = opus_decode_float(dec, ob, (opus_int32)olen, out, 5760, 0);
+            if(got <= 0) break;                              // 디코드 실패/손실
+            for(int i = 0; i < got; i++) ring.push(out[i], pan);   // 실제 반환 샘플수 사용
+        } else {
+            uint32_t n = ah->n_samples;                      // raw float32 (구버전 호환)
+            if(len < sizeof(PktAudioFrame) + n*sizeof(float)) break;
+            const float* pcm = reinterpret_cast<const float*>(
+                                   payload + sizeof(PktAudioFrame));
+            for(uint32_t i = 0; i < n; i++) ring.push(pcm[i], pan);
+        }
         break;
     }
 
