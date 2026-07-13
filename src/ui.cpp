@@ -284,32 +284,35 @@ void FFTViewer::update_channel_squelch(){
             }
             bool have = (best_peak > -999.f) && (best_hi > best_lo);
             bool locked = ch.det_locked.load(std::memory_order_relaxed);
-            const int   DET_HOLD_FRAMES = 18;    // 스컬치 홀드와 동일 (~0.3s) — 페이딩 시 깜빡임 방지
-            const float DET_GUARD_MHZ   = 0.002f; // 2 kHz — 잡을 때 run 양쪽에 붙이는 여유
-            const float DET_SHRINK_MHZ  = 0.005f; // 5 kHz — 이만큼 좁아져야 다시 좁힌다
-            const int   DET_SHRINK_FRAMES = 30;   // 그 상태가 ~0.5s 지속돼야 (순간 수축 무시)
+            const int   DET_HOLD_FRAMES   = 18;      // 스컬치 홀드와 동일 (~0.3s) — 페이딩 시 깜빡임 방지
+            const float DET_GUARD_MHZ     = 0.002f;  // 2 kHz — run 양쪽에 붙이는 여유
+            const int   DET_EXPAND_FRAMES = 3;       // 확장은 이만큼 연속 관측돼야 (1프레임 스파이크 방어)
 
+            // 대역 정책: lock 이 유지되는 동안 폭은 넓어지기만 한다.
+            // FM 음성은 편이가 출렁여 매 프레임 run 폭이 변한다 — 따라 좁히면 필터가 요동친다.
+            // 한 교신에서 관측된 최대 폭을 유지하고, 신호가 끊겨 lock 이 풀릴 때 원래 폭으로 리셋.
             if(have){
                 ch.det_hold = DET_HOLD_FRAMES;
                 if(!locked){
-                    // 최초 lock — run 에 가드밴드를 붙여 잡는다
                     det_pending.push_back({c, best_lo-DET_GUARD_MHZ, best_hi+DET_GUARD_MHZ, true});
-                    ch.det_shrink_cnt = 0;
+                    ch.det_ext_cnt = 0;
                 } else if(best_lo < ch.s || best_hi > ch.e){
-                    // 신호가 현재 대역 밖으로 삐져나감 → 즉시 확장 (신호를 자르면 안 된다)
-                    float ns = std::min(ch.s, best_lo - DET_GUARD_MHZ);
-                    float ne = std::max(ch.e, best_hi + DET_GUARD_MHZ);
-                    det_pending.push_back({c, ns, ne, true});
-                    ch.det_shrink_cnt = 0;
-                } else if((best_lo - ch.s) > DET_SHRINK_MHZ || (ch.e - best_hi) > DET_SHRINK_MHZ){
-                    // 신호가 대역 안쪽으로 충분히 물러남 — 바로 따라 좁히면 폭이 요동친다.
-                    // 그 상태가 계속 유지될 때만 재설정.
-                    if(++ch.det_shrink_cnt >= DET_SHRINK_FRAMES){
-                        det_pending.push_back({c, best_lo-DET_GUARD_MHZ, best_hi+DET_GUARD_MHZ, true});
-                        ch.det_shrink_cnt = 0;
+                    // 현재 대역 밖으로 삐져나감 → 확장 후보. 노이즈 스파이크 한 번으로 넓히지 않도록
+                    // 연속 프레임 동안 관측될 때만 반영하고, 그동안 관측된 최대치를 누적한다.
+                    if(ch.det_ext_cnt == 0){
+                        ch.det_ext_s = best_lo; ch.det_ext_e = best_hi;
+                    } else {
+                        ch.det_ext_s = std::min(ch.det_ext_s, best_lo);
+                        ch.det_ext_e = std::max(ch.det_ext_e, best_hi);
+                    }
+                    if(++ch.det_ext_cnt >= DET_EXPAND_FRAMES){
+                        det_pending.push_back({c,
+                            std::min(ch.s, ch.det_ext_s - DET_GUARD_MHZ),
+                            std::max(ch.e, ch.det_ext_e + DET_GUARD_MHZ), true});
+                        ch.det_ext_cnt = 0;
                     }
                 } else {
-                    ch.det_shrink_cnt = 0;   // 현재 대역 안에서 잘 놀고 있음 → 그대로 유지
+                    ch.det_ext_cnt = 0;   // 대역 안으로 들어옴 — 좁히지 않는다 (최대 폭 유지)
                 }
             } else if(locked && --ch.det_hold <= 0){
                 det_pending.push_back({c, ch.det_s, ch.det_e, false});
@@ -394,7 +397,7 @@ void FFTViewer::update_channel_squelch(){
             ch.mode = Channel::DM_NONE;
             ch.det_locked.store(false, std::memory_order_relaxed);
             ch.sq_gate.store(false, std::memory_order_relaxed);
-            ch.det_hold = 0;
+            ch.det_hold = 0; ch.det_ext_cnt = 0;   // 다음 교신은 다시 처음부터 최대 폭을 쌓는다
             bewe_log_push(0,"[DETECT] CH%d released → %.4f-%.4f MHz\n", d.ch, d.s, d.e);
         }
     }
@@ -412,7 +415,7 @@ void FFTViewer::set_channel_detect(int ch_idx, bool on){
     if(on){
         if(ch.det_on.load()) return;
         ch.det_s = ch.s; ch.det_e = ch.e;
-        ch.det_hold = 0; ch.det_shrink_cnt = 0;
+        ch.det_hold = 0; ch.det_ext_cnt = 0;
         ch.det_locked.store(false);
         ch.det_on.store(true);
         // 탐색 대역이 바뀌었으므로 스컬치를 그 폭 기준으로 다시 잡는다
@@ -423,7 +426,7 @@ void FFTViewer::set_channel_detect(int ch_idx, bool on){
         bool was = ch.det_locked.load();
         ch.det_on.store(false);
         ch.det_locked.store(false);
-        ch.det_hold = 0;
+        ch.det_hold = 0; ch.det_ext_cnt = 0;
         if(was){
             stop_dem(ch_idx);
             ch.s = ch.det_s; ch.e = ch.det_e;
