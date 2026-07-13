@@ -293,6 +293,7 @@ public:
     bool cmd_set_ch_pan(int idx, int pan);
     bool cmd_set_sq_thresh(int idx, float thr);
     bool cmd_set_autoscale();
+    bool cmd_set_ch_detect(int idx, bool on);  // JOIN → HOST: 채널 에너지 디텍션 토글
     bool cmd_toggle_recv(int ch_idx, bool enable);
     bool cmd_toggle_fft_recv(bool enable);  // central에서 이 JOIN으로 FFT 송신 토글 (audio/HB 무관)
     bool cmd_update_ch_range(int idx, float s, float e);

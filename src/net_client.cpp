@@ -804,6 +804,11 @@ bool NetClient::cmd_set_autoscale(){
     PktCmd c{}; c.cmd=(uint8_t)CmdType::SET_AUTOSCALE;
     return send_cmd(c);
 }
+bool NetClient::cmd_set_ch_detect(int idx, bool on){
+    PktCmd c{}; c.cmd=(uint8_t)CmdType::SET_CH_DETECT;
+    c.set_ch_detect.idx=(uint8_t)idx; c.set_ch_detect.enable=on?1:0;
+    return send_cmd(c);
+}
 bool NetClient::cmd_toggle_tm_iq(){
     PktCmd c{}; c.cmd=(uint8_t)CmdType::TOGGLE_TM_IQ;
     return send_cmd(c);

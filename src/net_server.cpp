@@ -321,6 +321,11 @@ void NetServer::handle_packet(std::shared_ptr<ClientConn> c,
             case CmdType::SET_AUTOSCALE:
                 if(cb.on_set_autoscale) cb.on_set_autoscale();
                 break;
+            case CmdType::SET_CH_DETECT:
+                if(cb.on_set_ch_detect)
+                    cb.on_set_ch_detect(cmd->set_ch_detect.idx,
+                                        cmd->set_ch_detect.enable != 0);
+                break;
             case CmdType::TOGGLE_RECV:
                 if(cb.on_toggle_recv)
                     cb.on_toggle_recv(cmd->toggle_recv.idx, c->op_index,
@@ -769,6 +774,8 @@ void NetServer::broadcast_channel_sync(const Channel* chs, int n, bool periodic)
         sync.ch[i].sq_sig        = chs[i].sq_sig.load(std::memory_order_relaxed);
         sync.ch[i].sq_gate       = chs[i].sq_gate.load(std::memory_order_relaxed) ? 1 : 0;
         sync.ch[i].dem_paused    = chs[i].dem_paused.load(std::memory_order_relaxed) ? 1 : 0;
+        sync.ch[i].det_state     = !chs[i].det_on.load(std::memory_order_relaxed) ? 0
+                                 : (chs[i].det_locked.load(std::memory_order_relaxed) ? 2 : 1);
         strncpy(sync.ch[i].owner_name, chs[i].owner, 31);
         sync.ch[i].iq_rec_secs    = (chs[i].iq_rec_sr > 0) ? (uint32_t)(chs[i].iq_rec_frames / chs[i].iq_rec_sr) : 0;
         sync.ch[i].audio_rec_secs = (chs[i].audio_rec_sr > 0) ? (uint32_t)(chs[i].audio_rec_frames / chs[i].audio_rec_sr) : 0;

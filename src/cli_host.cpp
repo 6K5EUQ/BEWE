@@ -73,6 +73,11 @@ void FFTViewer::update_channel_squelch(){
     if(real_dt > 0.5f) real_dt = 0.02f; // 첫 호출/정지 이후 복귀 보정
     sq_last_tick = sq_now;
 
+    // Detect 모드 채널의 s/e 변경 요청 (락 밖에서 적용 — start/stop_dem 은 스레드 join)
+    struct DetApply { int ch; float s, e; bool lock; };
+    std::vector<DetApply> det_pending;
+
+    {
     std::lock_guard<std::mutex> lk(data_mtx);
     float cf_mhz = (float)(header.center_frequency / 1e6);
     float nyq_mhz = header.sample_rate / 2e6f;
@@ -92,17 +97,27 @@ void FFTViewer::update_channel_squelch(){
             : fft_size + (int)((rel_mhz / nyq_mhz) * hf);
         return std::max(0, std::min(fft_size - 1, bin));
     };
+    auto bin_to_freq = [&](int bin) -> float {
+        float rel = (bin <= hf) ? ((float)bin / (float)hf) * nyq_mhz
+                                : ((float)(bin - fft_size) / (float)hf) * nyq_mhz;
+        return cf_mhz + rel;
+    };
     for(int c = 0; c < MAX_CHANNELS; c++){
         Channel& ch = channels[c];
         if(!ch.filter_active) continue;
-        float s_mhz = std::min(ch.s, ch.e) - cf_mhz;
-        float e_mhz = std::max(ch.s, ch.e) - cf_mhz;
+        // Detect 채널은 좁아진 s/e 가 아니라 원래 탐색 대역 기준으로 스컬치를 잡는다
+        // (좁은 폭으로 재계산하면 임계값이 자기 신호를 물어 올라간다)
+        bool det = ch.det_on.load(std::memory_order_relaxed);
+        float scan_s = det ? ch.det_s : ch.s;
+        float scan_e = det ? ch.det_e : ch.e;
+        float s_mhz = std::min(scan_s, scan_e) - cf_mhz;
+        float e_mhz = std::max(scan_s, scan_e) - cf_mhz;
         int bin_s = freq_to_bin(s_mhz);
         int bin_e = freq_to_bin(e_mhz);
         // 행·대역 둘 다 그대로면 캐시 재사용 (계산결과 동일 → 게이트/시간 동작 불변)
         float peak_db;
         if(same_row && ch.sq_calibrated.load(std::memory_order_relaxed)
-           && ch.sq_scan_s == ch.s && ch.sq_scan_e == ch.e){
+           && ch.sq_scan_s == scan_s && ch.sq_scan_e == scan_e){
             peak_db = ch.sq_cached_peak;
         } else {
             peak_db = -120.0f;
@@ -116,7 +131,7 @@ void FFTViewer::update_channel_squelch(){
                     if(rowp[b] > peak_db) peak_db = rowp[b];
             }
             ch.sq_cached_peak = peak_db;
-            ch.sq_scan_s = ch.s; ch.sq_scan_e = ch.e;
+            ch.sq_scan_s = scan_s; ch.sq_scan_e = scan_e;
         }
         float prev = ch.sq_sig.load(std::memory_order_relaxed);
         float sig = 0.3f * peak_db + 0.7f * prev;
@@ -149,6 +164,56 @@ void FFTViewer::update_channel_squelch(){
                     gate = false;
             }
         }
+        // ── 에너지 디텍션 (Detect 모드) ───────────────────────────────────
+        // 탐색 대역 안에서 thr 를 넘는 연속 bin 구간 중 최강 구간으로 채널 폭을 좁힌다.
+        // 신호가 끊기면 원래 폭 복귀. 이 채널의 스컬치 게이트는 검출기가 대신한다.
+        // 새 FFT 행에서만 스캔 — 같은 행 재스캔은 낭비
+        if(det && !same_row && ch.sq_calibrated.load(std::memory_order_relaxed)){
+            float best_lo=0, best_hi=0, best_peak=-999.f;
+            {
+                int n_bins = (bin_s <= bin_e) ? (bin_e-bin_s+1)
+                                              : (fft_size-bin_s) + (bin_e+1);
+                auto bin_at = [&](int k){ int b = bin_s + k; return (b >= fft_size) ? b-fft_size : b; };
+                int run_start=-1, gap=0;
+                float run_peak=-999.f;
+                const int GAP_BINS = 2;   // 짧은 갭은 이어붙임 (사이드밴드 딥에서 run 쪼개짐 방지)
+                auto close_run = [&](int k_end){
+                    if(run_start < 0) return;
+                    if(run_peak > best_peak){
+                        best_peak = run_peak;
+                        best_lo = bin_to_freq(bin_at(run_start));
+                        best_hi = bin_to_freq(bin_at(k_end));
+                    }
+                    run_start=-1; run_peak=-999.f;
+                };
+                for(int k=0; k<n_bins; k++){
+                    float v_db = rowp[bin_at(k)];
+                    if(v_db >= thr){
+                        if(run_start < 0){ run_start = k; run_peak = -999.f; }
+                        if(v_db > run_peak) run_peak = v_db;
+                        gap = 0;
+                    } else if(run_start >= 0){
+                        if(++gap > GAP_BINS) close_run(k - gap);
+                    }
+                }
+                if(run_start >= 0) close_run(n_bins-1);
+            }
+            bool have = (best_peak > -999.f) && (best_hi > best_lo);
+            bool locked = ch.det_locked.load(std::memory_order_relaxed);
+            const int DET_HOLD_FRAMES = 18;
+
+            if(have){
+                ch.det_hold = DET_HOLD_FRAMES;
+                float bin_mhz = (nyq_mhz * 2.0f) / (float)fft_size;
+                if(!locked || fabsf(best_lo-ch.s) > bin_mhz || fabsf(best_hi-ch.e) > bin_mhz)
+                    det_pending.push_back({c, best_lo, best_hi, true});
+            } else if(locked && --ch.det_hold <= 0){
+                det_pending.push_back({c, ch.det_s, ch.det_e, false});
+            }
+        }
+        // 스컬치 우회 — 잡고 있는 동안은 매 프레임 열어 둔다 (스캔은 새 행에서만)
+        if(det && ch.det_locked.load(std::memory_order_relaxed)) gate = true;
+
         ch.sq_gate.store(gate, std::memory_order_relaxed);
 
         // ── 디코더 전용 게이트 (관대) ─────────────────────────────────────
@@ -185,6 +250,69 @@ void FFTViewer::update_channel_squelch(){
             ch.sq_total_time = 0;
         }
     }
+    }  // data_mtx 해제
+
+    // ── Detect 적용: 채널 폭 조정 + 복조 시작/정지 (락 밖) ────────────────
+    for(const auto& d : det_pending){
+        Channel& ch = channels[d.ch];
+        if(!ch.det_on.load(std::memory_order_relaxed)) continue;
+        if(d.lock){
+            float mid = (d.s + d.e) * 0.5f;
+            Channel::DemodMode md = (mid >= 118.0f && mid <= 137.0f)
+                                        ? Channel::DM_AM : Channel::DM_FM;
+            bool was = ch.det_locked.load(std::memory_order_relaxed);
+            stop_dem(d.ch, false);          // 재튜닝 — 디코더 보존
+            ch.s = d.s; ch.e = d.e;
+            if(!was){
+                ch.audio_mask.store(0xFFFFFFFFu);
+                ch.det_locked.store(true, std::memory_order_relaxed);
+                bewe_log_push(0,"[DETECT] CH%d locked %.4f-%.4f MHz (%s)\n",
+                              d.ch, d.s, d.e, md==Channel::DM_AM?"AM":"FM");
+            }
+            start_dem(d.ch, md);
+        } else {
+            stop_dem(d.ch);
+            ch.s = d.s; ch.e = d.e;
+            ch.mode = Channel::DM_NONE;
+            ch.det_locked.store(false, std::memory_order_relaxed);
+            ch.sq_gate.store(false, std::memory_order_relaxed);
+            ch.det_hold = 0;
+            bewe_log_push(0,"[DETECT] CH%d released → %.4f-%.4f MHz\n", d.ch, d.s, d.e);
+        }
+    }
+    if(!det_pending.empty() && net_srv)
+        net_srv->broadcast_channel_sync(channels, MAX_CHANNELS);
+}
+
+// ── Detect 모드 토글 (CLI HOST) ──────────────────────────────────────────
+void FFTViewer::set_channel_detect(int ch_idx, bool on){
+    if(ch_idx < 0 || ch_idx >= MAX_CHANNELS) return;
+    Channel& ch = channels[ch_idx];
+    if(!ch.filter_active) return;
+    if(on){
+        if(ch.det_on.load()) return;
+        ch.det_s = ch.s; ch.det_e = ch.e;
+        ch.det_hold = 0;
+        ch.det_locked.store(false);
+        ch.det_on.store(true);
+        ch.sq_calibrated.store(false); ch.sq_calib_cnt = 0;
+        bewe_log_push(0,"[DETECT] CH%d armed %.4f-%.4f MHz\n", ch_idx, ch.det_s, ch.det_e);
+    } else {
+        if(!ch.det_on.load()) return;
+        bool was = ch.det_locked.load();
+        ch.det_on.store(false);
+        ch.det_locked.store(false);
+        ch.det_hold = 0;
+        if(was){
+            stop_dem(ch_idx);
+            ch.s = ch.det_s; ch.e = ch.det_e;
+            ch.mode = Channel::DM_NONE;
+            ch.sq_gate.store(false);
+        }
+        ch.sq_calibrated.store(false); ch.sq_calib_cnt = 0;
+        bewe_log_push(0,"[DETECT] CH%d disarmed\n", ch_idx);
+    }
+    if(net_srv) net_srv->broadcast_channel_sync(channels, MAX_CHANNELS);
 }
 
 // ── Signal handler ───────────────────────────────────────────────────────
@@ -579,6 +707,9 @@ void run_cli_host(){
         v.autoscale_active=true; v.autoscale_init=false;
         v.autoscale_accum.clear();
         v.sq_recalib_req.store(true, std::memory_order_relaxed);
+    };
+    srv->cb.on_set_ch_detect = [&](int idx, bool on){
+        v.set_channel_detect(idx, on);
     };
     srv->cb.on_toggle_tm_iq = [&](){
         bool cur=v.tm_iq_on.load();

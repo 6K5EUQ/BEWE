@@ -153,6 +153,7 @@ struct ServerCallbacks {
     std::function<void(int idx, int pan)>            on_set_ch_pan;
     std::function<void(int idx, float thr)>          on_set_sq_thresh;
     std::function<void()>                            on_set_autoscale;
+    std::function<void(int idx, bool on)>            on_set_ch_detect;
     std::function<void(int ch_idx, uint8_t op_idx, bool enable)> on_toggle_recv;
     std::function<void(int idx, float s, float e)>   on_update_ch_range;
     std::function<void()>                            on_toggle_tm_iq;

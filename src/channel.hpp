@@ -304,6 +304,15 @@ struct Channel {
     float sq_active_time = 0.0f; // 스컬치 열린 누적 시간(초)
     float sq_total_time  = 0.0f; // 전체 경과 시간 (프레임 기반 누적)
 
+    // ── 에너지 디텍션 (Detect 모드) ───────────────────────────────────────
+    // 복조 없는 채널을 선택하고 D키 → det_on. 그 채널 대역이 탐색 구간이 되고,
+    // 대역 안에서 sq_threshold 를 넘는 최강 구간이 나오면 s/e 를 그 폭으로 좁히고
+    // (det_locked) AM/FM 자동 복조 시작. 신호가 끊기면 원래 폭(det_s/det_e)으로 복귀.
+    std::atomic<bool> det_on{false};
+    std::atomic<bool> det_locked{false};
+    float det_s = 0, det_e = 0;   // 사용자가 그린 원래 탐색 대역 (복귀용)
+    int   det_hold = 0;           // lock 유지 홀드 카운터 (프레임)
+
     // ── 디코더 전용 게이트 (dec_gate) ─────────────────────────────────────
     // 오디오용 sq_gate 보다 훨씬 관대: EMA(sq_sig) 가 아닌 raw 행 peak 기준 +
     // thr-DEC_GATE_MARGIN_DB 임계 + 긴 hold. 무신호 구간에서 디코드 워커가
@@ -360,6 +369,9 @@ struct Channel {
         sq_gate_hold=0;
         sq_active_time=0; sq_total_time=0;
         dec_gate.store(true); dec_gate_until_ms.store(0);   // 디코더 게이트는 열림으로 리셋
+        // detect
+        det_on.store(false); det_locked.store(false);
+        det_s=0; det_e=0; det_hold=0;
         // drag state
         move_drag=false;
         move_anchor=0;

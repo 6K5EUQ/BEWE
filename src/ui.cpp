@@ -127,6 +127,12 @@ void FFTViewer::update_channel_squelch(){
         }
     }
 
+    // Detect 모드 채널의 s/e 변경 요청. start_dem/stop_dem 은 스레드 join 을 하므로
+    // data_mtx 를 쥔 채로 부르면 캡처 스레드를 그만큼 막는다 → 락 밖에서 적용한다.
+    struct DetApply { int ch; float s, e; bool lock; };
+    std::vector<DetApply> det_pending;
+
+    {
     std::lock_guard<std::mutex> lk(data_mtx);
     float cf_mhz = (float)(header.center_frequency / 1e6);
     float nyq_mhz = header.sample_rate / 2e6f;
@@ -151,14 +157,26 @@ void FFTViewer::update_channel_squelch(){
             : fft_size + (int)((rel_mhz / nyq_mhz) * hf);
         return std::max(0, std::min(fft_size - 1, bin));
     };
+    // freq_to_bin 의 역 — bin 인덱스 → 절대 MHz (Detect 가 run 경계를 주파수로 되돌릴 때 사용)
+    auto bin_to_freq = [&](int bin) -> float {
+        float rel = (bin <= hf) ? ((float)bin / (float)hf) * nyq_mhz
+                                : ((float)(bin - fft_size) / (float)hf) * nyq_mhz;
+        return cf_mhz + rel;
+    };
 
     for(int c = 0; c < MAX_CHANNELS; c++){
         Channel& ch = channels[c];
         if(!ch.filter_active) continue;
 
         // 채널 주파수 범위 > FFT 빈
-        float s_mhz = std::min(ch.s, ch.e) - cf_mhz;
-        float e_mhz = std::max(ch.s, ch.e) - cf_mhz;
+        // Detect 모드: 신호를 잡으면 s/e 가 신호 폭으로 좁아진다. 그 좁은 폭으로
+        // 스컬치를 재계산하면 임계값이 신호 자신을 물어 올라가 자기 신호를 못 보게 된다.
+        // → detect 채널은 항상 원래 탐색 대역(det_s/det_e) 기준으로 스컬치를 계산한다.
+        bool det = ch.det_on.load(std::memory_order_relaxed);
+        float scan_s = det ? ch.det_s : ch.s;
+        float scan_e = det ? ch.det_e : ch.e;
+        float s_mhz = std::min(scan_s, scan_e) - cf_mhz;
+        float e_mhz = std::max(scan_s, scan_e) - cf_mhz;
         int bin_s = freq_to_bin(s_mhz);
         int bin_e = freq_to_bin(e_mhz);
 
@@ -166,7 +184,7 @@ void FFTViewer::update_channel_squelch(){
         // 행·대역 둘 다 그대로면 캐시 재사용 (계산결과 동일 → 게이트/시간 동작 불변)
         float peak_db;
         if(same_row && ch.sq_calibrated.load(std::memory_order_relaxed)
-           && ch.sq_scan_s == ch.s && ch.sq_scan_e == ch.e){
+           && ch.sq_scan_s == scan_s && ch.sq_scan_e == scan_e){
             peak_db = ch.sq_cached_peak;
         } else {
             peak_db = -120.0f;
@@ -184,7 +202,7 @@ void FFTViewer::update_channel_squelch(){
                 }
             }
             ch.sq_cached_peak = peak_db;
-            ch.sq_scan_s = ch.s; ch.sq_scan_e = ch.e;
+            ch.sq_scan_s = scan_s; ch.sq_scan_e = scan_e;
         }
 
         // IIR 스무딩 (UI 프레임 기반, ~60fps)
@@ -227,6 +245,62 @@ void FFTViewer::update_channel_squelch(){
                     gate = false;
             }
         }
+        // ── 에너지 디텍션 (Detect 모드) ───────────────────────────────────
+        // 탐색 대역(det_s..det_e) 안에서 sq_threshold 를 넘는 연속 bin 구간(run)을 찾아
+        // 가장 강한 run 하나로 채널 s/e 를 좁힌다. 신호가 끊기면 원래 폭으로 되돌린다.
+        // 이 채널의 스컬치 게이트는 검출기가 대신하므로 우회(잡힌 동안 항상 열림).
+        // 새 FFT 행에서만 스캔 — 같은 행을 60fps 로 다시 훑는 것은 순수 낭비
+        if(det && !same_row && ch.sq_calibrated.load(std::memory_order_relaxed)){
+            float best_lo=0, best_hi=0, best_peak=-999.f;
+            {
+                // bin_s..bin_e 는 det_s/det_e 기준으로 이미 계산됨 (DC 랩 포함)
+                int n_bins = (bin_s <= bin_e) ? (bin_e-bin_s+1)
+                                              : (fft_size-bin_s) + (bin_e+1);
+                auto bin_at = [&](int k){ int b = bin_s + k; return (b >= fft_size) ? b-fft_size : b; };
+                int run_start=-1, gap=0;
+                float run_peak=-999.f;
+                // 짧은 갭은 이어붙임 — AM 반송파/사이드밴드 사이 딥에서 run 이 쪼개지는 것 방지
+                const int GAP_BINS = 2;
+                auto close_run = [&](int k_end){
+                    if(run_start < 0) return;
+                    if(run_peak > best_peak){
+                        best_peak = run_peak;
+                        best_lo = bin_to_freq(bin_at(run_start));
+                        best_hi = bin_to_freq(bin_at(k_end));
+                    }
+                    run_start=-1; run_peak=-999.f;
+                };
+                for(int k=0; k<n_bins; k++){
+                    float v_db = rowp[bin_at(k)];
+                    if(v_db >= thr){
+                        if(run_start < 0){ run_start = k; run_peak = -999.f; }
+                        if(v_db > run_peak) run_peak = v_db;
+                        gap = 0;
+                    } else if(run_start >= 0){
+                        if(++gap > GAP_BINS) close_run(k - gap);
+                    }
+                }
+                if(run_start >= 0) close_run(n_bins-1);
+            }
+            bool have = (best_peak > -999.f) && (best_hi > best_lo);
+            bool locked = ch.det_locked.load(std::memory_order_relaxed);
+            const int DET_HOLD_FRAMES = 18;   // 스컬치 홀드와 동일 (~0.3s) — 페이딩 시 채널 깜빡임 방지
+
+            if(have){
+                ch.det_hold = DET_HOLD_FRAMES;
+                // 잡은 대역이 프레임마다 1 bin 씩 떨면 재튜닝이 폭주한다 → 유의미한 변화만 반영
+                float bin_mhz = (nyq_mhz * 2.0f) / (float)fft_size;
+                if(!locked || fabsf(best_lo-ch.s) > bin_mhz || fabsf(best_hi-ch.e) > bin_mhz){
+                    det_pending.push_back({c, best_lo, best_hi, true});
+                }
+            } else if(locked && --ch.det_hold <= 0){
+                det_pending.push_back({c, ch.det_s, ch.det_e, false});
+            }
+        }
+        // 스컬치 우회 — 검출기가 게이트 역할. 잡고 있는 동안은 항상 열어 둔다.
+        // (스캔은 새 행에서만 하지만 게이트는 매 프레임 유지돼야 한다)
+        if(det && ch.det_locked.load(std::memory_order_relaxed)) gate = true;
+
         ch.sq_gate.store(gate, std::memory_order_relaxed);
 
         // ── 디코더 전용 게이트 (관대) ─────────────────────────────────────
@@ -270,6 +344,74 @@ void FFTViewer::update_channel_squelch(){
             ch.sq_total_time = 0;
         }
     }
+    }  // data_mtx 해제
+
+    // ── Detect 적용: 채널 폭 조정 + 복조 시작/정지 (락 밖) ────────────────
+    for(const auto& d : det_pending){
+        Channel& ch = channels[d.ch];
+        if(!ch.det_on.load(std::memory_order_relaxed)) continue;   // 그 사이 detect 꺼짐
+        if(d.lock){
+            // 항공 AM 대역(118~137MHz)이면 AM, 그 외는 FM — 하드코딩
+            float mid = (d.s + d.e) * 0.5f;
+            Channel::DemodMode md = (mid >= 118.0f && mid <= 137.0f)
+                                        ? Channel::DM_AM : Channel::DM_FM;
+            bool was = ch.det_locked.load(std::memory_order_relaxed);
+            stop_dem(d.ch, false);          // 재튜닝 — IQ-탭 디코더는 보존
+            ch.s = d.s; ch.e = d.e;
+            if(!was){
+                ch.audio_mask.store(0xFFFFFFFFu);
+                if(net_srv) srv_audio_mask[d.ch] = ch.audio_mask.load();
+                ch.det_locked.store(true, std::memory_order_relaxed);
+                bewe_log_push(0,"[DETECT] CH%d locked %.4f-%.4f MHz (%s)\n",
+                              d.ch, d.s, d.e, md==Channel::DM_AM?"AM":"FM");
+            }
+            start_dem(d.ch, md);
+        } else {
+            stop_dem(d.ch);                 // 신호 종료 — 디코더까지 정리
+            ch.s = d.s; ch.e = d.e;         // 원래 탐색 폭으로 복귀
+            ch.mode = Channel::DM_NONE;
+            ch.det_locked.store(false, std::memory_order_relaxed);
+            ch.sq_gate.store(false, std::memory_order_relaxed);
+            ch.det_hold = 0;
+            bewe_log_push(0,"[DETECT] CH%d released → %.4f-%.4f MHz\n", d.ch, d.s, d.e);
+        }
+    }
+    if(!det_pending.empty() && net_srv)
+        net_srv->broadcast_channel_sync(channels, MAX_CHANNELS);
+}
+
+// ── Detect 모드 토글 (HOST 로컬 적용) ─────────────────────────────────────
+// on : 현재 채널 폭을 탐색 대역으로 기억하고 감시 시작 (채널은 회색 그대로)
+// off: 신호를 잡고 있었으면 복조 정지 + 원래 폭 복귀
+void FFTViewer::set_channel_detect(int ch_idx, bool on){
+    if(ch_idx < 0 || ch_idx >= MAX_CHANNELS) return;
+    Channel& ch = channels[ch_idx];
+    if(!ch.filter_active) return;
+    if(on){
+        if(ch.det_on.load()) return;
+        ch.det_s = ch.s; ch.det_e = ch.e;
+        ch.det_hold = 0;
+        ch.det_locked.store(false);
+        ch.det_on.store(true);
+        // 탐색 대역이 바뀌었으므로 스컬치를 그 폭 기준으로 다시 잡는다
+        ch.sq_calibrated.store(false); ch.sq_calib_cnt = 0;
+        bewe_log_push(0,"[DETECT] CH%d armed %.4f-%.4f MHz\n", ch_idx, ch.det_s, ch.det_e);
+    } else {
+        if(!ch.det_on.load()) return;
+        bool was = ch.det_locked.load();
+        ch.det_on.store(false);
+        ch.det_locked.store(false);
+        ch.det_hold = 0;
+        if(was){
+            stop_dem(ch_idx);
+            ch.s = ch.det_s; ch.e = ch.det_e;
+            ch.mode = Channel::DM_NONE;
+            ch.sq_gate.store(false);
+        }
+        ch.sq_calibrated.store(false); ch.sq_calib_cnt = 0;
+        bewe_log_push(0,"[DETECT] CH%d disarmed\n", ch_idx);
+    }
+    if(net_srv) net_srv->broadcast_channel_sync(channels, MAX_CHANNELS);
 }
 
 // ── Channel overlays ──────────────────────────────────────────────────────
@@ -554,6 +696,11 @@ void FFTViewer::draw_all_channels(ImDrawList* dl, float gx, float gw, float gy, 
             // 녹음 중: 빨간색
             bord=IM_COL32(255, 60, 60,220);
             fill=IM_COL32(255, 60, 60, ch.selected?70:30);
+        } else if(ch.det_locked.load()){
+            // Detect 가 신호를 잡아 대역을 좁힌 상태: 핑크
+            // (감시 중인 detect 채널은 아래 "복조 없음" 분기로 떨어져 회색 유지)
+            bord=IM_COL32(255, 90,190,230);
+            fill=IM_COL32(255, 90,190, ch.selected?80:35);
         } else if(has_dec){
             // 디코더 활성(DEMOD): 보라색 — mode 무관 우선
             bord=IM_COL32(180, 80,255,220);
@@ -3336,6 +3483,11 @@ void run_streaming_viewer(){
                                             std::memory_order_relaxed);
                 v.channels[i].dem_paused.store(sync.ch[i].dem_paused != 0,
                                                std::memory_order_relaxed);
+                // Detect 상태 (검출·좁힘은 HOST 전담 — JOIN 은 표시용으로만 받는다)
+                v.channels[i].det_on.store(sync.ch[i].det_state != 0,
+                                           std::memory_order_relaxed);
+                v.channels[i].det_locked.store(sync.ch[i].det_state == 2,
+                                               std::memory_order_relaxed);
                 strncpy(v.channels[i].owner, sync.ch[i].owner_name, 31);
                 v.srv_audio_mask[i] = sync.ch[i].audio_mask; // 전체 서버 마스크 보존
                 // HOST 녹음 시간 동기화
@@ -4232,6 +4384,10 @@ void run_streaming_viewer(){
                 v.autoscale_active=true; v.autoscale_init=false;
                 v.autoscale_accum.clear();
                 v.sq_recalib_req.store(true, std::memory_order_relaxed);
+            };
+            srv->cb.on_set_ch_detect = [&](int idx, bool on){
+                bewe_log_push(0, "[CMD] CH%d detect %s\n", idx, on?"ON":"OFF");
+                v.set_channel_detect(idx, on);
             };
             srv->cb.on_toggle_tm_iq = [&](){
                 bool cur=v.tm_iq_on.load();
@@ -6452,11 +6608,25 @@ void run_streaming_viewer(){
            && !ImGui::IsAnyItemActive()){
             try_toggle(3, v.lwf_modal_open);
         }
-        // ── DEMOD 모듈 패널 토글 — D 키 (모듈 설치 시에만) ──
-        if(!bewe_modules().empty()
-           && ImGui::IsKeyPressed(ImGuiKey_D, false) && !io.WantTextInput
+        // ── D 키 ────────────────────────────────────────────────────────
+        // 복조가 걸리지 않은 채널이 선택돼 있으면 그 채널의 Detect(에너지 디텍션) 토글.
+        // 그 외에는 기존 동작 = DEMOD 모듈 패널 토글 (모듈 설치 시에만).
+        if(ImGui::IsKeyPressed(ImGuiKey_D, false) && !io.WantTextInput
            && !ImGui::IsAnyItemActive()){
-            try_toggle(6, v.demod_panel_open);
+            int dci = v.selected_ch;
+            // detect 가 켜져 있으면(신호를 잡아 복조 중이어도) 언제나 해제 대상.
+            // 꺼져 있으면 복조 없는 채널만 detect 켜기 대상.
+            bool det_target = (dci >= 0 && v.channels[dci].filter_active
+                               && (v.channels[dci].det_on.load()
+                                   || (!v.channels[dci].dem_run.load()
+                                       && v.channels[dci].mode == Channel::DM_NONE)));
+            if(det_target){
+                bool on = !v.channels[dci].det_on.load();
+                if(v.net_cli) v.net_cli->cmd_set_ch_detect(dci, on);
+                else          v.set_channel_detect(dci, on);
+            } else if(!bewe_modules().empty()){
+                try_toggle(6, v.demod_panel_open);
+            }
         }
         // ── Signal Library 토글 (L키) — 새 오버레이 ────
         if(!viewer_open_blocking && ImGui::IsKeyPressed(ImGuiKey_L, false) && !io.WantTextInput){
@@ -7032,7 +7202,11 @@ void run_streaming_viewer(){
                             int mi = mi_raw; if(mi<0||mi>3) mi=0;
                             // 디코더 활성이면 mode 무관 'DEMOD'/보라 우선 (HOST/LOCAL 한정)
                             bool has_dec = !is_holding && bewe_mod_ch_decode_on(v.remote_mode, ci);
-                            const char* mlabel = has_dec ? "DEMOD" : mnames[mi];
+                            // Detect: 감시 중이면 'DET', 신호를 잡으면 그때의 실제 모드(AM/FM) 표시
+                            bool det_armed  = !is_holding && ch.det_on.load() && !ch.det_locked.load();
+                            bool det_locked = !is_holding && ch.det_locked.load();
+                            const char* mlabel = has_dec ? "DEMOD"
+                                               : det_armed ? "DET" : mnames[mi];
 
                             // ── 채널 색상 (draw_all_channels와 동일) ──────
                             bool is_arec = !is_holding && ch.audio_rec_on.load();
@@ -7047,6 +7221,8 @@ void run_streaming_viewer(){
                                 mode_col=IM_COL32(120,120,140,255); // Holding: 어두운 회색
                             else if(is_irec||is_arec)
                                 mode_col=IM_COL32(255,60,60,255);
+                            else if(det_locked)
+                                mode_col=IM_COL32(255,90,190,255);  // Detect 검출 중: 핑크 (스펙트럼과 동일)
                             else if(has_dec)
                                 mode_col=IM_COL32(180,80,255,255);  // 디코더 활성(DEMOD): 보라 — mode 무관 우선
                             else if(!dem||ch.mode==Channel::DM_NONE)

@@ -265,6 +265,7 @@ enum class CmdType : uint8_t {
     REMOVE_SCHED    = 0x1F,  // JOIN → server: remove own scheduled entry
     SET_HW          = 0x21,  // JOIN → server: switch HOST SDR runtime ("bladerf"/"pluto"/"rtlsdr")
     TOGGLE_FFT_RECV = 0x22,  // JOIN → central: enable/disable FFT stream (audio/HB unaffected)
+    SET_CH_DETECT   = 0x23,  // JOIN → server: toggle energy-detect mode on channel
 };
 
 struct __attribute__((packed)) PktCmd {
@@ -300,6 +301,7 @@ struct __attribute__((packed)) PktCmd {
         struct { int64_t start_time; float freq_mhz; }             remove_sched;
         struct { char    name[16]; }                       set_hw;
         struct { uint8_t enable; }                         toggle_fft_recv;
+        struct { uint8_t idx; uint8_t enable; }            set_ch_detect;
         uint8_t raw[64];
     };
 };
@@ -352,7 +354,10 @@ struct __attribute__((packed)) ChSyncEntry {
     float    sq_sig;       // current signal level dB (for sq meter UI)
     uint8_t  sq_gate;      // squelch gate open (1=open)
     uint8_t  dem_paused;   // 1=Holding (out-of-range, demod paused)
-    uint8_t  _pad2[2];
+    // det_state: 0=off, 1=armed(감시중, 회색), 2=locked(신호 검출 → s/e 좁힘, 핑크)
+    // 구 _pad2[2] 자리 재사용 — 구조체 크기 불변이라 구버전 노드와 wire 호환 유지.
+    uint8_t  det_state;
+    uint8_t  _pad2;
     char     owner_name[32]; // channel creator ID
     // ── 녹음 상태 (HOST → JOIN 동기화) ──
     uint32_t iq_rec_secs;     // IQ 녹음 경과 시간 (초)

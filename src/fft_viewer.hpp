@@ -951,6 +951,10 @@ public:
     std::atomic<bool> sq_recalib_req{false};
     void update_channel_squelch();
 
+    // ── 에너지 디텍션 (Detect 모드) ────────────────────────────────────────
+    // 복조 없는 채널을 detect 모드로 전환/해제 (HOST 로컬 적용).
+    void set_channel_detect(int ch_idx, bool on);
+
     // ── demod.cpp ─────────────────────────────────────────────────────────
     void dem_worker(int ch_idx);
     void start_dem(int ch_idx, Channel::DemodMode mode);
