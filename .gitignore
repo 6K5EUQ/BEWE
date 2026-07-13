@@ -85,6 +85,8 @@ Thumbs.db
 # HOST 세션상태 (런타임, 머신별)
 host_state_*.json
 guard_zones_local.json
+# FFTW wisdom 캐시 (머신별 런타임 산출물 — 첫 실행 시 자동 생성)
+fftw_wisdom.f
 # BEAE AI 모듈 (venv 6.9GB torch — 코드만 추적)
 BEAE/ais/.venv/
 BEAE/ais/**/__pycache__/
@@ -94,6 +96,12 @@ BEAE/ais/data/aicap_*.bin
 BEAE/ais/data/ai.sock
 BEAE/ais/data/ai_status.json
 BEAE/ais/data/ai_daemon.log
+BEAE/ais/data/ai_model/*.bak
+BEAE/ais/data/ai_model/*.v*bak
+# few-shot 프로토타입 모듈 — 아직 실험 단계라 스냅샷·로그 전부 제외 (리포엔 코드만)
+BEAE/ais/data/ai_model_proto/
+# GUARD 런타임 출력 — 일자별 alert JSONL(실선박 MMSI·좌표)·데몬 로그. 공개 리포라 추적 금지.
+BEAE/ais/data/guard/
 # BEAE STT POC (venv + 러닝로그 — 코드만 추적)
 BEAE/stt/.venv/
 BEAE/stt/**/__pycache__/
