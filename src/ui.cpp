@@ -6588,9 +6588,6 @@ void run_streaming_viewer(){
                 if(v.net_srv) v.net_srv->broadcast_channel_sync(v.channels,MAX_CHANNELS);
             };
             if(ImGui::IsItemHovered()){
-                ImGui::SetTooltip(det_ch
-                    ? "Detect margin — 기준선보다 이만큼 높은 신호만 잡는다.\n낮출수록 민감(오검출↑), 높일수록 강한 신호만."
-                    : "Squelch threshold");
                 float wheel=ImGui::GetIO().MouseWheel;
                 if(wheel!=0.0f) apply_thr(thr_db+(wheel>0?STEP:-STEP));
             }
