@@ -306,6 +306,7 @@ void FFTViewer::capture_and_process_pluto(){
             texture_needs_recreate=true;
             // SR 변경 > 신호 크기 스케일이 달라질 수 있어 오토스케일 재트리거
             autoscale_accum.clear(); autoscale_init=false; autoscale_active=true;
+            autoscale_wp=0; autoscale_buf_full=false;
             sq_recalib_req.store(true, std::memory_order_relaxed);  // 노이즈플로어 변동 → 자동 스컬치 재캘리브
             // TM IQ 재시작 (Pluto는 모든 SR 허용 — 고 SR은 USB2 드롭 감수)
             if(tm_was_on){
@@ -330,21 +331,24 @@ void FFTViewer::capture_and_process_pluto(){
         }
 
         // 주파수 변경
-        if(freq_req && !freq_prog){
+        if(freq_req.load(std::memory_order_acquire) && !freq_prog){
             freq_prog=true;
-            pluto_cfg_attr_ll(lo, "frequency", (long long)(pending_cf * 1e6));
+            const float cf = pending_cf.load(std::memory_order_relaxed);
+            pluto_cfg_attr_ll(lo, "frequency", (long long)(cf * 1e6));
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             rx_pos=0; rx_avail=0;
             {std::lock_guard<std::mutex> lk(data_mtx);
-             header.center_frequency=(uint64_t)(pending_cf*1e6);}
-            live_cf_hz.store((uint64_t)(pending_cf*1e6), std::memory_order_release);
+             header.center_frequency=(uint64_t)(cf*1e6);}
+            live_cf_hz.store((uint64_t)(cf*1e6), std::memory_order_release);
             LongWaterfall::request_rotate();
-            bewe_log_push(0,"Freq > %.2f MHz\n", pending_cf);
+            bewe_log_push(0,"Freq > %.2f MHz\n", cf);
             autoscale_accum.clear(); autoscale_init=false; autoscale_active=true;
+            autoscale_wp=0; autoscale_buf_full=false;
+            autoscale_req.store(false, std::memory_order_relaxed);  // 방금 리셋했으니 중복 트리거 소거
             sq_recalib_req.store(true, std::memory_order_relaxed);  // 노이즈플로어 변동 → 자동 스컬치 재캘리브
             warmup_cnt=0;
-            update_dem_by_freq(pending_cf);
-            freq_req=false; freq_prog=false;
+            update_dem_by_freq(cf);
+            freq_req.store(false, std::memory_order_relaxed); freq_prog=false;
             continue;
         }
 
@@ -444,14 +448,18 @@ void FFTViewer::capture_and_process_pluto(){
                  // 비-캡처 스레드 요청 처리 (set_frequency/init) — 여기서만 autoscale 상태 변경 (레이스 X)
                  if(autoscale_req.exchange(false)){
                      autoscale_accum.clear(); autoscale_init=false; autoscale_active=true;
+                     autoscale_wp=0; autoscale_buf_full=false;
                      sq_recalib_req.store(true, std::memory_order_relaxed);  // 노이즈플로어 변동 → 자동 스컬치 재캘리브
                  }
                  if(autoscale_active){
+                     auto now_as=std::chrono::steady_clock::now();
+                     if(autoscale_start==std::chrono::steady_clock::time_point{})
+                         autoscale_start=now_as;   // 데드라인 기준 — 재트리거로 되감지 않는다
                      if(!autoscale_init){
                          size_t cap=(size_t)fft_size*100;
                          if(autoscale_accum.size()!=cap) autoscale_accum.assign(cap,0.0f);
                          autoscale_wp=0; autoscale_buf_full=false;
-                         autoscale_last=std::chrono::steady_clock::now();
+                         autoscale_last=now_as;
                          autoscale_init=true;
                      }
                      size_t cap=autoscale_accum.size();
@@ -459,8 +467,10 @@ void FFTViewer::capture_and_process_pluto(){
                          autoscale_accum[autoscale_wp]=rowp[i];
                          if(++autoscale_wp>=cap){ autoscale_wp=0; autoscale_buf_full=true; }
                      }
-                     float el=std::chrono::duration<float>(std::chrono::steady_clock::now()-autoscale_last).count();
-                     if(el>=1.0f&&(autoscale_buf_full||autoscale_wp>0)){
+                     float el=std::chrono::duration<float>(now_as-autoscale_last).count();
+                     float el_total=std::chrono::duration<float>(now_as-autoscale_start).count();
+                     bool  deadline=el_total>=AUTOSCALE_DEADLINE_S;   // 재트리거 폭주 시 강제 확정
+                     if((el>=1.0f||deadline)&&(autoscale_buf_full||autoscale_wp>0)){
                          size_t nn=autoscale_buf_full?cap:autoscale_wp;
                          std::vector<float> tmp(autoscale_accum.begin(),
                                                 autoscale_accum.begin()+(ptrdiff_t)nn);
@@ -474,10 +484,11 @@ void FFTViewer::capture_and_process_pluto(){
                              display_power_max=display_power_min+20.f;
                          header.power_min=display_power_min;
                          header.power_max=display_power_max;
-                         bewe_log_push(0,"[autoscale] noise=%.1f peak=%.1f → pmin=%.1f pmax=%.1f\n",
-                             noise, peak, display_power_min, display_power_max);
+                         bewe_log_push(0,"[autoscale]%s noise=%.1f peak=%.1f → pmin=%.1f pmax=%.1f\n",
+                             deadline?" (deadline)":"", noise, peak, display_power_min, display_power_max);
                          autoscale_active=false; autoscale_init=false;
                          autoscale_wp=0; autoscale_buf_full=false;
+                         autoscale_start=std::chrono::steady_clock::time_point{};
                          cached_sp_idx=-1;
                      }
                  }

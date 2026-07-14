@@ -127,7 +127,7 @@ void FFTViewer::sched_arm_entry(int idx){
     }
     float sdr_cf = e.freq_mhz + offset;
 
-    set_frequency(sdr_cf);
+    set_frequency(sdr_cf, /*wait=*/true);
     bewe_log_push(0, "[SCHED] ARM: SDR CF %.3f MHz (target %.3f + DC offset %.3f)\n",
                   sdr_cf, e.freq_mhz, offset);
 
@@ -137,7 +137,7 @@ void FFTViewer::sched_arm_entry(int idx){
     }
     if(slot < 0){
         e.status = SchedEntry::FAILED;
-        set_frequency(sched_saved_cf);
+        set_frequency(sched_saved_cf, /*wait=*/true);
         broadcast_sched_list_locked();
         bewe_log_push(0, "[SCHED] Failed: no free channel slot\n");
         return;
@@ -193,7 +193,7 @@ void FFTViewer::sched_begin_rec(int idx){
         bewe_log_push(0, "[SCHED] REC start failed: CH%d\n", slot);
         stop_dem(slot);
         channels[slot].reset_slot();
-        set_frequency(sched_saved_cf);
+        set_frequency(sched_saved_cf, /*wait=*/true);
         e.status = SchedEntry::FAILED;
         sched_active_idx = -1;
         if(net_srv) net_srv->broadcast_channel_sync(channels, MAX_CHANNELS);
@@ -231,7 +231,7 @@ void FFTViewer::sched_stop_entry(int idx){
         channels[slot].reset_slot();
 
     // Restore frequency
-    set_frequency(sched_saved_cf);
+    set_frequency(sched_saved_cf, /*wait=*/true);
     bewe_log_push(0, "[SCHED] Freq restored > %.3f MHz\n", sched_saved_cf);
 
     e.status = SchedEntry::DONE;

@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <rtl-sdr.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -150,31 +151,19 @@ bool FFTViewer::initialize_rtlsdr(float cf_mhz){
 }
 
 // ── 공통 주파수 변경 (BladeRF/RTL-SDR/Pluto) ──────────────────────────────
-void FFTViewer::set_frequency(float cf_mhz){
-    if(hw.type == HWType::BLADERF){
-        bladerf_set_frequency(dev_blade, BLADERF_CHANNEL_RX(0), (uint64_t)(cf_mhz*1e6));
-    } else if(hw.type == HWType::RTLSDR){
-        // Direct Sampling 자동 전환
-        if(cf_mhz < 24.0f)
-            rtlsdr_set_direct_sampling(dev_rtl, 2);
-        else
-            rtlsdr_set_direct_sampling(dev_rtl, 0);
-        rtlsdr_set_center_freq(dev_rtl, (uint32_t)(cf_mhz*1e6));
-    } else if(hw.type == HWType::PLUTO){
-        // Pluto는 capture_and_process_pluto 루프가 freq_req를 처리 (LO + header + log)
-        pending_cf = cf_mhz;
-        freq_req = true;
-        autoscale_req.store(true, std::memory_order_relaxed); // 캡처 스레드가 재트리거 (레이스 방지)
-        return;
-    }
-    {std::lock_guard<std::mutex> lk(data_mtx);
-     header.center_frequency=(uint64_t)(cf_mhz*1e6);}
-    live_cf_hz.store((uint64_t)(cf_mhz*1e6), std::memory_order_release);
-    bewe_log_push(0,"Freq > %.2f MHz\n", cf_mhz);
-    autoscale_req.store(true, std::memory_order_relaxed); // 캡처 스레드가 재트리거 (레이스 방지)
-    // 범위 밖 채널 Holding 전환 + JOIN에 CH_SYNC 브로드캐스트
-    update_dem_by_freq(cf_mhz);
-    LongWaterfall::request_rotate();   // CF changed (direct path) -> new file
+// 전 기종 캡처 스레드에 위임한다. 예전엔 RTL/BladeRF 만 호출 스레드에서 LO 를 직접
+// 때렸는데, 그러면 파이프에 남은 옛 LO 의 IQ 와 튜너 트랜지언트가 그대로 FFT 로 흘러가
+// autoscale 이 엉뚱한 스펙트럼을 평균낸다. 캡처루프의 freq_req 경로는 settling sleep +
+// 링버퍼 flush + warmup 재시작 + rotate + autoscale 리셋을 모두 갖추고 있으므로 그쪽으로
+// 통일한다. (autoscale_req 를 여기서 또 세우면 이중 트리거라 세우지 않는다.)
+void FFTViewer::set_frequency(float cf_mhz, bool wait){
+    pending_cf.store(cf_mhz, std::memory_order_relaxed);
+    freq_req.store(true, std::memory_order_release);
+    if(!wait) return;
+    // 캡처 스레드가 freq_req 를 내릴 때까지 대기 (settling sleep 포함해도 100ms 안쪽).
+    // 캡처 스레드가 죽었거나 멈춰 있으면 영영 안 내려가므로 상한을 둔다.
+    for(int i=0; i<200 && freq_req.load(std::memory_order_acquire); i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
 }
 
 // ── RTL-SDR 캡처 루프 ─────────────────────────────────────────────────────
@@ -293,6 +282,7 @@ void FFTViewer::capture_and_process_rtl(){
             texture_needs_recreate=true;
             // SR 변경 > 신호 크기 스케일이 달라질 수 있어 오토스케일 재트리거
             autoscale_accum.clear(); autoscale_init=false; autoscale_active=true;
+            autoscale_wp=0; autoscale_buf_full=false;
             sq_recalib_req.store(true, std::memory_order_relaxed);  // 노이즈플로어 변동 → 자동 스컬치 재캘리브
             // TM IQ가 켜져 있었으면 새 SR로 롤링 파일 재시작
             if(tm_was_on){
@@ -308,26 +298,29 @@ void FFTViewer::capture_and_process_rtl(){
         }
 
         // 주파수 변경 - set 후 한 사이클 쉬고 read_sync 재개 (RTL-SDR v4 USB 안정화)
-        if(freq_req && !freq_prog){
+        if(freq_req.load(std::memory_order_acquire) && !freq_prog){
             freq_prog=true;
+            const float cf = pending_cf.load(std::memory_order_relaxed);
             // Direct Sampling 자동 전환
-            if(pending_cf < 24.0f)
+            if(cf < 24.0f)
                 rtlsdr_set_direct_sampling(dev_rtl, 2);
             else
                 rtlsdr_set_direct_sampling(dev_rtl, 0);
-            rtlsdr_set_center_freq(dev_rtl, (uint32_t)(pending_cf*1e6));
+            rtlsdr_set_center_freq(dev_rtl, (uint32_t)(cf*1e6));
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             rx_pos=0; rx_avail=0;
             {std::lock_guard<std::mutex> lk(data_mtx);
-             header.center_frequency=(uint64_t)(pending_cf*1e6);}
-            live_cf_hz.store((uint64_t)(pending_cf*1e6), std::memory_order_release);
+             header.center_frequency=(uint64_t)(cf*1e6);}
+            live_cf_hz.store((uint64_t)(cf*1e6), std::memory_order_release);
             LongWaterfall::request_rotate();
-            bewe_log_push(0,"Freq > %.2f MHz\n", pending_cf);
+            bewe_log_push(0,"Freq > %.2f MHz\n", cf);
             autoscale_accum.clear(); autoscale_init=false; autoscale_active=true;
+            autoscale_wp=0; autoscale_buf_full=false;
+            autoscale_req.store(false, std::memory_order_relaxed);  // 방금 리셋했으니 중복 트리거 소거
             sq_recalib_req.store(true, std::memory_order_relaxed);  // 노이즈플로어 변동 → 자동 스컬치 재캘리브
             warmup_cnt=0;
-            update_dem_by_freq(pending_cf);
-            freq_req=false; freq_prog=false;
+            update_dem_by_freq(cf);
+            freq_req.store(false, std::memory_order_relaxed); freq_prog=false;
             continue; // read_sync 호출을 다음 사이클로 미룸
         }
 
@@ -423,14 +416,18 @@ void FFTViewer::capture_and_process_rtl(){
                  // 비-캡처 스레드 요청 처리 (set_frequency/init) — 여기서만 autoscale 상태 변경 (레이스 X)
                  if(autoscale_req.exchange(false)){
                      autoscale_accum.clear(); autoscale_init=false; autoscale_active=true;
+                     autoscale_wp=0; autoscale_buf_full=false;
                      sq_recalib_req.store(true, std::memory_order_relaxed);  // 노이즈플로어 변동 → 자동 스컬치 재캘리브
                  }
                  if(autoscale_active){
+                     auto now_as=std::chrono::steady_clock::now();
+                     if(autoscale_start==std::chrono::steady_clock::time_point{})
+                         autoscale_start=now_as;   // 데드라인 기준 — 재트리거로 되감지 않는다
                      if(!autoscale_init){
                          size_t cap=(size_t)fft_size*100;
                          if(autoscale_accum.size()!=cap) autoscale_accum.assign(cap,0.0f);
                          autoscale_wp=0; autoscale_buf_full=false;
-                         autoscale_last=std::chrono::steady_clock::now();
+                         autoscale_last=now_as;
                          autoscale_init=true;
                      }
                      size_t cap=autoscale_accum.size();
@@ -438,8 +435,10 @@ void FFTViewer::capture_and_process_rtl(){
                          autoscale_accum[autoscale_wp]=rowp[i];
                          if(++autoscale_wp>=cap){ autoscale_wp=0; autoscale_buf_full=true; }
                      }
-                     float el=std::chrono::duration<float>(std::chrono::steady_clock::now()-autoscale_last).count();
-                     if(el>=1.0f&&(autoscale_buf_full||autoscale_wp>0)){
+                     float el=std::chrono::duration<float>(now_as-autoscale_last).count();
+                     float el_total=std::chrono::duration<float>(now_as-autoscale_start).count();
+                     bool  deadline=el_total>=AUTOSCALE_DEADLINE_S;   // 재트리거 폭주 시 강제 확정
+                     if((el>=1.0f||deadline)&&(autoscale_buf_full||autoscale_wp>0)){
                          size_t n=autoscale_buf_full?cap:autoscale_wp;
                          std::vector<float> tmp(autoscale_accum.begin(),
                                                 autoscale_accum.begin()+(ptrdiff_t)n);
@@ -453,10 +452,11 @@ void FFTViewer::capture_and_process_rtl(){
                              display_power_max=display_power_min+20.f;
                          header.power_min=display_power_min;
                          header.power_max=display_power_max;
-                         bewe_log_push(0,"[autoscale] noise=%.1f peak=%.1f → pmin=%.1f pmax=%.1f\n",
-                             noise, peak, display_power_min, display_power_max);
+                         bewe_log_push(0,"[autoscale]%s noise=%.1f peak=%.1f → pmin=%.1f pmax=%.1f\n",
+                             deadline?" (deadline)":"", noise, peak, display_power_min, display_power_max);
                          autoscale_active=false; autoscale_init=false;
                          autoscale_wp=0; autoscale_buf_full=false;
+                         autoscale_start=std::chrono::steady_clock::time_point{};
                          cached_sp_idx=-1;
                      }
                  }

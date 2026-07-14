@@ -668,6 +668,11 @@ public:
     bool               autoscale_buf_full=false;
     std::chrono::steady_clock::time_point autoscale_last;
     std::chrono::steady_clock::time_point autoscale_check_last{};  // 10s 천장초과 감시 타이머
+    // 데드라인 — autoscale 이 "처음" 켜진 시각. 재트리거는 autoscale_last(1초 창)만 되감고
+    // 이건 건드리지 않는다. 주파수축 드래그처럼 매 프레임 재트리거가 쏟아지면 1초 창이
+    // 영영 못 차서 autoscale 이 굶어죽는데, 이 데드라인이 지나면 모인 만큼으로 강제 확정한다.
+    std::chrono::steady_clock::time_point autoscale_start{};
+    static constexpr float AUTOSCALE_DEADLINE_S = 6.0f;
     bool  autoscale_init=false, autoscale_active=true;
     // 비-캡처 스레드(set_frequency/init)가 autoscale 재트리거를 요청 → 캡처 스레드가 처리.
     // autoscale_accum/active/init 를 캡처 스레드 밖에서 직접 건드리면 레이스 → 이 플래그로 위임.
@@ -853,7 +858,12 @@ public:
     int   total_ffts=0;
     std::string window_title;
     std::mutex  data_mtx;
-    float pending_cf=0; bool freq_req=false, freq_prog=false;
+    // 주파수 변경 요청 — 비-캡처 스레드(UI/네트워크/스케줄)가 세우고 캡처 스레드가 처리한다.
+    // plain bool/float 이면 캡처 hot loop 가 레지스터에 들고 있어 요청을 영영 못 볼 수 있다.
+    // freq_prog 는 캡처 스레드 전용 (진행중 표시).
+    std::atomic<float> pending_cf{0.f};
+    std::atomic<bool>  freq_req{false};
+    bool  freq_prog=false;
     bool  sc8_mode=false; // SC8_Q7 모드 (122.88 MSPS)
     std::atomic<uint64_t> live_cf_hz{0};  // 스레드 안전 현재 중심주파수 (Hz)
 
@@ -947,7 +957,9 @@ public:
     void capture_and_process();
     void capture_and_process_rtl();
     void capture_and_process_pluto();
-    void set_frequency(float cf_mhz);
+    // 캡처 스레드에 LO 변경을 위임한다. wait=true 면 캡처 스레드가 실제로 적용할 때까지
+    // 블록한다 (스케줄 녹화처럼 "바뀐 주파수로" 곧바로 녹화를 시작하는 호출자용).
+    void set_frequency(float cf_mhz, bool wait=false);
     void set_gain(float db);
     float gain_db = 0.0f;
 

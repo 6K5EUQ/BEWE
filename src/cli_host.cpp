@@ -2486,6 +2486,8 @@ void run_cli_host(){
                         v.set_gain(v.gain_db);
                         if(v.hw.type == HWType::BLADERF)
                             cap = std::thread(&FFTViewer::capture_and_process, &v);
+                        else if(v.hw.type == HWType::PLUTO)
+                            cap = std::thread(&FFTViewer::capture_and_process_pluto, &v);
                         else
                             cap = std::thread(&FFTViewer::capture_and_process_rtl, &v);
                         v.mix_stop.store(false);

@@ -2124,9 +2124,13 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
                 float mhz_per_px = (de2 - ds2) / gw;
                 float new_cf = freq_drag_start_cf - dx * mhz_per_px;
                 if(new_cf < 0.1f) new_cf = 0.1f;
-                // 캡처 스레드에 주파수 변경 요청 (블로킹 방지)
-                pending_cf = new_cf;
-                freq_req = true;
+                // 캡처 스레드에 주파수 변경 요청 (블로킹 방지).
+                // 값이 실제로 바뀐 프레임에만 올린다 — 마우스를 안 움직여도 매 프레임
+                // 재요청하면 캡처루프가 그때마다 autoscale 을 리셋해 완주를 못 한다.
+                if(fabsf(new_cf - pending_cf.load(std::memory_order_relaxed)) > 1e-4f){
+                    pending_cf.store(new_cf, std::memory_order_relaxed);
+                    freq_req.store(true, std::memory_order_release);
+                }
             } else {
                 freq_drag_active = false;
             }
@@ -5756,6 +5760,8 @@ void run_streaming_viewer(){
                     v.set_gain(v.gain_db);
                     if(v.hw.type == HWType::BLADERF)
                         cap = std::thread(&FFTViewer::capture_and_process, &v);
+                    else if(v.hw.type == HWType::PLUTO)
+                        cap = std::thread(&FFTViewer::capture_and_process_pluto, &v);
                     else
                         cap = std::thread(&FFTViewer::capture_and_process_rtl, &v);
                     v.mix_stop.store(false);
@@ -6473,11 +6479,9 @@ void run_streaming_viewer(){
                 v.net_cli->cmd_set_freq(new_freq);
                 v.net_cli->cmd_set_autoscale();
             } else {
-                // autoscale 상태(active/init/accum)는 캡처 스레드 소유다. UI 스레드가
-                // 직접 쓰면 plain bool 쓰기가 유실되거나(캡처루프가 못 봄) accum.clear()가
-                // autoscale_wp 를 남겨둬 size 0 벡터에 인덱스 쓰기가 난다. atomic req 로 위임.
-                v.pending_cf=new_freq; v.freq_req=true;
-                v.autoscale_req.store(true, std::memory_order_relaxed);
+                // 캡처 스레드에 위임 — LO 튜닝·settling·autoscale 리셋을 전부 거기서 한다.
+                // (autoscale 상태를 UI 스레드가 직접 쓰면 캡처루프가 그 쓰기를 못 볼 수 있다.)
+                v.set_frequency(new_freq);
             }
             fdeact=true;
         }
