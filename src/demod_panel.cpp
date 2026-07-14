@@ -94,14 +94,14 @@ static void draw_targets(FFTViewer& v){
     }
 
     // 채널 행 통합 (key = station|ch). freq/mode 는 채널 고유, running = decode_on 인 모듈.
-    struct Row{ std::string station; int ch; uint8_t mode; float lo,hi; int running; int hold; float cf_mhz, sr_msps; int dnum; uint32_t dcount, druns; };
+    struct Row{ std::string station; int ch; uint8_t mode; float lo,hi; int running; int hold; float cf_mhz, sr_msps; int dnum; uint32_t dcount, druns; uint8_t det; };
     std::vector<Row> rows;
     for(int mi:dm){
         auto ts = bewe_mod_targets(v, mods[mi].id);
         for(auto& e : ts){
             Row* r=nullptr;
             for(auto& x:rows) if(x.ch==(int)e.ch && x.station==e.station){ r=&x; break; }
-            if(!r){ rows.push_back({e.station,(int)e.ch,e.mode,e.lo,e.hi,-1,(int)e.hold,e.cf_mhz,e.sr_msps,(int)e.dnum,e.dec_count,e.dec_runtime_s}); r=&rows.back(); }
+            if(!r){ rows.push_back({e.station,(int)e.ch,e.mode,e.lo,e.hi,-1,(int)e.hold,e.cf_mhz,e.sr_msps,(int)e.dnum,e.dec_count,e.dec_runtime_s,e.det}); r=&rows.back(); }
             if(e.decode_on) r->running = mi;
             if(e.dec_count) r->dcount = e.dec_count;          // 디코드 통계 = 채널 단위(어느 모듈 행이든 동일)
             if(e.dec_runtime_s) r->druns = e.dec_runtime_s;
@@ -258,16 +258,23 @@ static void draw_targets(FFTViewer& v){
               char db[24]; snprintf(db,sizeof(db),"%.1f",bw*1000.f); overlay_ctr_input(db, ImGui::GetColorU32(ImGuiCol_Text));
               if(ImGui::IsItemDeactivatedAfterEdit() && bwk>0.f){
                   float nb=bwk/1000.f; bewe_mod_edit_ch(v, r.station.c_str(), r.ch, r.mode, cf-nb*0.5f, cf+nb*0.5f); } }
-            // ── Mode 편집 ── 디코더 활성이면 라벨 'DEMOD'/보라 (mode 무관 우선; 콤보는 여전히 AM/FM 편집 가능)
+            // ── Mode 편집 ──
+            // detect armed(아직 신호 못 잡음) → 'DETECT'/보라: 지금 뭘 복조할지 정해지지 않은
+            //   상태라 AM/FM 을 보여주는 게 거짓말이다. 신호를 잡으면(det==2) 그때 정해진
+            //   AM/FM 이 뜬다.
+            // 디코더 활성 → 'DEMOD'/보라 (기존 동작).
+            // 콤보는 어느 경우든 AM/FM 편집 가능.
             ImGui::TableSetColumnIndex(3);
             { int cm=r.mode<3?r.mode:0; ImGui::SetNextItemWidth(-1);
-              bool dec_on = (r.running>=0);
-              const char* mlbl = dec_on ? "DEMOD" : mode_name((uint8_t)cm);
-              ImU32 mcol = dec_on ? IM_COL32(180,80,255,255) : ImGui::GetColorU32(ImGuiCol_Text);
-              if(dec_on) ImGui::PushStyleColor(ImGuiCol_Text, mcol);
+              bool dec_on  = (r.running>=0);
+              bool det_arm = (r.det==1);          // armed, 아직 lock 전
+              const char* mlbl = det_arm ? "DETECT" : (dec_on ? "DEMOD" : mode_name((uint8_t)cm));
+              bool tint = det_arm || dec_on;
+              ImU32 mcol = tint ? IM_COL32(180,80,255,255) : ImGui::GetColorU32(ImGuiCol_Text);
+              if(tint) ImGui::PushStyleColor(ImGuiCol_Text, mcol);
               bool mo=ImGui::BeginCombo("##md", mlbl);
               overlay_ctr_combo(mlbl, mcol);
-              if(dec_on) ImGui::PopStyleColor();
+              if(tint) ImGui::PopStyleColor();
               if(mo){
                   for(int k=0;k<3;k++){ bool s=(k==cm);
                       if(ImGui::Selectable(mode_name((uint8_t)k),s) && !s)
@@ -289,9 +296,14 @@ static void draw_targets(FFTViewer& v){
             bool stt_not_ready = false;
             if(stt_dec && is_local && r.ch>=0 && r.ch<MAX_CHANNELS && !v.channels[r.ch].stt_ready.load())
                 stt_not_ready = true;
-            if(stt_not_ready){ ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f,0.85f,0.30f,1.f)); cell_ctr("READY"); ImGui::PopStyleColor(); }
-            else if(run_live){ ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f,0.95f,0.45f,1.f)); cell_ctr("RUN");  ImGui::PopStyleColor(); }
-            else             { ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f,0.5f,0.56f,1.f));   cell_ctr("idle"); ImGui::PopStyleColor(); }
+            // detect 채널은 idle 대신 탐색/검출 상태를 보여준다 (decode 가 실제로 도는 RUN 은 그대로 우선).
+            //   SCAN(노랑)   = armed, 대역을 훑는 중 — 아직 신호 없음
+            //   LOCKED(초록) = 신호를 잡아 필터가 그 폭으로 좁혀진 상태
+            if(stt_not_ready){ ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f,0.85f,0.30f,1.f)); cell_ctr("READY");  ImGui::PopStyleColor(); }
+            else if(run_live){ ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f,0.95f,0.45f,1.f)); cell_ctr("RUN");    ImGui::PopStyleColor(); }
+            else if(r.det==2){ ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f,0.95f,0.45f,1.f)); cell_ctr("LOCKED"); ImGui::PopStyleColor(); }
+            else if(r.det==1){ ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f,0.85f,0.30f,1.f)); cell_ctr("SCAN");   ImGui::PopStyleColor(); }
+            else             { ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f,0.5f,0.56f,1.f));   cell_ctr("idle");   ImGui::PopStyleColor(); }
             // ── Data: 누적 수신 메시지 (###,###msg) — HOST 측정값 (Central 경유, 전 뷰어 동일) ──
             ImGui::TableSetColumnIndex(6);
             if(r.running>=0){

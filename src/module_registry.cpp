@@ -661,6 +661,8 @@ std::vector<MpChEntry> bewe_mod_targets(FFTViewer& v, const char* id){
         e.dnum = (uint8_t)v.freq_sorted_display_num(i);   // State창/스펙트럼 라벨과 동일 번호
         e.lo = ch.s; e.hi = ch.e;
         e.cf_mhz = cf_mhz; e.sr_msps = sr_msps;
+        e.det = ch.det_on.load(std::memory_order_relaxed)
+                    ? (ch.det_locked.load(std::memory_order_relaxed) ? 2 : 1) : 0;
         { uint32_t dc=0,dr=0; bewe_mod_host_ch_decstat(i,dc,dr); e.dec_count=dc; e.dec_runtime_s=dr; }  // HOST GUI: 자기 측정 통계
         out.push_back(e);
     }

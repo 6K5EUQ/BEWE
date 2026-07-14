@@ -388,7 +388,12 @@ void FFTViewer::update_channel_squelch(){
             }
             start_dem(d.ch, md);
         } else {
-            stop_dem(d.ch);
+            // 신호 종료 → 오디오 복조만 정지하고 **디코더는 보존**한다 (stop_decoders=false).
+            // detect 채널에 decode 를 걸어두는 것이 주 용도다 — 예: AIS 두 주파수를 한 detect
+            // 필터로 덮고 decode=ais 를 걸어두면, 버스트가 뜰 때마다 그 주파수로 폭이 좁혀지고
+            // 디코더가 그대로 따라간다. 여기서 디코더를 죽이면 교신이 끝날 때마다 워커가
+            // 재시작돼 다음 버스트 앞부분을 놓친다.
+            stop_dem(d.ch, false);
             ch.s = d.s; ch.e = d.e;
             ch.mode = Channel::DM_NONE;
             ch.det_locked.store(false, std::memory_order_relaxed);

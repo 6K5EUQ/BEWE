@@ -2099,6 +2099,7 @@ void CentralServer::handle_join_module_pipe(std::shared_ptr<JoinEntry> je,
                 e.dnum = (uint8_t)rank;
                 e.cf_mhz = cf_mhz; e.sr_msps = sr_msps;
                 e.dec_count = ent[i].dec_count; e.dec_runtime_s = ent[i].dec_runtime_s;  // HOST 디코드 통계 릴레이
+                e.det = ent[i].det_state;   // 0=off 1=armed 2=locked — demod 패널 Mode/State 표시용
                 list.push_back(e);
             }
         }

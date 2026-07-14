@@ -487,7 +487,10 @@ void FFTViewer::update_channel_squelch(){
             }
             start_dem(d.ch, md);
         } else {
-            stop_dem(d.ch);                 // 신호 종료 — 디코더까지 정리
+            // 신호 종료 → 오디오 복조만 정지하고 디코더는 보존 (stop_decoders=false).
+            // detect + decode 조합이 주 용도다 (예: AIS 두 주파수를 한 필터로 덮고 decode=ais).
+            // 여기서 디코더를 죽이면 교신마다 워커가 재시작돼 다음 버스트 앞부분을 놓친다.
+            stop_dem(d.ch, false);
             ch.s = d.s; ch.e = d.e;         // 원래 탐색 폭으로 복귀
             ch.mode = Channel::DM_NONE;
             ch.det_locked.store(false, std::memory_order_relaxed);

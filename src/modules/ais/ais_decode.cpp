@@ -57,10 +57,13 @@ void worker(FFTViewer& v, int ch_idx){
 
     Oscillator osc; osc.set_freq((double)off_hz, (double)msr);
     uint64_t prev_cf = init_cf;
+    float prev_s = ch.s, prev_e = ch.e;   // 채널 폭 추종용 (detect 가 s/e 를 움직인다)
     // 데시메이션 전 anti-alias LPF: cutoff = min(채널BW/2, out_sr*0.45)
     IIR1 lpi[4], lpq[4];
+    float lp_cn = 0.f;                    // 현재 LPF 정규화 컷오프 (재설정 판정용)
     { float cut = std::min(bw_hz*0.5f, out_sr*0.45f);
       float cn = cut/(float)msr; if(cn>0.45f)cn=0.45f; if(cn<0.005f)cn=0.005f;
+      lp_cn = cn;
       for(int k=0;k<4;k++){ lpi[k].set(cn); lpq[k].set(cn); } }
     double dec_i=0, dec_q=0; uint32_t dec_cnt=0;
 
@@ -155,10 +158,32 @@ void worker(FFTViewer& v, int ch_idx){
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             continue;
         }
+        // 튜닝 추종: SDR 중심주파수(cf) 변경 **또는 채널 s/e 변경**.
+        // detect 채널은 버스트를 잡을 때마다 s/e 를 그 신호 폭으로 좁혔다가 놓으면 원래
+        // 탐색 폭으로 되돌린다 — 초당 여러 번 움직일 수 있다. 따라가지 않으면 믹서가 옛
+        // 중심을 가리킨 채라 좁혀진 주파수의 신호를 복조하지 못한다 (AIS 두 주파수를 한
+        // detect 필터로 덮는 용법: 161.975 ↔ 162.025 를 오가면 중심이 50 kHz 이동한다).
+        //
+        // 믹서는 매번 다시 잡는다 (sin/cos 두 번 — 초당 몇 번이든 무시 가능).
+        // LPF 는 **컷오프가 실제로 달라질 때만** 다시 잡는다: AIS 는 버스트 폭이 늘 ~25 kHz
+        // 라 lock/release 를 반복해도 컷오프가 사실상 같다 → 계수 재계산이 아예 안 돈다.
+        // decim/out_sr/PLLINC 은 msr 에만 의존하므로 폭과 무관하게 불변 — DPLL/FIR 상태를
+        // 버릴 이유도 없다.
         { uint64_t cur=v.live_cf_hz.load(std::memory_order_acquire);
-          if(cur!=prev_cf){
-              off_hz=(((ch.s+ch.e)/2.0f)-(float)(cur/1e6f))*1e6f;
-              osc.set_freq((double)off_hz,(double)msr); prev_cf=cur;
+          float cs = ch.s, ce = ch.e;
+          if(cur != prev_cf || cs != prev_s || ce != prev_e){
+              off_hz=(((cs+ce)/2.0f)-(float)(cur/1e6f))*1e6f;
+              osc.set_freq((double)off_hz,(double)msr);
+              prev_cf=cur; prev_s=cs; prev_e=ce;
+
+              float nbw = fabsf(ce-cs)*1e6f;
+              float cut = std::min(nbw*0.5f, out_sr*0.45f);
+              float cn = cut/(float)msr; if(cn>0.45f)cn=0.45f; if(cn<0.005f)cn=0.005f;
+              // 1% 이상 달라질 때만 계수 재계산 (같은 폭으로 다시 잡는 낭비 방지)
+              if(fabsf(cn - lp_cn) > lp_cn*0.01f){
+                  lp_cn = cn; bw_hz = nbw;
+                  for(int k=0;k<4;k++){ lpi[k].set(cn); lpq[k].set(cn); }
+              }
           }
         }
         size_t wp=v.ring_wp.load(std::memory_order_acquire);
