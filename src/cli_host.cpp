@@ -195,6 +195,7 @@ void FFTViewer::update_channel_squelch(){
                     bewe_log_push(0,"[DETECT] CH%d baseline ready (%d bins)\n", c, n_bins);
             }
             float best_lo=0, best_hi=0, best_snr=-999.f;
+            const bool locked = ch.det_locked.load(std::memory_order_relaxed);
             if(base_ok){
                 int run_start=-1, gap=0;
                 float run_snr=-999.f;
@@ -202,12 +203,25 @@ void FFTViewer::update_channel_squelch(){
                 // 주파수로 정한다 — bin 폭이 설정마다 달라 나란한 두 교신이 묶이는 것을 막는다.
                 float bin_hz = (float)header.sample_rate / (float)std::max(1, fft_size);
                 const int GAP_BINS = std::max(1, (int)(DET_GAP_KHZ * 1000.0f / std::max(1.0f, bin_hz)));
+                // lock 중에는 "지금 듣고 있는 그 신호"만 따라간다. 대역 어딘가에서 더 센 신호가
+                // 떠도 그건 별개 교신이므로 무시 — 안 그러면 그 run 이 best 가 되고, 아래 확장
+                // 분기가 min/max 로 두 신호를 다 덮어 필터가 통째로 벌어진다 (두 신호가 동시에
+                // 들림). 잠긴 대역에 겹치거나 가드밴드만큼 인접한 run 만 후보로 인정한다 —
+                // 같은 교신의 사이드밴드는 붙어 있고, 다른 교신은 떨어져 있다.
+                // 신호가 끝나 release 되면 다음 프레임부터 다시 대역 전체를 본다.
+                const float NEAR_MHZ = DET_GAP_KHZ * 0.001f;
                 auto close_run = [&](int k_end){
                     if(run_start < 0) return;
                     if(k_end - run_start + 1 >= DET_MIN_RUN_BINS && run_snr > best_snr){
-                        best_snr = run_snr;
-                        best_lo = bin_to_freq(bin_at(run_start));
-                        best_hi = bin_to_freq(bin_at(k_end));
+                        float lo = bin_to_freq(bin_at(run_start));
+                        float hi = bin_to_freq(bin_at(k_end));
+                        bool adjacent = !locked ||
+                                        (hi >= ch.s - NEAR_MHZ && lo <= ch.e + NEAR_MHZ);
+                        if(adjacent){
+                            best_snr = run_snr;
+                            best_lo = lo;
+                            best_hi = hi;
+                        }
                     }
                     run_start=-1; run_snr=-999.f;
                 };
@@ -227,7 +241,6 @@ void FFTViewer::update_channel_squelch(){
                 if(run_start >= 0) close_run(n_bins-1);
             }
             bool have = (best_snr > -999.f) && (best_hi > best_lo);
-            bool locked = ch.det_locked.load(std::memory_order_relaxed);
             const int   DET_HOLD_FRAMES   = 18;
             const float DET_GUARD_MHZ     = 0.002f;  // 2 kHz 가드밴드
             const int   DET_EXPAND_FRAMES = 3;       // 확장은 연속 관측 시에만 (스파이크 방어)

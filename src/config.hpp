@@ -88,7 +88,7 @@
 // (필드를 재사용하니 와이어/host_state 포맷이 그대로다. 슬라이더·CH_SYNC·저장이 전부
 //  기존 경로를 탄다.) 자동 캘리브레이션은 detect 채널을 건너뛴다 — 안 그러면 마진값을
 // 절대 dB 로 덮어쓴다.
-#define DET_MARGIN_DEF_DB      8.0f   // arm 시 기본 마진
+#define DET_MARGIN_DEF_DB      10.0f  // arm 시 기본 마진
 #define DET_MARGIN_MIN_DB      0.0f
 #define DET_MARGIN_MAX_DB      40.0f
 
