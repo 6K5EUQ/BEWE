@@ -312,23 +312,37 @@ void NetClient::handle_packet(PacketType type,
         auto* fh = reinterpret_cast<const PktFftFrame*>(payload);
         bool quantized = (fh->fft_size & FFT_FLAG_QUANT_U8) != 0;
         bool zstd_c    = (fh->fft_size & FFT_FLAG_ZSTD) != 0;
+        bool u6_c      = (fh->fft_size & FFT_FLAG_QUANT_U6) != 0;
         uint32_t real_fft_size = fh->fft_size & FFT_FFT_SIZE_MASK;
         uint32_t data_bytes = len - (uint32_t)sizeof(PktFftFrame);
         const size_t hsz = sizeof(PktFftFrame);
-        // zstd 는 uint8 양자화본만 감싼다 → 해제 후 uint8[real_fft_size]. u8src 로 통일.
+        // 레이어 순서(송신): uint8 양자화 → [6bit 팩] → [zstd]. 수신은 역순으로 벗긴다.
+        // u6_c 면 zstd 해제본이 6bit 팩(u6_packed_bytes) 이므로 unpack 해 uint8 로 되돌린다.
+        const size_t inner = u6_c ? u6_packed_bytes(real_fft_size) : (size_t)real_fft_size;
         const uint8_t* u8src = nullptr;   // quantized 일 때 uint8[real_fft_size] 를 가리킴
         static thread_local std::vector<uint8_t> zdec;   // recv 스레드 단독 → thread_local 안전
+        static thread_local std::vector<uint8_t> u6dec;
+        const uint8_t* packed = nullptr;  // 6bit 팩 바이트열 (u6_c 일 때)
         if(zstd_c){
             if(!quantized) break;                        // zstd 는 항상 quantized 위에만
-            zdec.resize(real_fft_size);
-            size_t d = ZSTD_decompress(zdec.data(), real_fft_size, payload + hsz, data_bytes);
-            if(ZSTD_isError(d) || d != real_fft_size) break;
-            u8src = zdec.data();
+            zdec.resize(inner);
+            size_t d = ZSTD_decompress(zdec.data(), inner, payload + hsz, data_bytes);
+            if(ZSTD_isError(d) || d != inner) break;
+            packed = zdec.data();
         } else if(quantized){
-            if(data_bytes != real_fft_size) break;       // uint8 1 byte/bin
-            u8src = payload + hsz;
+            if(data_bytes != inner) break;               // 팩본(또는 uint8 1B/bin) 길이 일치
+            packed = payload + hsz;
         } else {
             if(data_bytes != real_fft_size * (uint32_t)sizeof(float)) break;
+        }
+        if(quantized){
+            if(u6_c){
+                u6dec.resize(real_fft_size);
+                u6_unpack(packed, real_fft_size, u6dec.data());
+                u8src = u6dec.data();
+            } else {
+                u8src = packed;
+            }
         }
         uint32_t fis = host_fft_input_size.load(std::memory_order_relaxed);
 

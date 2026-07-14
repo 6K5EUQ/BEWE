@@ -218,10 +218,44 @@ struct __attribute__((packed)) PktAuthAck {
 //     ZSTD 는 QUANT_U8 위에만 얹힘 (uint8[fft_size] 를 압축) — 둘 다 set 이 정상.
 //     수신측은 ZSTD_decompress → uint8[fft_size] → 기존 dequant. HOST+JOIN 만 관여
 //     (Central 은 payload opaque 릴레이). 구 JOIN 은 이 프레임을 조용히 버림 → v12 major.
+//   bit29 FFT_FLAG_QUANT_U6: uint8 양자화본을 다시 6bit 로 팩한 것 (v13.2).
+//     8bit(0.39dB/step) → 6bit(1.6dB/step). 실측 오차 평균 0.59dB — 워터폴 시각 손실 무시가능.
+//     zstd 가 6bit 팩본을 훨씬 잘 압축 (2.22x → 3.76x). QUANT_U8|ZSTD 와 항상 함께 set.
+//     구 JOIN 은 이 flag 를 모르지만 payload 길이가 fft_size 와 달라 프레임을 조용히 버린다.
 //   두 플래그 clear 시 기존 float32 payload (구버전 호환).
 static constexpr uint32_t FFT_FLAG_QUANT_U8 = 0x80000000u;
 static constexpr uint32_t FFT_FLAG_ZSTD     = 0x40000000u;
-static constexpr uint32_t FFT_FFT_SIZE_MASK = 0x3FFFFFFFu;
+static constexpr uint32_t FFT_FLAG_QUANT_U6 = 0x20000000u;
+static constexpr uint32_t FFT_FFT_SIZE_MASK = 0x1FFFFFFFu;
+
+// ── 6bit 팩/언팩 (uint8 양자화본 ↔ 6bit 비트스트림) ───────────────────────
+// HOST(송신) / JOIN(수신) / Central(HIST 아카이브) 공용.
+// 팩: 각 uint8 의 상위 6bit 만 남겨 연속 비트스트림으로. n 개 → (n*6+7)/8 바이트.
+// 언팩: 6bit v → uint8 로 되돌림 (v<<2 | v>>4) — 0..63 을 0..255 로 균등 신장.
+static inline size_t u6_packed_bytes(size_t n){ return (n * 6 + 7) / 8; }
+
+static inline void u6_pack(const uint8_t* src, size_t n, uint8_t* dst){
+    memset(dst, 0, u6_packed_bytes(n));
+    for(size_t i = 0; i < n; i++){
+        uint32_t v = (uint32_t)(src[i] >> 2);          // 8bit → 6bit
+        size_t   b = i * 6;
+        for(int k = 0; k < 6; k++)
+            if(v & (1u << (5 - k)))
+                dst[(b + k) >> 3] |= (uint8_t)(0x80 >> ((b + k) & 7));
+    }
+}
+
+static inline void u6_unpack(const uint8_t* src, size_t n, uint8_t* dst){
+    for(size_t i = 0; i < n; i++){
+        uint32_t v = 0;
+        size_t   b = i * 6;
+        for(int k = 0; k < 6; k++){
+            v <<= 1;
+            if(src[(b + k) >> 3] & (uint8_t)(0x80 >> ((b + k) & 7))) v |= 1u;
+        }
+        dst[i] = (uint8_t)((v << 2) | (v >> 4));       // 6bit → 8bit 균등 신장
+    }
+}
 
 struct __attribute__((packed)) PktFftFrame {
     uint64_t center_freq_hz;

@@ -32,6 +32,8 @@ static constexpr int OPUS_SR    = 48000;
 static constexpr int OPUS_FRAME = 960;   // 20ms @48kHz mono (Opus 합법 프레임)
 static bool audio_opus_enabled(){ const char* e=getenv("BEWE_OPUS");     return !(e && e[0]=='0'); }
 static bool fft_zstd_enabled(){   const char* e=getenv("BEWE_FFT_ZSTD"); return !(e && e[0]=='0'); }
+// BEWE_FFT_U6=0 → 8bit 양자화 유지 (6bit 팩 미적용). 기본 ON (v13.2).
+static bool fft_u6_enabled(){     const char* e=getenv("BEWE_FFT_U6");   return !(e && e[0]=='0'); }
 static bool chsync_zstd_enabled(){const char* e=getenv("BEWE_CHSYNC_ZSTD"); return !(e && e[0]=='0'); }
 
 // CHANNEL_SYNC 패킷 빌드. zstd_on 이면 body(ChSyncEntry×50) 를 압축.
@@ -592,23 +594,34 @@ void NetServer::broadcast_fft(const float* data, int fft_size,
         if(v > 255.f) v = 255.f;
         qbuf[i] = (uint8_t)v;
     }
-    // ② 패킷 빌드 (payload = zstd 압축본 또는 raw uint8)
+    // ②-a 6bit 팩 (v13.2): zstd 입력을 8bit→6bit 로 줄인다. 1.6dB/step, 실측
+    //     오차 평균 0.59dB. zstd 압축비가 2.22x→3.76x 로 올라 전송량 ~41% 감소.
+    static const bool u6_on   = fft_u6_enabled();
     static const bool zstd_on = fft_zstd_enabled();
+    const uint8_t* src     = qbuf.data();     // zstd 에 넣을 원본
+    size_t         src_len = (size_t)fft_size;
+    static thread_local std::vector<uint8_t> u6buf;
+    if(u6_on){
+        u6buf.resize(u6_packed_bytes(fft_size));
+        u6_pack(qbuf.data(), (size_t)fft_size, u6buf.data());
+        src = u6buf.data(); src_len = u6buf.size();
+    }
+    // ② 패킷 빌드 (payload = zstd 압축본 또는 raw)
     static thread_local std::vector<uint8_t> pkt;
-    size_t cap = zstd_on ? ZSTD_compressBound(fft_size) : (size_t)fft_size;
+    size_t cap = zstd_on ? ZSTD_compressBound(src_len) : src_len;
     pkt.resize(PKT_HDR_SIZE + sizeof(PktFftFrame) + cap);   // 워스트케이스 확보
     uint8_t* dst = pkt.data() + PKT_HDR_SIZE + sizeof(PktFftFrame);
-    uint32_t flags = FFT_FLAG_QUANT_U8;
+    uint32_t flags = FFT_FLAG_QUANT_U8 | (u6_on ? FFT_FLAG_QUANT_U6 : 0u);
     uint32_t data_bytes;
     if(zstd_on){
-        size_t z = ZSTD_compress(dst, cap, qbuf.data(), fft_size, 1);
-        if(!ZSTD_isError(z) && z < (size_t)fft_size){   // 실제로 줄었을 때만 채택
+        size_t z = ZSTD_compress(dst, cap, src, src_len, 1);
+        if(!ZSTD_isError(z) && z < src_len){            // 실제로 줄었을 때만 채택
             data_bytes = (uint32_t)z; flags |= FFT_FLAG_ZSTD;
-        } else {                                        // 압축 실패/무이득 → raw 폴백
-            memcpy(dst, qbuf.data(), fft_size); data_bytes = (uint32_t)fft_size;
+        } else {                                        // 압축 실패/무이득 → 팩본 그대로
+            memcpy(dst, src, src_len); data_bytes = (uint32_t)src_len;
         }
     } else {
-        memcpy(dst, qbuf.data(), fft_size); data_bytes = (uint32_t)fft_size;
+        memcpy(dst, src, src_len); data_bytes = (uint32_t)src_len;
     }
     uint32_t total = (uint32_t)(sizeof(PktFftFrame) + data_bytes);
     pkt.resize(PKT_HDR_SIZE + total);   // 축소만 → 재할당 없음, dst 데이터 유지
@@ -1217,11 +1230,31 @@ void NetServer::broadcast_lwf_live_start(const PktLwfLiveStart& s){
         cb.on_relay_broadcast(pkt.data(), pkt.size(), true);
 }
 
+// HIST 행 (HOST → Central 아카이브 전용; JOIN 으로는 안 나간다).
+// v13.2: 6bit 팩 + zstd 로 전송 → Central 이 8bit 로 복원해 기록하므로 .bewehist
+// 디스크 포맷은 불변 (기존 뷰어 그대로). 수신측 판별은 길이:
+//   payload_len == fft_size → raw(구 HOST), 그 외 → 6bit+zstd 압축본.
+// (LWF_LIVE_START.fft_size 로 Central 이 행폭을 이미 알고 있어 길이 판별이 성립)
 void NetServer::broadcast_lwf_live_row(const PktLwfLiveRowHdr& hdr,
                                         const uint8_t* row, uint32_t row_bytes){
-    std::vector<uint8_t> body(sizeof(PktLwfLiveRowHdr) + row_bytes);
+    static const bool u6_on   = fft_u6_enabled();
+    static const bool zstd_on = fft_zstd_enabled();
+    const uint8_t* payload = row;
+    uint32_t       plen    = row_bytes;
+    std::vector<uint8_t> u6buf, comp;
+    if(row_bytes && row && u6_on && zstd_on){
+        u6buf.resize(u6_packed_bytes(row_bytes));
+        u6_pack(row, row_bytes, u6buf.data());
+        comp.resize(ZSTD_compressBound(u6buf.size()));
+        size_t z = ZSTD_compress(comp.data(), comp.size(), u6buf.data(), u6buf.size(), 1);
+        // raw 와 같은 길이면 Central 이 raw 로 오인한다 → 그 경우만 raw 폴백.
+        if(!ZSTD_isError(z) && z < row_bytes && z != row_bytes){
+            payload = comp.data(); plen = (uint32_t)z;
+        }
+    }
+    std::vector<uint8_t> body(sizeof(PktLwfLiveRowHdr) + plen);
     memcpy(body.data(), &hdr, sizeof(hdr));
-    if(row_bytes && row) memcpy(body.data() + sizeof(hdr), row, row_bytes);
+    if(plen && payload) memcpy(body.data() + sizeof(hdr), payload, plen);
     auto pkt = make_packet(PacketType::LWF_LIVE_ROW, body.data(), (uint32_t)body.size());
     if(cb.on_relay_broadcast)
         cb.on_relay_broadcast(pkt.data(), pkt.size(), true);

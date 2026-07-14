@@ -9,6 +9,7 @@
 #include "../src/net_protocol.hpp"
 #include "../src/sigmf.hpp"
 #include "../src/long_waterfall.hpp"   // build_hist_filename_finalize
+#include <zstd.h>                      // HIST 행 6bit+zstd 해제 (v13.2)
 #include <cstdio>
 #include <cstring>
 #include <cerrno>
@@ -679,6 +680,22 @@ void CentralServer::archive_hist_on_live_row(std::shared_ptr<HostRoom> room,
     if(it == room->hist_streams.end() || !it->second.fp) return;
     auto& st = it->second;
     if(row_bytes == 0) return;
+    // v13.2: HOST 가 6bit 팩 + zstd 로 보낸다 (row_bytes != fft_size). 여기서 8bit 로
+    // 복원해 기록 → .bewehist 디스크 포맷은 불변 (기존 뷰어/파서 그대로).
+    // row_bytes == fft_size 면 구 HOST 의 raw 행 → 그대로 기록.
+    std::vector<uint8_t> restored;
+    if(st.fft_size && row_bytes != st.fft_size){
+        std::vector<uint8_t> packed(u6_packed_bytes(st.fft_size));
+        size_t d = ZSTD_decompress(packed.data(), packed.size(), row, row_bytes);
+        if(ZSTD_isError(d) || d != packed.size()){
+            printf("[Central][Archive] HIST row decode fail (%u B, expect %zu) — drop\n",
+                   row_bytes, packed.size());
+            return;
+        }
+        restored.resize(st.fft_size);
+        u6_unpack(packed.data(), st.fft_size, restored.data());
+        row = restored.data(); row_bytes = st.fft_size;
+    }
     fwrite(row, 1, row_bytes, st.fp);
     st.rows_written++;
     // 매 row fflush — row_rate 5Hz 라 부담 없음. UI LIST_REQ 가 stat() 으로 size
