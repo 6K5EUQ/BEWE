@@ -98,3 +98,37 @@ inline bool det_base_accumulate(Channel& ch, const float* rowp,
     ch.det_base_acc.clear();   // 수집 버퍼 반납 (재수집은 det_base_reset() 이 트리거)
     return true;
 }
+
+// 확정된 기준선을 매 행 조금씩 현재 스펙트럼 쪽으로 끌어당긴다 (느린 EMA).
+//
+// arm 시점에 굳힌 기준선은 그때 있던 것만 흡수한다. 전원 노이즈 스퍼처럼 **주파수를
+// 옮겨다니는** 간섭은 새 자리에서 기준선이 낮은 채라 마진을 넘어 lock 을 유발한다.
+// 기준선이 스퍼를 따라 천천히 올라가면 몇 초 안에 흡수돼 더는 안 걸린다.
+//
+// 반대로 진짜 교신까지 흡수해 버리면 lock 이 스스로 풀린다 — 그래서:
+//   · lock 중(또는 hold 중)에는 아예 갱신하지 않는다 → 듣고 있는 신호는 절대 안 먹힌다.
+//   · 시정수를 길게 둔다(DET_BASE_EMA_TAU_MS) → 수초짜리 교신은 거의 못 움직이고,
+//     상시 켜져 있는 스퍼만 서서히 흡수된다.
+// dt 기반이라 FFT 행레이트(1.5~40Hz)가 달라져도 실제 시정수는 같다.
+inline void det_base_track(Channel& ch, const float* rowp,
+                           int bin_s, int n_bins, int fft_size,
+                           int64_t now_ms)
+{
+    if(!ch.det_base_ready || (int)ch.det_base.size() != n_bins) return;
+    if(ch.det_locked.load(std::memory_order_relaxed)) return;  // 듣는 중 — 건드리지 않는다
+    if(ch.det_hold > 0) return;                                // 페이딩 홀드 중도 마찬가지
+
+    int64_t last = ch.det_base_track_ms;
+    ch.det_base_track_ms = now_ms;
+    if(last == 0) return;                       // 첫 호출 — dt 를 모른다
+    float dt_ms = (float)(now_ms - last);
+    if(dt_ms <= 0.f) return;
+    if(dt_ms > (float)DET_BASE_EMA_TAU_MS) dt_ms = (float)DET_BASE_EMA_TAU_MS;  // 긴 공백 방어
+
+    float a = dt_ms / (float)DET_BASE_EMA_TAU_MS;   // 1 - exp(-dt/tau) 의 선형 근사
+    if(a > 1.f) a = 1.f;
+    for(int k = 0; k < n_bins; k++){
+        int b = bin_s + k; if(b >= fft_size) b -= fft_size;
+        ch.det_base[(size_t)k] += a * (rowp[b] - ch.det_base[(size_t)k]);
+    }
+}

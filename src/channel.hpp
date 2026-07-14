@@ -329,11 +329,13 @@ struct Channel {
     uint64_t det_base_cf = 0;
     uint32_t det_base_sr = 0;
     int      det_base_fft = 0;
+    int64_t  det_base_track_ms = 0;   // 기준선 EMA 추적의 직전 갱신 시각 (0 = 아직)
     void det_base_reset(){
         det_base.clear(); det_base_acc.clear();
         det_base_rows = 0; det_base_t0_ms = 0; det_base_ready = false;
         det_base_s = det_base_e = 0;
         det_base_cf = 0; det_base_sr = 0; det_base_fft = 0;
+        det_base_track_ms = 0;
     }
     // lock 중 폭은 넓어지기만 한다 (한 교신의 최대 폭 유지). 다만 노이즈 스파이크 한 번으로
     // 넓어지지 않도록, 대역 밖 신호가 연속 관측된 프레임 수를 세고 그동안의 최대치를 모아둔다.

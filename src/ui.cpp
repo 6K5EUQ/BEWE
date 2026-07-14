@@ -136,6 +136,22 @@ void FFTViewer::update_channel_squelch(){
     struct DetApply { int ch; float s, e; bool lock; };
     std::vector<DetApply> det_pending;
 
+    // 노치 구간 스냅샷 — detect 는 이 안의 bin 을 신호로 치지 않는다 (스퍼/간섭 배제).
+    // data_mtx 를 잡기 전에 떠서 락 순서를 고정한다.
+    std::vector<std::pair<float,float>> notch_bands;   // (lo_mhz, hi_mhz)
+    {
+        std::lock_guard<std::mutex> nlk(notches_mtx);
+        notch_bands.reserve(notches.size());
+        for(const auto& n : notches)
+            notch_bands.emplace_back(std::min(n.freq_lo_mhz, n.freq_hi_mhz),
+                                     std::max(n.freq_lo_mhz, n.freq_hi_mhz));
+    }
+    auto in_notch = [&](float f_mhz){
+        for(const auto& nb : notch_bands)
+            if(f_mhz >= nb.first && f_mhz <= nb.second) return true;
+        return false;
+    };
+
     {
     std::lock_guard<std::mutex> lk(data_mtx);
     float cf_mhz = (float)(header.center_frequency / 1e6);
@@ -278,6 +294,10 @@ void FFTViewer::update_channel_squelch(){
                 if(det_base_accumulate(ch, rowp, bin_s, n_bins, fft_size, scan_s, scan_e,
                                        header.center_frequency, header.sample_rate, now_ms_row))
                     bewe_log_push(0,"[DETECT] CH%d baseline ready (%d bins)\n", c, n_bins);
+            } else if(!same_row){
+                // 새 행에서만 기준선을 끌어당긴다. 이동하는 스퍼를 몇 초에 걸쳐 흡수 —
+                // lock/hold 중엔 함수 내부에서 스킵하므로 듣는 신호는 영향 없다.
+                det_base_track(ch, rowp, bin_s, n_bins, fft_size, now_ms_row);
             }
             float best_lo=0, best_hi=0, best_snr=-999.f;
             const bool locked = ch.det_locked.load(std::memory_order_relaxed);
@@ -316,6 +336,14 @@ void FFTViewer::update_channel_squelch(){
                 // (config.hpp 주석 참조). 슬라이더로 조절되며 CH_SYNC/host_state 를 그대로 탄다.
                 float margin = std::max(DET_MARGIN_MIN_DB, std::min(DET_MARGIN_MAX_DB, thr));
                 for(int k=0; k<n_bins; k++){
+                    // 노치 구간은 신호로 치지 않는다 (Ctrl+우클릭으로 친 스퍼/간섭 대역).
+                    // 진행 중인 run 은 여기서 끊는다 — gap 으로 세면 노치를 건너뛰어 양옆
+                    // 신호가 한 run 으로 이어져 필터가 노치를 통째로 삼킨다.
+                    if(!notch_bands.empty() && in_notch(bin_to_freq(bin_at(k)))){
+                        if(run_start >= 0) close_run(k - 1);
+                        gap = 0;
+                        continue;
+                    }
                     float snr = rowp[bin_at(k)] - ch.det_base[(size_t)k];
                     if(snr >= margin){
                         if(run_start < 0){ run_start = k; run_snr = -999.f; }
