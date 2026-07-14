@@ -42,8 +42,9 @@ struct MissionHistStream {
     char        station[64] = {};
     uint16_t    year = 0;
     char        code[8] = {};
-    uint32_t    fft_size = 0;       // row size in bytes (each row = fft_size float? NO — row is uint8 per col)
-                                    // 실제는 행 크기 = fft_size (8-bit packed dB). open_new_file에서 row_bytes = fft_size.
+    uint32_t    fft_size = 0;       // 디스크 행 폭 = HOST 의 fft_input_size (1x FFT).
+                                    // HOST 가 LIVE_START 에 fsz=fis 로 넣는다 (long_waterfall.cpp).
+                                    // FFT_FRAME 의 bin 수(padded)와 다를 수 있다 → v13.3 폴딩 참조.
     uint32_t    rows_written = 0;
 };
 
@@ -480,6 +481,9 @@ private:
     // LWF live stream → HIST archive 탭 (host_mux_loop의 LWF_LIVE_* 분기에서 호출)
     void archive_hist_on_live_start(std::shared_ptr<HostRoom> room,
                                     const PktLwfLiveStart& ls);
+    // v13.3: FFT_FRAME 을 HIST 행으로 아카이브 (LWF_LIVE_ROW 전송 폐지)
+    void archive_hist_on_fft       (std::shared_ptr<HostRoom> room,
+                                    const uint8_t* bewe_pkt, uint32_t bewe_len);
     void archive_hist_on_live_row  (std::shared_ptr<HostRoom> room,
                                     const PktLwfLiveRowHdr& hdr,
                                     const uint8_t* row, uint32_t row_bytes);

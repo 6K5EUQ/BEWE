@@ -566,6 +566,10 @@ struct __attribute__((packed)) PktLwfLiveStart {
     int32_t  utc_offset_hours;
     char     station_name[32];    // v3: host station name
     float    station_lat;         // v3
+    // v13.3: Central 아카이브는 FFT_FRAME 을 행으로 기록하므로 행레이트가 FFT 행레이트다
+    // (HOST 로컬 파일의 row_rate_hz=5Hz max-hold flush 와 다르다). SR/fft_size 에 따라
+    // 변하는 실측값 — 0 이면 Central 은 row_rate_hz 로 폴백한다.
+    float    fft_row_rate_hz;
 };
 struct __attribute__((packed)) PktLwfLiveRowHdr {
     char     filename[64];

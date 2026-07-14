@@ -823,6 +823,10 @@ public:
 
     // ── 브로드캐스트 전용 스레드 (캡처 스레드와 분리) ──────────────────
     std::atomic<int>        net_bcast_seq{0};   // 캡처 스레드가 올림
+    // 실측 FFT 행레이트 (net_bcast_worker 가 1초 창으로 갱신). Central 이 FFT 를
+    // .bewehist 로 아카이브하므로 이 값이 파일 헤더의 row_rate_hz 가 된다 — 상수 5Hz 를
+    // 쓰면 뷰어 시간축이 어긋난다. 0 = 아직 미측정 (LIVE_START 시 5Hz 폴백).
+    std::atomic<float>      fft_row_rate_hz{0.f};
     std::mutex              net_bcast_mtx;
     std::condition_variable net_bcast_cv;
     std::atomic<bool>       net_bcast_stop{false};

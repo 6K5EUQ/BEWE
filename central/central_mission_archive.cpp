@@ -646,7 +646,10 @@ void CentralServer::archive_hist_on_live_start(std::shared_ptr<HostRoom> room,
     h.fft_size = ls.fft_size;
     h.sample_rate_hz = ls.sample_rate_hz;
     h.center_freq_hz = ls.center_freq_hz;
-    h.row_rate_hz = ls.row_rate_hz;
+    // v13.3: Central 은 FFT_FRAME 을 행으로 기록한다 (HOST 의 5Hz max-hold flush 가 아니라
+    // FFT 행마다 1행) → 헤더의 row_rate 도 FFT 행레이트여야 뷰어 시간축이 맞는다.
+    // 구 HOST(필드 없음/0)면 종전 row_rate_hz 로 폴백.
+    h.row_rate_hz = (ls.fft_row_rate_hz > 0.5f) ? ls.fft_row_rate_hz : ls.row_rate_hz;
     h.db_min = ls.db_min;
     h.db_max = ls.db_max;
     h.start_utc_unix = ls.start_utc_unix;
@@ -670,6 +673,73 @@ void CentralServer::archive_hist_on_live_start(std::shared_ptr<HostRoom> room,
 
     printf("[Central][Archive] HIST stream OPEN %s (fft=%u, %.3fMHz)\n",
            full.c_str(), ls.fft_size, ls.center_freq_hz / 1e6);
+}
+
+// v13.3: FFT_FRAME 을 그대로 HIST 행으로 아카이브한다.
+// HOST 가 같은 데이터를 FFT + LWF_LIVE_ROW 로 두 번 보내던 것을 없앴다 — 미션이 켜져
+// 있으면 HOST 는 JOIN 이 없어도 FFT 를 계속 보내고, Central 이 그 스트림을 기록한다.
+// 결과적으로 아카이브 시간해상도가 5Hz(max-hold 접힘) → FFT 행레이트(수십 Hz)로 올라간다.
+//
+// payload = PktFftFrame 헤더 + [6bit 팩 + zstd] uint8 양자화본. 디스크에는 종전과 같이
+// uint8 1B/bin 으로 풀어 쓴다 → .bewehist 포맷 불변.
+void CentralServer::archive_hist_on_fft(std::shared_ptr<HostRoom> room,
+                                         const uint8_t* bewe_pkt, uint32_t bewe_len){
+    if(room->hist_streams.empty()) return;                   // 미션 비활성 → 기록 안 함
+    if(bewe_len < BEWE_HDR_SIZE + sizeof(PktFftFrame)) return;
+    const auto* fh = reinterpret_cast<const PktFftFrame*>(bewe_pkt + BEWE_HDR_SIZE);
+
+    const uint32_t flags     = fh->fft_size;
+    const uint32_t fft_size  = flags & FFT_FFT_SIZE_MASK;
+    const bool     quantized = (flags & FFT_FLAG_QUANT_U8) != 0;
+    const bool     zstd_c    = (flags & FFT_FLAG_ZSTD)     != 0;
+    const bool     u6_c      = (flags & FFT_FLAG_QUANT_U6) != 0;
+    if(!quantized || fft_size == 0) return;                  // float 프레임(구버전)은 무시
+
+    const uint8_t* body     = bewe_pkt + BEWE_HDR_SIZE + sizeof(PktFftFrame);
+    uint32_t       body_len = bewe_len - BEWE_HDR_SIZE - (uint32_t)sizeof(PktFftFrame);
+    const size_t   inner    = u6_c ? u6_packed_bytes(fft_size) : (size_t)fft_size;
+
+    std::vector<uint8_t> zbuf, row(fft_size);
+    const uint8_t* packed = nullptr;
+    if(zstd_c){
+        zbuf.resize(inner);
+        size_t d = ZSTD_decompress(zbuf.data(), inner, body, body_len);
+        if(ZSTD_isError(d) || d != inner) return;
+        packed = zbuf.data();
+    } else {
+        if(body_len != inner) return;
+        packed = body;
+    }
+    if(u6_c) u6_unpack(packed, fft_size, row.data());
+    else     memcpy(row.data(), packed, fft_size);
+
+    // 이 room 에 열려 있는 모든 hist stream 에 행 추가 (통상 1개).
+    // FFT 는 padded 폭(fft_size)으로 오지만 디스크 행은 1x 폭(st.fft_size = HOST 의
+    // fft_input_size)이다. pad 묶음 max-hold 로 접는다 — zero-pad 는 sinc 보간일 뿐
+    // 새 정보가 없으므로 손실이 아니고, max 라 좁은 피크가 살아남는다. HOST 로컬
+    // .bewehist 가 쓰는 폴딩(long_waterfall.cpp ingest_new_rows)과 같은 규칙이다.
+    // CLI HOST 는 PAD=1 이라 pad=1 → 항등.
+    std::vector<uint8_t> folded;
+    for(auto& [fname, st] : room->hist_streams){
+        if(!st.fp || !st.fft_size) continue;
+        const uint8_t* out     = row.data();
+        uint32_t       out_len = fft_size;
+        if(st.fft_size != fft_size){
+            if(fft_size % st.fft_size != 0) continue;   // 배수 아님 → 기록 불가
+            const uint32_t pad = fft_size / st.fft_size;
+            folded.resize(st.fft_size);
+            for(uint32_t o = 0; o < st.fft_size; o++){
+                const uint8_t* gp = row.data() + (size_t)o * pad;
+                uint8_t mx = gp[0];
+                for(uint32_t k = 1; k < pad; k++) if(gp[k] > mx) mx = gp[k];
+                folded[o] = mx;
+            }
+            out = folded.data(); out_len = st.fft_size;
+        }
+        fwrite(out, 1, out_len, st.fp);
+        st.rows_written++;
+        fflush(st.fp);
+    }
 }
 
 void CentralServer::archive_hist_on_live_row(std::shared_ptr<HostRoom> room,

@@ -200,6 +200,8 @@ bool open_new_file(uint64_t cf_hz, uint64_t sr_hz, uint32_t fft_size,
     h.fft_size       = fft_size;
     h.sample_rate_hz = sr_hz;
     h.center_freq_hz = cf_hz;
+    // HOST 로컬 파일: 종전대로 5Hz max-hold flush (worker_loop 가 이 값으로 flush 주기를
+    // 잡는다 — 바꾸면 로컬 flush 도 같이 빨라진다).
     h.row_rate_hz    = DEFAULT_ROW_RATE_HZ;
     h.db_min         = dmin;
     h.db_max         = dmax;
@@ -242,6 +244,9 @@ bool open_new_file(uint64_t cf_hz, uint64_t sr_hz, uint32_t fft_size,
     ls.station_lon     = h.station_lon;
     ls.utc_offset_hours= h.utc_offset_hours;
     ls.station_lat     = h.station_lat;
+    // Central 은 FFT_FRAME 을 행으로 기록한다 → 그쪽 파일의 row_rate 는 FFT 행레이트.
+    // 아직 미측정(기동 직후)이면 0 → Central 이 row_rate_hz(5Hz)로 폴백.
+    ls.fft_row_rate_hz = g_v ? g_v->fft_row_rate_hz.load(std::memory_order_relaxed) : 0.f;
     memcpy(ls.station_name, h.station_name, sizeof(ls.station_name));
     {
         std::lock_guard<std::mutex> lk(g_live_state_mtx);
@@ -268,20 +273,12 @@ void flush_row_locked(){
     fwrite(row.data(), 1, row.size(), g_fp);
     fflush(g_fp);
 
-    // Live broadcast — JOIN's hist/live/<filename> appends this row.
-    PktLwfLiveRowHdr rhdr{};
-    {
-        std::lock_guard<std::mutex> lk(g_live_state_mtx);
-        if(g_live_state_valid){
-            memcpy(rhdr.filename, g_live_state.filename, sizeof(rhdr.filename));
-            rhdr.row_index = g_live_row_idx++;
-        }
-    }
-    if(rhdr.filename[0]){
-        LiveCallbacks cb_copy;
-        { std::lock_guard<std::mutex> lk(g_live_cb_mtx); cb_copy = g_live_cb; }
-        if(cb_copy.on_row) cb_copy.on_row(rhdr, row.data(), (uint32_t)row.size());
-    }
+    // v13.3: LWF_LIVE_ROW 전송 폐지 — Central 은 FFT_FRAME 스트림을 그대로 아카이브한다
+    // (같은 데이터를 두 번 보내지 않는다). 여기서 쓰는 것은 HOST 로컬 .bewehist 뿐이고,
+    // 로컬 기록은 종전대로 5Hz max-hold 를 유지한다 (HOST 디스크 사용량 불변).
+    // g_live_row_idx 는 LIVE_START/STOP 의 상태 추적용으로만 남는다.
+    { std::lock_guard<std::mutex> lk(g_live_state_mtx);
+      if(g_live_state_valid) g_live_row_idx++; }
 
     std::fill(g_acc_db.begin(), g_acc_db.end(), -200.0f);
     g_acc_count = 0;

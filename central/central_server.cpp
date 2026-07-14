@@ -823,10 +823,14 @@ void CentralServer::dispatch_to_joins(std::shared_ptr<HostRoom> room,
     // ── LWF live stream tap: Central archive 전용 (JOIN으로는 relay 안 함) ──
     // JOIN은 미션창에서 archive 파일을 수동 다운로드만 — 실시간 row 스트림 불필요.
     // 예전엔 fall-through 로 JOIN에 broadcast 했으나 80+ KB/s 대역폭만 낭비 (v4.6.0).
+    // 길이 게이트는 fft_row_rate_hz(v13.3 추가) 이전까지만 요구한다 — 구 HOST 의 짧은
+    // LIVE_START 도 받아들이고, 새 필드는 0 으로 채워 넘긴다 (Central 이 row_rate_hz 폴백).
     if(bewe_type == BEWE_TYPE_LWF_LIVE_START &&
-       bewe_len >= BEWE_HDR_SIZE + sizeof(PktLwfLiveStart)){
-        const auto* ls = reinterpret_cast<const PktLwfLiveStart*>(bewe_pkt + BEWE_HDR_SIZE);
-        archive_hist_on_live_start(room, *ls);
+       bewe_len >= BEWE_HDR_SIZE + offsetof(PktLwfLiveStart, fft_row_rate_hz)){
+        PktLwfLiveStart ls{};
+        size_t avail = (size_t)bewe_len - BEWE_HDR_SIZE;
+        memcpy(&ls, bewe_pkt + BEWE_HDR_SIZE, std::min(avail, sizeof(ls)));
+        archive_hist_on_live_start(room, ls);
         return;
     }
     if(bewe_type == BEWE_TYPE_LWF_LIVE_ROW &&
@@ -1058,6 +1062,9 @@ void CentralServer::dispatch_to_joins(std::shared_ptr<HostRoom> room,
     // FFT: auth 완료된 JOIN에게만, 전용 send_queue (대용량, 드롭 허용)
     // 제어(HEARTBEAT/STATUS/CMD_ACK 등): ctrl_queue (우선 전송, 드롭 없음)
     bool is_fft = (bewe_type == BEWE_TYPE_FFT);
+    // v13.3: 미션 활성이면 FFT 스트림을 그대로 .bewehist 로 기록 (HOST 가 LWF_LIVE_ROW
+    // 를 따로 보내지 않는다). relay 는 그대로 이어진다 — JOIN 은 종전대로 FFT 를 받는다.
+    if(is_fft) archive_hist_on_fft(room, bewe_pkt, bewe_len);
     // FILE_DATA(0x0D)/FILE_META(0x0E)는 별도 file_queue로 분리해 backpressure 유발
     bool is_file = (bewe_type == 0x0D || bewe_type == 0x0E);
     bool is_ctrl = (bewe_type == BEWE_TYPE_HEARTBEAT || bewe_type == BEWE_TYPE_STATUS ||
