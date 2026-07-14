@@ -827,8 +827,12 @@ void draw_modal(FFTViewer& v, NetClient* cli){
                         double t_hi = std::max(g_meas.t0, g_meas.t1);
                         double dur_s = (t_hi - t_lo) / (double)std::max(1.f, h.row_rate_hz);
                         char info[96];
-                        snprintf(info, sizeof(info), "BW : %.4f MHz   Duration : %.3f s",
-                                 bw_mhz, dur_s);
+                        if(bw_mhz > 1.0)
+                            snprintf(info, sizeof(info), "BW : %.3f MHz   Duration : %.3f s",
+                                     bw_mhz, dur_s);
+                        else
+                            snprintf(info, sizeof(info), "BW : %.1f kHz   Duration : %.3f s",
+                                     bw_mhz * 1000.0, dur_s);
                         ImVec2 ts = ImGui::CalcTextSize(info);
                         float tx = rx0 + 4.f;
                         float ty = ry_hi - ts.y - 4.f;
