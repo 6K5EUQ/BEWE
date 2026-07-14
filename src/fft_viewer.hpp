@@ -958,9 +958,6 @@ public:
     // ── 에너지 디텍션 (Detect 모드) ────────────────────────────────────────
     // 복조 없는 채널을 detect 모드로 전환/해제 (HOST 로컬 적용).
     void set_channel_detect(int ch_idx, bool on);
-    // CFAR 로컬 플로어 스크래치 — update_channel_squelch() 전용 (UI/CLI 스퀄치 스레드).
-    // 채널·행마다 재사용해 매 행 alloc 을 피한다.
-    std::vector<float> det_floor, det_scratch;
 
     // ── demod.cpp ─────────────────────────────────────────────────────────
     void dem_worker(int ch_idx);

@@ -1,4 +1,5 @@
 #include "fft_viewer.hpp"
+#include "detect_base.hpp"
 #include "iq_filename.hpp"
 #include "sigmf.hpp"
 #include <clocale>   // setlocale — 한글 IME(XIM) 활성화
@@ -121,6 +122,9 @@ void FFTViewer::update_channel_squelch(){
         for(int c = 0; c < MAX_CHANNELS; c++){
             Channel& ch = channels[c];
             if(!ch.filter_active) continue;
+            // detect 기준선은 절대 dB 스냅샷이라 노이즈플로어가 이동하면 무조건 무효다.
+            // sq_manual(사용자가 스컬치 임계를 직접 잡음)과는 무관 — 별개 축.
+            ch.det_base_reset();
             if(ch.sq_manual.load(std::memory_order_relaxed)) continue;
             ch.sq_calibrated.store(false, std::memory_order_relaxed);
             ch.sq_calib_cnt = 0;
@@ -144,11 +148,9 @@ void FFTViewer::update_channel_squelch(){
     const float* rowp = fft_data.data() + fi * fft_size;
     // 같은 FFT 행이면 채널별 peak 재스캔 생략 (행 갱신은 ~1.5-37Hz, 호출은 ~60Hz)
     bool same_row = (total_ffts == sq_last_total_ffts);
-    {
-        int64_t now_ms_row = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 std::chrono::steady_clock::now().time_since_epoch()).count();
-        if(!same_row || sq_row_change_ms == 0) sq_row_change_ms = now_ms_row;
-    }
+    int64_t now_ms_row = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch()).count();
+    if(!same_row || sq_row_change_ms == 0) sq_row_change_ms = now_ms_row;
     sq_last_total_ffts = total_ffts;
 
     auto freq_to_bin = [&](float rel_mhz) -> int {
@@ -249,35 +251,51 @@ void FFTViewer::update_channel_squelch(){
             }
         }
         // ── 에너지 디텍션 (Detect 모드) ───────────────────────────────────
-        // 탐색 대역(det_s..det_e) 안에서 sq_threshold 를 넘는 연속 bin 구간(run)을 찾아
-        // 가장 강한 run 하나로 채널 s/e 를 좁힌다. 신호가 끊기면 원래 폭으로 되돌린다.
+        // Detect 는 간헐 버스트를 잡는 기능이다 (연속 신호는 사용자가 수동 필터를 건다).
+        // 판정은 스칼라 sq_threshold 가 아니라 arm 시점에 굳힌 bin 별 기준선 대비 마진
+        // (detect_base.hpp 주석 참조). sq_threshold 는 대역 peak 기반이라, 탐색 대역이
+        // 넓고 그 안에 상시 강한 신호가 있으면 임계가 그놈을 따라 올라가 약한 협대역
+        // 버스트를 영영 못 본다 — 대역을 넓힐수록 감도가 떨어지는 구조였다.
+        // 기준선을 쓰면 상시 존재하는 것은 전부 기준선에 흡수돼 자동 무시되고, 새로 뜬
+        // 것만 잡힌다. 기준선 대비 SNR 이 최대인 연속 구간(run)으로 채널 s/e 를 좁히고,
+        // 신호가 끊기면 원래 폭으로 되돌린다.
         // 이 채널의 스컬치 게이트는 검출기가 대신하므로 우회(잡힌 동안 항상 열림).
         // 새 FFT 행에서만 스캔 — 같은 행을 60fps 로 다시 훑는 것은 순수 낭비
-        if(det && !same_row && ch.sq_calibrated.load(std::memory_order_relaxed)){
-            float best_lo=0, best_hi=0, best_peak=-999.f;
-            {
-                // bin_s..bin_e 는 det_s/det_e 기준으로 이미 계산됨 (DC 랩 포함)
-                int n_bins = (bin_s <= bin_e) ? (bin_e-bin_s+1)
-                                              : (fft_size-bin_s) + (bin_e+1);
-                auto bin_at = [&](int k){ int b = bin_s + k; return (b >= fft_size) ? b-fft_size : b; };
+        if(det && !same_row){
+            // bin_s..bin_e 는 det_s/det_e 기준으로 이미 계산됨 (DC 랩 포함)
+            int n_bins = (bin_s <= bin_e) ? (bin_e-bin_s+1)
+                                          : (fft_size-bin_s) + (bin_e+1);
+            auto bin_at = [&](int k){ int b = bin_s + k; return (b >= fft_size) ? b-fft_size : b; };
+            // 기준선이 없거나(arm 직후) 캡처 설정/탐색 대역이 바뀌었으면 다시 1초를 쌓는다.
+            bool base_ok = det_base_valid(ch, scan_s, scan_e, header.center_frequency,
+                                          header.sample_rate, fft_size, n_bins);
+            if(!base_ok){
+                // ready 인데 valid 가 아니다 = 대역/캡처 설정이 바뀌었다 → 기준선 폐기 후 재수집
+                if(ch.det_base_ready) ch.det_base_reset();
+                if(det_base_accumulate(ch, rowp, bin_s, n_bins, fft_size, scan_s, scan_e,
+                                       header.center_frequency, header.sample_rate, now_ms_row))
+                    bewe_log_push(0,"[DETECT] CH%d baseline ready (%d bins)\n", c, n_bins);
+            }
+            float best_lo=0, best_hi=0, best_snr=-999.f;
+            if(base_ok){
                 int run_start=-1, gap=0;
-                float run_peak=-999.f;
+                float run_snr=-999.f;
                 // 짧은 갭은 이어붙임 — AM 반송파/사이드밴드 사이 딥에서 run 이 쪼개지는 것 방지
                 const int GAP_BINS = 2;
                 auto close_run = [&](int k_end){
                     if(run_start < 0) return;
-                    if(run_peak > best_peak){
-                        best_peak = run_peak;
+                    if(k_end - run_start + 1 >= DET_MIN_RUN_BINS && run_snr > best_snr){
+                        best_snr = run_snr;
                         best_lo = bin_to_freq(bin_at(run_start));
                         best_hi = bin_to_freq(bin_at(k_end));
                     }
-                    run_start=-1; run_peak=-999.f;
+                    run_start=-1; run_snr=-999.f;
                 };
                 for(int k=0; k<n_bins; k++){
-                    float v_db = rowp[bin_at(k)];
-                    if(v_db >= thr){
-                        if(run_start < 0){ run_start = k; run_peak = -999.f; }
-                        if(v_db > run_peak) run_peak = v_db;
+                    float snr = rowp[bin_at(k)] - ch.det_base[(size_t)k];
+                    if(snr >= DET_MARGIN_DB){
+                        if(run_start < 0){ run_start = k; run_snr = -999.f; }
+                        if(snr > run_snr) run_snr = snr;
                         gap = 0;
                     } else if(run_start >= 0){
                         if(++gap > GAP_BINS) close_run(k - gap);
@@ -285,7 +303,7 @@ void FFTViewer::update_channel_squelch(){
                 }
                 if(run_start >= 0) close_run(n_bins-1);
             }
-            bool have = (best_peak > -999.f) && (best_hi > best_lo);
+            bool have = (best_snr > -999.f) && (best_hi > best_lo);
             bool locked = ch.det_locked.load(std::memory_order_relaxed);
             const int   DET_HOLD_FRAMES   = 18;      // ~0.3s — 페이딩 시 lock 깜빡임 방지 (스컬치 홀드와 별개)
             const float DET_GUARD_MHZ     = 0.002f;  // 2 kHz — run 양쪽에 붙이는 여유
@@ -421,15 +439,18 @@ void FFTViewer::set_channel_detect(int ch_idx, bool on){
         ch.det_hold = 0; ch.det_ext_cnt = 0;
         ch.det_locked.store(false);
         ch.det_on.store(true);
+        ch.det_base_reset();   // 무장할 때마다 기준선을 새로 잡는다 (arm 시점의 대역 상태 = 기준)
         // 탐색 대역이 바뀌었으므로 스컬치를 그 폭 기준으로 다시 잡는다
         ch.sq_calibrated.store(false); ch.sq_calib_cnt = 0;
-        bewe_log_push(0,"[DETECT] CH%d armed %.4f-%.4f MHz\n", ch_idx, ch.det_s, ch.det_e);
+        bewe_log_push(0,"[DETECT] CH%d armed %.4f-%.4f MHz — baseline 수집 중\n",
+                      ch_idx, ch.det_s, ch.det_e);
     } else {
         if(!ch.det_on.load()) return;
         bool was = ch.det_locked.load();
         ch.det_on.store(false);
         ch.det_locked.store(false);
         ch.det_hold = 0; ch.det_ext_cnt = 0;
+        ch.det_base_reset();
         if(was){
             stop_dem(ch_idx);
             ch.s = ch.det_s; ch.e = ch.det_e;

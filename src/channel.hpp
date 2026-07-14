@@ -312,6 +312,29 @@ struct Channel {
     std::atomic<bool> det_locked{false};
     float det_s = 0, det_e = 0;   // 사용자가 그린 원래 탐색 대역 (복귀용)
     int   det_hold = 0;           // lock 유지 홀드 카운터 (프레임)
+    // ── per-bin 기준선 (baseline) ──────────────────────────────────────────
+    // Detect 는 "간헐 버스트"를 잡는 기능이다 (연속 신호는 사용자가 수동으로 필터를 건다).
+    // 그래서 arm 시점에 탐색 대역의 스펙트럼을 1초간 bin 별로 평균내어 기준선으로 굳히고,
+    // 이후엔 그 기준선을 DET_MARGIN_DB 넘는 것만 신호로 본다.
+    // 상시 켜져 있는 것(인접 방송국 / 스퍼 / DC 스파이크 / 대역별 노이즈 기울기)은 전부
+    // 기준선 안에 들어가므로 자동으로 무시된다 — 대역 공통 스칼라 임계로는 불가능했던 동작.
+    // 기준선이 확정되기 전에는 lock 하지 않는다.
+    std::vector<float> det_base;      // bin 별 기준선 dB (확정 후)
+    std::vector<double> det_base_acc; // 수집 중 bin 별 누적합
+    int     det_base_rows = 0;        // 수집한 행 수
+    int64_t det_base_t0_ms = 0;       // 수집 시작 시각 (steady ms)
+    bool    det_base_ready = false;
+    // 기준선이 유효한 조건 — 하나라도 달라지면 재수집 (SDR 재튜닝/대역변경/FFT 크기변경)
+    float    det_base_s = 0, det_base_e = 0;
+    uint64_t det_base_cf = 0;
+    uint32_t det_base_sr = 0;
+    int      det_base_fft = 0;
+    void det_base_reset(){
+        det_base.clear(); det_base_acc.clear();
+        det_base_rows = 0; det_base_t0_ms = 0; det_base_ready = false;
+        det_base_s = det_base_e = 0;
+        det_base_cf = 0; det_base_sr = 0; det_base_fft = 0;
+    }
     // lock 중 폭은 넓어지기만 한다 (한 교신의 최대 폭 유지). 다만 노이즈 스파이크 한 번으로
     // 넓어지지 않도록, 대역 밖 신호가 연속 관측된 프레임 수를 세고 그동안의 최대치를 모아둔다.
     int   det_ext_cnt = 0;
@@ -377,6 +400,7 @@ struct Channel {
         det_on.store(false); det_locked.store(false);
         det_s=0; det_e=0; det_hold=0;
         det_ext_cnt=0; det_ext_s=0; det_ext_e=0;
+        det_base_reset();
         // drag state
         move_drag=false;
         move_anchor=0;
