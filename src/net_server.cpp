@@ -32,8 +32,10 @@ static constexpr int OPUS_SR    = 48000;
 static constexpr int OPUS_FRAME = 960;   // 20ms @48kHz mono (Opus 합법 프레임)
 static bool audio_opus_enabled(){ const char* e=getenv("BEWE_OPUS");     return !(e && e[0]=='0'); }
 static bool fft_zstd_enabled(){   const char* e=getenv("BEWE_FFT_ZSTD"); return !(e && e[0]=='0'); }
-// BEWE_FFT_U6=0 → 8bit 양자화 유지 (6bit 팩 미적용). 기본 ON (v13.2).
-static bool fft_u6_enabled(){     const char* e=getenv("BEWE_FFT_U6");   return !(e && e[0]=='0'); }
+// 6bit 팩: 기본 OFF. 1.6dB/step 이라 워터폴에서는 안 보이지만 파워스펙트럼(선 그래프)
+// 에서는 계단이 눈에 띈다 — 실기에서 화질 저하가 체감돼 되돌렸다 (v13.3.1).
+// 대역폭이 급한 링크에서만 BEWE_FFT_U6=1 로 켠다.
+static bool fft_u6_enabled(){     const char* e=getenv("BEWE_FFT_U6");   return (e && e[0]=='1'); }
 static bool chsync_zstd_enabled(){const char* e=getenv("BEWE_CHSYNC_ZSTD"); return !(e && e[0]=='0'); }
 
 // CHANNEL_SYNC 패킷 빌드. zstd_on 이면 body(ChSyncEntry×50) 를 압축.
