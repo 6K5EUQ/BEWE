@@ -27,6 +27,9 @@ struct ChanSnap {
     float    sq = -50.0f;
     bool     sq_manual = false;      // 사용자가 직접 조정한 값? (구버전 파일엔 없음 → 자동으로 취급)
     char     decode_mods[64] = {};   // 이 채널에 켜진 디코드 모듈 id (콤마구분, 예 "wifi,acars")
+    // 디텍션 필터 (구버전 파일엔 없음 → det_on=false 로 취급, 기존 AM/FM 채널처럼 복원됨)
+    bool     det_on = false;         // 저장 시점에 armed 였는지 (lock 여부와 무관)
+    float    det_s = 0, det_e = 0;   // 탐색 대역 (s/e 는 lock 중이면 좁아진 현재 폭)
 };
 
 struct Snapshot {

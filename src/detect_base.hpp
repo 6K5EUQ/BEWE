@@ -24,6 +24,20 @@
 #include <algorithm>
 #include <chrono>
 
+// 채널의 sq_threshold 에 값을 적용한다. detect 채널이면 그 필드는 절대 dB 가 아니라
+// 기준선 대비 마진이므로(config.hpp) 마진 범위로, 아니면 절대 dB 범위로 클램프한다.
+// JOIN 이 보내는 SET_SQ_THRESH 와 HOST 로컬 슬라이더가 같은 규칙을 타게 하는 단일 지점.
+inline void det_apply_sq_thresh(Channel& ch, float v){
+    if(ch.det_on.load(std::memory_order_relaxed)){
+        v = std::max(DET_MARGIN_MIN_DB, std::min(DET_MARGIN_MAX_DB, v));
+    } else {
+        v = std::max(-100.0f, std::min(0.0f, v));
+    }
+    ch.sq_threshold.store(v, std::memory_order_relaxed);
+    ch.sq_manual.store(true, std::memory_order_relaxed);
+    ch.sq_calibrated.store(true, std::memory_order_relaxed);  // 자동 캘리브가 덮어쓰지 못하게
+}
+
 // 지금 들고 있는 기준선이 현재 캡처 설정/탐색 대역에 대해 유효한가.
 inline bool det_base_valid(const Channel& ch, float scan_s, float scan_e,
                            uint64_t cf, uint32_t sr, int fft_size, int n_bins)

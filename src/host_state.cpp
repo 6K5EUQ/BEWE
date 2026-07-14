@@ -51,12 +51,20 @@ void save(const FFTViewer& v, const std::string& station){
         first = false;
         char own[33]={}; strncpy(own, ch.owner, 31);
         std::string oesc; json_escape(oesc, own);
+        bool det_on = ch.det_on.load();
+        // det_on 이면 mode 는 항상 NONE 으로 저장한다 — lock 중이었다면 ch.mode 가
+        // AM/FM 으로 바뀌어 있는데(신호 잡았을 때 뭘로 복조할지 결정한 값일 뿐),
+        // 그걸 그대로 저장하면 재시작 시 "디텍션이었다"는 사실이 사라지고 고정
+        // AM/FM 채널로 굳어버린다 (이 함수가 고치는 버그). det_s/det_e 는 탐색 대역
+        // 원본 — lock 중엔 ch.s/e 가 좁아져 있으므로 별도로 보존해야 한다.
         snprintf(buf, sizeof(buf),
             "    {\"s\":%.6f,\"e\":%.6f,\"mode\":%d,\"audio_mask\":%u,\"pan\":%d,\"sq\":%.2f,"
-            "\"sq_manual\":%d,\"owner\":\"",
-            ch.s, ch.e, effective_mode(ch),
+            "\"sq_manual\":%d,\"det_on\":%d,\"det_s\":%.6f,\"det_e\":%.6f,\"owner\":\"",
+            det_on ? ch.det_s : ch.s, det_on ? ch.det_e : ch.e,
+            det_on ? (int)Channel::DM_NONE : effective_mode(ch),
             (unsigned)ch.audio_mask.load(), ch.pan, ch.sq_threshold.load(),
-            ch.sq_manual.load() ? 1 : 0);
+            ch.sq_manual.load() ? 1 : 0,
+            det_on ? 1 : 0, ch.det_s, ch.det_e);
         out += buf;
         out += oesc;
         // 이 채널에 켜진 디코드 모듈 id (host_mask 비트) — 재시작 시 디코드 재개용
@@ -126,6 +134,9 @@ Snapshot load(const std::string& station){
                     else if(k=="sq_manual"){ double d=0; js.read_number(d); c.sq_manual=(d!=0); }
                     else if(k=="owner"){ std::string s; js.read_string(s); strncpy(c.owner, s.c_str(), 31); }
                     else if(k=="decode_mods"){ std::string s; js.read_string(s); strncpy(c.decode_mods, s.c_str(), sizeof(c.decode_mods)-1); }
+                    else if(k=="det_on"){ double d=0; js.read_number(d); c.det_on=(d!=0); }
+                    else if(k=="det_s"){ double d=0; js.read_number(d); c.det_s=(float)d; }
+                    else if(k=="det_e"){ double d=0; js.read_number(d); c.det_e=(float)d; }
                     else {  // 미지 키 — 문자열/숫자/배열/객체 모두 스킵
                         if(js.peek('"')){ std::string t; js.read_string(t); }
                         else if(js.consume('[') || js.consume('{')){
@@ -210,10 +221,28 @@ void apply_channels(FFTViewer& v, const Snapshot& st){
         v.channels[slot].sq_manual.store(c.sq_manual);
         v.channels[slot].sq_calibrated.store(c.sq_manual);
         v.local_ch_out[slot] = 3;
-        Channel::DemodMode dm = (c.mode>=0 && c.mode<=2) ? (Channel::DemodMode)c.mode
-                                                         : Channel::DM_NONE;
-        v.channels[slot].mode = dm;
-        if(dm != Channel::DM_NONE) v.start_dem(slot, dm);
+        if(c.det_on && c.det_e > c.det_s){
+            // 디텍션 필터로 무장 상태 복원 — arm_detect(slot,true) 와 동일 절차.
+            // baseline 은 재시작 시점 대역 상태로 새로 잡는다 (이전 baseline 은 무의미).
+            Channel& ch = v.channels[slot];
+            ch.s = c.det_s; ch.e = c.det_e;      // lock 중 저장이어도 탐색 대역 전체로 복귀
+            ch.det_s = c.det_s; ch.det_e = c.det_e;
+            ch.det_hold = 0; ch.det_ext_cnt = 0;
+            ch.det_locked.store(false);
+            ch.det_on.store(true);
+            ch.det_base_reset();
+            ch.mode = Channel::DM_NONE;
+            float t = c.sq;
+            if(!(t >= DET_MARGIN_MIN_DB && t <= DET_MARGIN_MAX_DB)) t = DET_MARGIN_DEF_DB;
+            ch.sq_threshold.store(t);
+            ch.sq_calibrated.store(true);
+            ch.sq_calib_cnt = 0;
+        } else {
+            Channel::DemodMode dm = (c.mode>=0 && c.mode<=2) ? (Channel::DemodMode)c.mode
+                                                             : Channel::DM_NONE;
+            v.channels[slot].mode = dm;
+            if(dm != Channel::DM_NONE) v.start_dem(slot, dm);
+        }
         // 저장된 디코드 모듈 재개 (필터처럼 복원 — 재시작 후에도 디코드 유지).
         // LOCAL 경로 → host_apply_set → 워커 재기동 + host_mask 복구 + STATE 브로드캐스트.
         if(c.decode_mods[0]){

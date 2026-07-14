@@ -140,7 +140,9 @@ void FFTViewer::update_channel_squelch(){
         float prev = ch.sq_sig.load(std::memory_order_relaxed);
         float sig = 0.3f * peak_db + 0.7f * prev;
         ch.sq_sig.store(sig, std::memory_order_relaxed);
-        if(!ch.sq_calibrated.load(std::memory_order_relaxed)){
+        // detect 채널은 캘리브 제외 — sq_threshold 가 절대 dB 가 아니라 기준선 대비
+        // 마진이라(config.hpp) 절대값으로 덮어쓰면 마진 설정이 날아간다.
+        if(!det && !ch.sq_calibrated.load(std::memory_order_relaxed)){
             if(ch.sq_calib_cnt < 60)
                 ch.sq_calib_buf[ch.sq_calib_cnt++] = peak_db;
             if(ch.sq_calib_cnt >= 60){
@@ -196,7 +198,10 @@ void FFTViewer::update_channel_squelch(){
             if(base_ok){
                 int run_start=-1, gap=0;
                 float run_snr=-999.f;
-                const int GAP_BINS = 2;   // 짧은 갭은 이어붙임 (사이드밴드 딥에서 run 쪼개짐 방지)
+                // 짧은 갭은 이어붙임 (사이드밴드 딥에서 run 쪼개짐 방지). 폭은 bin 수가 아니라
+                // 주파수로 정한다 — bin 폭이 설정마다 달라 나란한 두 교신이 묶이는 것을 막는다.
+                float bin_hz = (float)header.sample_rate / (float)std::max(1, fft_size);
+                const int GAP_BINS = std::max(1, (int)(DET_GAP_KHZ * 1000.0f / std::max(1.0f, bin_hz)));
                 auto close_run = [&](int k_end){
                     if(run_start < 0) return;
                     if(k_end - run_start + 1 >= DET_MIN_RUN_BINS && run_snr > best_snr){
@@ -206,9 +211,12 @@ void FFTViewer::update_channel_squelch(){
                     }
                     run_start=-1; run_snr=-999.f;
                 };
+                // detect 채널의 sq_threshold 는 절대 dB 가 아니라 기준선 대비 마진이다
+                // (config.hpp 주석 참조). 슬라이더로 조절되며 CH_SYNC/host_state 를 그대로 탄다.
+                float margin = std::max(DET_MARGIN_MIN_DB, std::min(DET_MARGIN_MAX_DB, thr));
                 for(int k=0; k<n_bins; k++){
                     float snr = rowp[bin_at(k)] - ch.det_base[(size_t)k];
-                    if(snr >= DET_MARGIN_DB){
+                    if(snr >= margin){
                         if(run_start < 0){ run_start = k; run_snr = -999.f; }
                         if(snr > run_snr) run_snr = snr;
                         gap = 0;
@@ -341,9 +349,17 @@ void FFTViewer::set_channel_detect(int ch_idx, bool on){
         ch.det_locked.store(false);
         ch.det_on.store(true);
         ch.det_base_reset();   // 무장할 때마다 기준선을 새로 잡는다 (arm 시점의 대역 상태 = 기준)
-        ch.sq_calibrated.store(false); ch.sq_calib_cnt = 0;
-        bewe_log_push(0,"[DETECT] CH%d armed %.4f-%.4f MHz — baseline 수집 중\n",
-                      ch_idx, ch.det_s, ch.det_e);
+        // detect 채널의 sq_threshold 는 절대 dB 가 아니라 기준선 대비 마진으로 재해석된다
+        // (config.hpp). 절대 dB 가 들어 있던 값을 기본 마진으로 바꾼다.
+        {
+            float t = ch.sq_threshold.load();
+            if(!(t >= DET_MARGIN_MIN_DB && t <= DET_MARGIN_MAX_DB))
+                ch.sq_threshold.store(DET_MARGIN_DEF_DB);
+        }
+        ch.sq_calibrated.store(true);   // detect 중엔 자동 캘리브를 돌리지 않는다
+        ch.sq_calib_cnt = 0;
+        bewe_log_push(0,"[DETECT] CH%d armed %.4f-%.4f MHz — baseline 수집 중 (margin %.0fdB)\n",
+                      ch_idx, ch.det_s, ch.det_e, ch.sq_threshold.load());
     } else {
         if(!ch.det_on.load()) return;
         bool was = ch.det_locked.load();
@@ -357,6 +373,9 @@ void FFTViewer::set_channel_detect(int ch_idx, bool on){
             ch.mode = Channel::DM_NONE;
             ch.sq_gate.store(false);
         }
+        // sq_threshold 에는 마진값(0~40)이 들어 있다 — 절대 dB 로 해석되면 게이트가 영영
+        // 안 열린다. 재캘리브로 절대 dB 를 다시 잡게 한다.
+        ch.sq_manual.store(false);
         ch.sq_calibrated.store(false); ch.sq_calib_cnt = 0;
         bewe_log_push(0,"[DETECT] CH%d disarmed\n", ch_idx);
     }
@@ -746,9 +765,7 @@ void run_cli_host(){
     };
     srv->cb.on_set_sq_thresh = [&](int idx2, float thr){
         if(idx2<0||idx2>=MAX_CHANNELS) return;
-        v.channels[idx2].sq_threshold.store(thr, std::memory_order_relaxed);
-        v.channels[idx2].sq_manual.store(true, std::memory_order_relaxed);
-        v.channels[idx2].sq_calibrated.store(true, std::memory_order_relaxed);
+        det_apply_sq_thresh(v.channels[idx2], thr);   // detect 채널이면 마진으로 클램프
         srv->broadcast_channel_sync(v.channels, MAX_CHANNELS);
     };
     srv->cb.on_set_autoscale = [&](){

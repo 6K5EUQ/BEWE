@@ -213,7 +213,10 @@ void FFTViewer::update_channel_squelch(){
         ch.sq_sig.store(sig, std::memory_order_relaxed);
 
         // 캘리브레이션: 처음 60프레임(~1초) 수집 후 20th percentile + 10dB
-        if(!ch.sq_calibrated.load(std::memory_order_relaxed)){
+        // detect 채널은 제외 — 그 채널의 sq_threshold 는 절대 dB 가 아니라 기준선 대비
+        // 마진이라(config.hpp) 절대값으로 덮어쓰면 마진 설정이 날아간다. 게이트는 어차피
+        // 검출기가 lock 중에 대신 열어 준다.
+        if(!det && !ch.sq_calibrated.load(std::memory_order_relaxed)){
             if(ch.sq_calib_cnt < 60){
                 ch.sq_calib_buf[ch.sq_calib_cnt++] = peak_db;
             }
@@ -280,8 +283,12 @@ void FFTViewer::update_channel_squelch(){
             if(base_ok){
                 int run_start=-1, gap=0;
                 float run_snr=-999.f;
-                // 짧은 갭은 이어붙임 — AM 반송파/사이드밴드 사이 딥에서 run 이 쪼개지는 것 방지
-                const int GAP_BINS = 2;
+                // 짧은 갭은 이어붙임 — AM 반송파/사이드밴드 딥에서 run 이 쪼개지는 것 방지.
+                // 폭은 주파수로 정한다(config.hpp DET_GAP_KHZ). bin 수로 고정하면 bin 폭이
+                // 설정마다 달라, 넓은 대역에서 나란한 두 교신까지 한 run 으로 묶여 필터가
+                // 둘을 통째로 감싼다.
+                float bin_hz = (float)header.sample_rate / (float)std::max(1, fft_size);
+                const int GAP_BINS = std::max(1, (int)(DET_GAP_KHZ * 1000.0f / std::max(1.0f, bin_hz)));
                 auto close_run = [&](int k_end){
                     if(run_start < 0) return;
                     if(k_end - run_start + 1 >= DET_MIN_RUN_BINS && run_snr > best_snr){
@@ -291,9 +298,12 @@ void FFTViewer::update_channel_squelch(){
                     }
                     run_start=-1; run_snr=-999.f;
                 };
+                // detect 채널의 sq_threshold 는 절대 dB 가 아니라 기준선 대비 마진이다
+                // (config.hpp 주석 참조). 슬라이더로 조절되며 CH_SYNC/host_state 를 그대로 탄다.
+                float margin = std::max(DET_MARGIN_MIN_DB, std::min(DET_MARGIN_MAX_DB, thr));
                 for(int k=0; k<n_bins; k++){
                     float snr = rowp[bin_at(k)] - ch.det_base[(size_t)k];
-                    if(snr >= DET_MARGIN_DB){
+                    if(snr >= margin){
                         if(run_start < 0){ run_start = k; run_snr = -999.f; }
                         if(snr > run_snr) run_snr = snr;
                         gap = 0;
@@ -440,10 +450,18 @@ void FFTViewer::set_channel_detect(int ch_idx, bool on){
         ch.det_locked.store(false);
         ch.det_on.store(true);
         ch.det_base_reset();   // 무장할 때마다 기준선을 새로 잡는다 (arm 시점의 대역 상태 = 기준)
-        // 탐색 대역이 바뀌었으므로 스컬치를 그 폭 기준으로 다시 잡는다
-        ch.sq_calibrated.store(false); ch.sq_calib_cnt = 0;
-        bewe_log_push(0,"[DETECT] CH%d armed %.4f-%.4f MHz — baseline 수집 중\n",
-                      ch_idx, ch.det_s, ch.det_e);
+        // detect 채널의 sq_threshold 는 절대 dB 가 아니라 기준선 대비 마진으로 재해석된다
+        // (config.hpp). 절대 dB 가 들어 있던 값을 기본 마진으로 바꾸고, 마진 범위를 벗어난
+        // 값은 기본값으로 되돌린다 (disarm 후 재arm 시 사용자가 조절한 마진은 유지된다).
+        {
+            float t = ch.sq_threshold.load();
+            if(!(t >= DET_MARGIN_MIN_DB && t <= DET_MARGIN_MAX_DB))
+                ch.sq_threshold.store(DET_MARGIN_DEF_DB);
+        }
+        ch.sq_calibrated.store(true);   // detect 중엔 자동 캘리브를 돌리지 않는다
+        ch.sq_calib_cnt = 0;
+        bewe_log_push(0,"[DETECT] CH%d armed %.4f-%.4f MHz — baseline 수집 중 (margin %.0fdB)\n",
+                      ch_idx, ch.det_s, ch.det_e, ch.sq_threshold.load());
     } else {
         if(!ch.det_on.load()) return;
         bool was = ch.det_locked.load();
@@ -457,6 +475,10 @@ void FFTViewer::set_channel_detect(int ch_idx, bool on){
             ch.mode = Channel::DM_NONE;
             ch.sq_gate.store(false);
         }
+        // sq_threshold 에는 마진값(0~40)이 들어 있다 — 절대 dB 로 해석되면 게이트가 영영
+        // 안 열린다. 재캘리브로 절대 dB 를 다시 잡게 한다. detect 중 슬라이더를 만졌으면
+        // sq_manual 이 서 있으므로 그것도 내린다 (안 내리면 autoscale 재캘리브가 스킵된다).
+        ch.sq_manual.store(false);
         ch.sq_calibrated.store(false); ch.sq_calib_cnt = 0;
         bewe_log_push(0,"[DETECT] CH%d disarmed\n", ch_idx);
     }
@@ -4423,9 +4445,7 @@ void run_streaming_viewer(){
             };
             srv->cb.on_set_sq_thresh = [&](int idx2, float thr){
                 if(idx2<0||idx2>=MAX_CHANNELS) return;
-                v.channels[idx2].sq_threshold.store(thr, std::memory_order_relaxed);
-                v.channels[idx2].sq_manual.store(true, std::memory_order_relaxed);
-                v.channels[idx2].sq_calibrated.store(true, std::memory_order_relaxed);
+                det_apply_sq_thresh(v.channels[idx2], thr);   // detect 채널이면 마진으로 클램프
                 srv->broadcast_channel_sync(v.channels, MAX_CHANNELS);
             };
             srv->cb.on_set_autoscale = [&](){
@@ -6513,59 +6533,70 @@ void run_streaming_viewer(){
         ImGui::SameLine();
 
         // ── Squelch slider (선택 채널만) ──────────────────────────────────
+        // Detect 채널에서는 같은 슬라이더가 "기준선 대비 마진" 노브로 바뀐다.
+        // sq_threshold 필드를 그대로 재사용하므로(config.hpp) CH_SYNC·host_state·
+        // cmd_set_sq_thresh 경로가 전부 그대로 동작한다 — 범위와 라벨만 갈아끼운다.
         if(sci>=0&&v.channels[sci].filter_active){
             Channel& sch=v.channels[sci];
+            bool  det_ch = sch.det_on.load(std::memory_order_relaxed);
             float sig  =sch.sq_sig .load(std::memory_order_relaxed);
             bool  gopen=sch.sq_gate.load(std::memory_order_relaxed);
             const float SLIDER_W=160.0f, SLIDER_H=14.0f;
             ImVec2 sp=ImGui::GetCursorScreenPos();
             sp.y=ImGui::GetWindowPos().y+(TOPBAR_H-SLIDER_H)/2.0f;
             ImDrawList* bdl=ImGui::GetWindowDrawList();
-            const float DB_MIN=-100.0f, DB_MAX=0.0f;
+            const float DB_MIN = det_ch ? DET_MARGIN_MIN_DB : -100.0f;
+            const float DB_MAX = det_ch ? DET_MARGIN_MAX_DB :    0.0f;
             const float DB_RNG=std::max(1.0f,DB_MAX-DB_MIN);
+            const float STEP   = det_ch ? 1.0f : 3.0f;   // 마진은 1dB 단위가 쓸모있다
             float thr_db=sch.sq_threshold.load(std::memory_order_relaxed);
             auto to_x=[&](float db)->float{
                 float t=(db-DB_MIN)/DB_RNG; t=t<0?0:t>1?1:t;
                 return sp.x+t*SLIDER_W;
             };
             bdl->AddRectFilled(ImVec2(sp.x,sp.y),ImVec2(sp.x+SLIDER_W,sp.y+SLIDER_H),IM_COL32(40,40,40,255),3);
-            float sw=to_x(sig)-sp.x;
-            if(sw>0){
-                ImU32 sc=gopen?IM_COL32(60,220,60,200):IM_COL32(40,110,40,150);
-                bdl->AddRectFilled(ImVec2(sp.x,sp.y),ImVec2(sp.x+sw,sp.y+SLIDER_H),sc,3);
+            // 신호 게이지는 절대 dB(sq_sig) 기준이라 마진 축에는 의미가 없다.
+            // detect 채널에서는 대신 설정된 마진만큼 바를 채우고, lock 중이면 밝게 칠한다.
+            if(det_ch){
+                float mw=to_x(thr_db)-sp.x;
+                if(mw>0){
+                    bool lk=sch.det_locked.load(std::memory_order_relaxed);
+                    ImU32 mc=lk?IM_COL32(255,90,190,200):IM_COL32(120,60,110,150);
+                    bdl->AddRectFilled(ImVec2(sp.x,sp.y),ImVec2(sp.x+mw,sp.y+SLIDER_H),mc,3);
+                }
+            } else {
+                float sw=to_x(sig)-sp.x;
+                if(sw>0){
+                    ImU32 sc=gopen?IM_COL32(60,220,60,200):IM_COL32(40,110,40,150);
+                    bdl->AddRectFilled(ImVec2(sp.x,sp.y),ImVec2(sp.x+sw,sp.y+SLIDER_H),sc,3);
+                }
             }
             float tx=to_x(thr_db);
             bdl->AddLine(ImVec2(tx,sp.y),ImVec2(tx,sp.y+SLIDER_H),IM_COL32(255,220,0,230),2.5f);
-            char lbl[20]; snprintf(lbl,sizeof(lbl),"SQL:%.0fdB",thr_db);
+            char lbl[24];
+            if(det_ch) snprintf(lbl,sizeof(lbl),"DET:+%.0fdB",thr_db);
+            else       snprintf(lbl,sizeof(lbl),"SQL:%.0fdB",thr_db);
             ImVec2 lsz=ImGui::CalcTextSize(lbl);
             bdl->AddText(ImVec2(sp.x+SLIDER_W/2-lsz.x/2,sp.y+(SLIDER_H-lsz.y)/2),IM_COL32(230,230,230,255),lbl);
             ImGui::SetCursorScreenPos(sp);
             ImGui::InvisibleButton("##sql",ImVec2(SLIDER_W,SLIDER_H));
+            // detect 채널의 임계는 마진이라 자동 캘리브가 덮어쓰면 안 된다 → 항상 calibrated 유지.
+            auto apply_thr=[&](float nthr){
+                nthr=nthr<DB_MIN?DB_MIN:nthr>DB_MAX?DB_MAX:nthr;
+                if(v.remote_mode && v.net_cli){ v.net_cli->cmd_set_sq_thresh(sci,nthr); return; }
+                det_apply_sq_thresh(sch, nthr);
+                if(v.net_srv) v.net_srv->broadcast_channel_sync(v.channels,MAX_CHANNELS);
+            };
             if(ImGui::IsItemHovered()){
+                ImGui::SetTooltip(det_ch
+                    ? "Detect margin — 기준선보다 이만큼 높은 신호만 잡는다.\n낮출수록 민감(오검출↑), 높일수록 강한 신호만."
+                    : "Squelch threshold");
                 float wheel=ImGui::GetIO().MouseWheel;
-                if(wheel!=0.0f){
-                    float nthr=thr_db+(wheel>0?3.0f:-3.0f);
-                    nthr=nthr<DB_MIN?DB_MIN:nthr>DB_MAX?DB_MAX:nthr;
-                    if(v.remote_mode && v.net_cli) v.net_cli->cmd_set_sq_thresh(sci,nthr);
-                    else {
-                        sch.sq_threshold.store(nthr,std::memory_order_relaxed);
-                        sch.sq_manual.store(true,std::memory_order_relaxed);
-                        sch.sq_calibrated.store(true,std::memory_order_relaxed);
-                        if(v.net_srv) v.net_srv->broadcast_channel_sync(v.channels,MAX_CHANNELS);
-                    }
-                }
+                if(wheel!=0.0f) apply_thr(thr_db+(wheel>0?STEP:-STEP));
             }
             if(ImGui::IsItemActive()){
                 float mx=ImGui::GetIO().MousePos.x;
-                float nthr=DB_MIN+((mx-sp.x)/SLIDER_W)*DB_RNG;
-                nthr=nthr<DB_MIN?DB_MIN:nthr>DB_MAX?DB_MAX:nthr;
-                if(v.remote_mode && v.net_cli) v.net_cli->cmd_set_sq_thresh(sci,nthr);
-                else {
-                    sch.sq_threshold.store(nthr,std::memory_order_relaxed);
-                    sch.sq_manual.store(true,std::memory_order_relaxed);
-                    sch.sq_calibrated.store(true,std::memory_order_relaxed);
-                    if(v.net_srv) v.net_srv->broadcast_channel_sync(v.channels,MAX_CHANNELS);
-                }
+                apply_thr(DB_MIN+((mx-sp.x)/SLIDER_W)*DB_RNG);
             }
             ImGui::SetCursorScreenPos(ImVec2(sp.x+SLIDER_W+6,ImGui::GetCursorScreenPos().y));
         }
