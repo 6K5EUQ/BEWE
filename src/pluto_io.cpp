@@ -75,7 +75,7 @@ bool FFTViewer::initialize_pluto(float cf_mhz, float sr_msps){
         fprintf(stderr,"Pluto: ad9361_set_bb_rate(%u) failed rc=%d\n", sr, rc);
     pluto_cfg_attr_ll(v0, "rf_bandwidth",        (long long)sr);
     pluto_cfg_attr_s (v0, "gain_control_mode",   "manual");
-    pluto_cfg_attr_ll(v0, "hardwaregain",        20);
+    pluto_cfg_attr_ll(v0, "hardwaregain",        PLUTO_RX_GAIN_DB);
     pluto_cfg_attr_ll(lo, "frequency",           (long long)(cf_mhz * 1e6));
 
     // 실제 값 재읽기

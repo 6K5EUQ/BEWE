@@ -15,9 +15,10 @@
 #endif
 
 // ── Hardware (hw_config.hpp 참조) ─────────────────────────────────────────
-// RX_GAIN: BladeRF=10, RTL-SDR=396 (39.6dB, 0.1dB 단위)
+// RX_GAIN: BladeRF=10, RTL-SDR=396 (39.6dB, 0.1dB 단위), Pluto=35dB
 #define BLADERF_RX_GAIN        10
 #define RTLSDR_RX_GAIN_TENTHS  396   // 39.6 dB
+#define PLUTO_RX_GAIN_DB       35    // AD9363 manual gain 0~71 dB
 
 // ── FFT / Display ─────────────────────────────────────────────────────────
 #define DEFAULT_FFT_SIZE       8192

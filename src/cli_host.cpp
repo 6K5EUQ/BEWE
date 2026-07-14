@@ -1125,8 +1125,18 @@ void run_cli_host(){
     };
     srv->cb.on_update_ch_range = [&](int idx, float s, float e){
         if(idx<0||idx>=MAX_CHANNELS) return;
-        v.channels[idx].s = s;
-        v.channels[idx].e = e;
+        Channel& c = v.channels[idx];
+        // detect 채널을 lock 아닌 상태에서 사용자가 넓히면(= 탐색 대역을 다시 그린 것)
+        // det_s/det_e 도 따라가야 한다. arm 시점 값만 붙들고 있으면, 신호가 끝나 release
+        // 될 때 ch.s/e 를 옛 폭으로 되돌려 사용자가 늘린 게 사라진다.
+        // lock 중이라면 ch.s/e 는 잡은 신호의 폭이므로 탐색 대역으로 옮기지 않는다.
+        if(c.det_on.load(std::memory_order_relaxed) &&
+           !c.det_locked.load(std::memory_order_relaxed)){
+            c.det_s = s; c.det_e = e;
+            c.det_base_reset();   // 대역이 바뀌었으니 기준선은 무효 — 새로 쌓는다
+        }
+        c.s = s;
+        c.e = e;
         if(v.channels[idx].dem_run.load()){
             Channel::DemodMode md = v.channels[idx].mode;
             v.stop_dem(idx,false); v.start_dem(idx, md);   // 재튜닝 — 디코더 보존
@@ -2257,11 +2267,13 @@ void run_cli_host(){
         }
 
         // ── 지연 autoscale 트리거 (SDR 재연결 settling 끝난 후 발동) ──────
+        // autoscale_active/init/accum 은 캡처 스레드 소유다 (락 없이 hot loop 에서 읽고 쓴다).
+        // 여기서 직접 건드리면 캡처 스레드가 변경을 못 보거나(평범한 bool — 캐싱 가능),
+        // accum 을 동시에 만져 레이스가 난다. atomic 인 autoscale_req 만 세우고, 실제 리셋은
+        // 캡처 스레드가 data_mtx 안에서 exchange 해 처리한다 (/rx autoscale 명령과 같은 경로).
         if(pending_autoscale_at != clk::time_point{} && clk::now() >= pending_autoscale_at){
             pending_autoscale_at = clk::time_point{};
-            v.autoscale_active = true;
-            v.autoscale_init   = false;
-            v.autoscale_accum.clear();
+            v.autoscale_req.store(true, std::memory_order_relaxed);
             bewe_log_push(0, "[autoscale] post-reconnect trigger (2s settling done)\n");
         }
 

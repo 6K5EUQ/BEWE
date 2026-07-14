@@ -1,4 +1,5 @@
 #pragma once
+#include "config.hpp"   // *_RX_GAIN 기본값
 #include <cstdint>
 #include <cstdlib>  // abs(int)
 
@@ -104,7 +105,7 @@ inline HWConfig make_pluto_config(uint32_t actual_sr){
     c.name            = "ADALM-Pluto";
     c.gain_min        = 0.0f;       // AD9363 manual gain 0..71
     c.gain_max        = 71.0f;
-    c.gain_default    = 20.0f;
+    c.gain_default    = (float)PLUTO_RX_GAIN_DB;
     return c;
 }
 

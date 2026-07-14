@@ -665,6 +665,18 @@ void FFTViewer::handle_channel_interactions(float gx, float gw, float gy, float 
                 if(!channels[i].resize_drag) continue;
                 channels[i].resize_drag=false;
                 any_resized = true;
+                // detect 채널을 lock 아닌 상태에서 넓혔다면 그건 탐색 대역을 다시 그린 것이다
+                // → det_s/det_e 도 따라가야 한다. arm 시점 값만 붙들면, 신호가 끝나 release
+                // 될 때 옛 폭으로 되돌려 사용자가 늘린 게 사라진다. lock 중이면 s/e 는 잡은
+                // 신호의 폭이므로 탐색 대역으로 옮기지 않는다. (HOST 로컬 경로 — JOIN 은
+                // cmd_update_ch_range 로 HOST 에 보내고 거기서 같은 처리를 한다)
+                if(!remote_mode &&
+                   channels[i].det_on.load(std::memory_order_relaxed) &&
+                   !channels[i].det_locked.load(std::memory_order_relaxed)){
+                    channels[i].det_s = channels[i].s;
+                    channels[i].det_e = channels[i].e;
+                    channels[i].det_base_reset();   // 대역이 바뀌었으니 기준선 무효 → 재수집
+                }
                 if(channels[i].dem_run.load()){
                     Channel::DemodMode md=channels[i].mode;
                     stop_dem(i,false); start_dem(i,md);   // 재튜닝 — 디코더 보존
