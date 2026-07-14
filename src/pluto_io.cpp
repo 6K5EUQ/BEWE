@@ -14,8 +14,11 @@
 static constexpr uint32_t PLUTO_DEFAULT_SR = 3200000;  // 3.2 MSPS
 static constexpr uint32_t PLUTO_MAX_SR     = 61440000; // 61.44 MSPS (AD9361 최대, USB2 드롭 발생)
 // Pluto는 모든 SR에서 TM IQ 롤링 허용 (USB 2.0 한계로 고 SR에서 데이터 드롭 발생 가능 — 워터폴/HIST 용도).
+// iio_buffer 샘플 수는 항상 max(PLUTO_BUF_MIN, fft_input_size) — 생성/재생성 세 곳
+// (initialize / 캡처루프 진입 / SR·FFT size 변경) 이 같은 공식을 쓴다. 예전엔 초기값용
+// 상수(8192)를 따로 두고 SR 변경 때 그걸로 되돌려, FFT size 를 키운 상태에서 SR 을 바꾸면
+// 버퍼만 8192 로 줄고 fft_input_size 는 큰 채로 남아 RX 가 통째로 폐기됐다.
 static constexpr int      PLUTO_BUF_MIN    = 8192;     // iio_buffer 최소 샘플 수
-static constexpr int      PLUTO_BUF_SAMPS  = 8192;     // 초기 iio_buffer 샘플 수 (FFT size 변경 시 확장됨)
 
 // ── URI 후보 순회 (USB → IP) ─────────────────────────────────────────────
 static struct iio_context* pluto_open_ctx(){
@@ -90,9 +93,15 @@ bool FFTViewer::initialize_pluto(float cf_mhz, float sr_msps){
     iio_channel_enable(ri);
     iio_channel_enable(rq);
 
-    struct iio_buffer* buf = iio_device_create_buffer(rxd, PLUTO_BUF_SAMPS, false);
+    // 버퍼는 현재 fft_input_size 를 담을 수 있어야 한다. 8192 로 고정하면, FFT size 를
+    // 키워 둔 상태에서 재초기화(/chassis 1 reset, SDR 재연결)가 돌 때 버퍼만 8192 로
+    // 돌아가고 fft_input_size 는 그대로 커서, RX 루프가 매 refill 을 통째로 버린다
+    // (rx_avail < fft_input_size → 폐기). 에러는 안 나므로 SDR=OK 인 채 화면만 멈춘다.
+    int init_buf_samps = std::max(PLUTO_BUF_MIN, fft_input_size);
+    struct iio_buffer* buf = iio_device_create_buffer(rxd, init_buf_samps, false);
     if(!buf){
-        fprintf(stderr,"Pluto: iio_device_create_buffer failed (errno=%d)\n", errno);
+        fprintf(stderr,"Pluto: iio_device_create_buffer failed (size=%d errno=%d)\n",
+                init_buf_samps, errno);
         iio_context_destroy(ctx); return false;
     }
 
@@ -150,8 +159,10 @@ void FFTViewer::capture_and_process_pluto(){
     struct iio_channel* lo  = iio_device_find_channel(phy, "altvoltage0", true);
     struct iio_channel* v0p = iio_device_find_channel(phy, "voltage0",    false);
 
-    // 현재 iio_buffer 샘플 용량 (FFT size 변경 시 확장)
-    int cur_buf_samps = PLUTO_BUF_SAMPS;
+    // 현재 iio_buffer 샘플 용량 (FFT size 변경 시 확장).
+    // initialize() 가 만든 크기와 같은 공식이어야 한다 — 어긋나면 언팩 루프가 버퍼를
+    // 다 읽지 못하거나(작게 잡으면), 못 채운 채 폐기된다(크게 잡으면).
+    int cur_buf_samps = std::max(PLUTO_BUF_MIN, fft_input_size);
     int16_t* iq16 = new int16_t[cur_buf_samps * 2];
 
     std::vector<float> pacc(fft_size, 0.0f);
@@ -252,7 +263,11 @@ void FFTViewer::capture_and_process_pluto(){
                 bewe_log_push(0,"[Pluto] ad9361_set_bb_rate(%u) FAILED rc=%d\n", new_sr, bb_rc);
             if(!bw_write_ok)
                 bewe_log_push(0,"[Pluto] rf_bandwidth write FAILED for %u Hz\n", new_sr);
-            buf = iio_device_create_buffer(rxd, PLUTO_BUF_SAMPS, false);
+            // 버퍼는 **현재 크기(cur_buf_samps)** 로 다시 만든다. 8192 로 고정하면 FFT size 를
+            // 키워 확장해 둔 버퍼가 SR 변경만으로 쪼그라드는데 fft_input_size 는 큰 채로 남아,
+            // RX 루프가 매 refill 을 통째로 버린다 (rx_avail < fft_input_size → 폐기).
+            // sdr_stream_error 는 안 서므로 SDR=OK 인 채 화면만 멈춘다.
+            buf = iio_device_create_buffer(rxd, cur_buf_samps, false);
             pluto_rx_buf = buf;
             if(!buf){ sdr_stream_error.store(true); break; }
 
