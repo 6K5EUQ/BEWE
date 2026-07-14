@@ -91,12 +91,6 @@ void FFTViewer::update_channel_squelch(){
             notch_bands.emplace_back(std::min(n.freq_lo_mhz, n.freq_hi_mhz),
                                      std::max(n.freq_lo_mhz, n.freq_hi_mhz));
     }
-    auto in_notch = [&](float f_mhz){
-        for(const auto& nb : notch_bands)
-            if(f_mhz >= nb.first && f_mhz <= nb.second) return true;
-        return false;
-    };
-
     {
     std::lock_guard<std::mutex> lk(data_mtx);
     float cf_mhz = (float)(header.center_frequency / 1e6);
@@ -223,6 +217,32 @@ void FFTViewer::update_channel_squelch(){
                 // 주파수로 정한다 — bin 폭이 설정마다 달라 나란한 두 교신이 묶이는 것을 막는다.
                 float bin_hz = (float)header.sample_rate / (float)std::max(1, fft_size);
                 const int GAP_BINS = std::max(1, (int)(DET_GAP_KHZ * 1000.0f / std::max(1.0f, bin_hz)));
+                // 노치를 스캔 인덱스(k) 구간으로 미리 변환한다. bin 마다 주파수를 만들어
+                // 노치 리스트를 훑으면 그 검사만으로 스캔 본체보다 4배 비싸진다 (측정치).
+                // k 는 scan_s..scan_e 안에서 선형이라 경계만 계산하면 루프는 정수 비교로 끝난다.
+                struct KRange { int lo, hi; };
+                static thread_local std::vector<KRange> notch_k;
+                notch_k.clear();
+                if(!notch_bands.empty() && n_bins > 1){
+                    float lo_mhz = std::min(scan_s, scan_e);
+                    float hi_mhz = std::max(scan_s, scan_e);
+                    float span   = hi_mhz - lo_mhz;
+                    if(span > 0.f){
+                        float k_per_mhz = (float)(n_bins - 1) / span;
+                        for(const auto& nb : notch_bands){
+                            if(nb.second < lo_mhz || nb.first > hi_mhz) continue;  // 대역 밖
+                            int k0 = (int)std::floor((nb.first  - lo_mhz) * k_per_mhz);
+                            int k1 = (int)std::ceil ((nb.second - lo_mhz) * k_per_mhz);
+                            k0 = std::max(0, k0);
+                            k1 = std::min(n_bins - 1, k1);
+                            if(k0 <= k1) notch_k.push_back({k0, k1});
+                        }
+                        // 정렬 후 스캔에서 커서 하나로 훑는다 → bin 당 비교 1회 (노치 수 무관)
+                        std::sort(notch_k.begin(), notch_k.end(),
+                                  [](const KRange& a, const KRange& b){ return a.lo < b.lo; });
+                    }
+                }
+                size_t nk_i = 0;   // 현재 k 이후의 첫 노치 (스캔이 전진하면 같이 전진)
                 // lock 중에는 "지금 듣고 있는 그 신호"만 따라간다. 대역 어딘가에서 더 센 신호가
                 // 떠도 그건 별개 교신이므로 무시 — 안 그러면 그 run 이 best 가 되고, 아래 확장
                 // 분기가 min/max 로 두 신호를 다 덮어 필터가 통째로 벌어진다 (두 신호가 동시에
@@ -252,9 +272,12 @@ void FFTViewer::update_channel_squelch(){
                     // 노치 구간은 신호로 치지 않는다 (Ctrl+우클릭으로 친 스퍼/간섭 대역).
                     // 진행 중인 run 은 여기서 끊는다 — gap 으로 세면 노치를 건너뛰어 양옆
                     // 신호가 한 run 으로 이어져 필터가 노치를 통째로 삼킨다.
-                    if(!notch_bands.empty() && in_notch(bin_to_freq(bin_at(k)))){
+                    // 커서(nk_i)는 k 와 함께 전진하므로 bin 당 비교는 1회다.
+                    while(nk_i < notch_k.size() && notch_k[nk_i].hi < k) nk_i++;
+                    if(nk_i < notch_k.size() && k >= notch_k[nk_i].lo){
                         if(run_start >= 0) close_run(k - 1);
                         gap = 0;
+                        k = notch_k[nk_i].hi;   // 노치 끝까지 건너뛴다 (루프의 k++ 가 다음 bin)
                         continue;
                     }
                     float snr = rowp[bin_at(k)] - ch.det_base[(size_t)k];
