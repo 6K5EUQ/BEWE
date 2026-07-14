@@ -4543,8 +4543,7 @@ void run_streaming_viewer(){
             };
             srv->cb.on_set_autoscale = [&](){
                 bewe_log_push(0, "[CMD] Autoscale requested\n");
-                v.autoscale_active=true; v.autoscale_init=false;
-                v.autoscale_accum.clear();
+                v.autoscale_req.store(true, std::memory_order_relaxed);  // 캡처 스레드가 처리
                 v.sq_recalib_req.store(true, std::memory_order_relaxed);
             };
             srv->cb.on_set_ch_detect = [&](int idx, bool on){
@@ -6474,9 +6473,11 @@ void run_streaming_viewer(){
                 v.net_cli->cmd_set_freq(new_freq);
                 v.net_cli->cmd_set_autoscale();
             } else {
+                // autoscale 상태(active/init/accum)는 캡처 스레드 소유다. UI 스레드가
+                // 직접 쓰면 plain bool 쓰기가 유실되거나(캡처루프가 못 봄) accum.clear()가
+                // autoscale_wp 를 남겨둬 size 0 벡터에 인덱스 쓰기가 난다. atomic req 로 위임.
                 v.pending_cf=new_freq; v.freq_req=true;
-                v.autoscale_active=true; v.autoscale_init=false;
-                v.autoscale_accum.clear();
+                v.autoscale_req.store(true, std::memory_order_relaxed);
             }
             fdeact=true;
         }

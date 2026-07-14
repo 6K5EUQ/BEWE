@@ -856,8 +856,7 @@ void run_cli_host(){
         srv->broadcast_channel_sync(v.channels, MAX_CHANNELS);
     };
     srv->cb.on_set_autoscale = [&](){
-        v.autoscale_active=true; v.autoscale_init=false;
-        v.autoscale_accum.clear();
+        v.autoscale_req.store(true, std::memory_order_relaxed);  // 캡처 스레드가 처리 (레이스 방지)
         v.sq_recalib_req.store(true, std::memory_order_relaxed);
     };
     srv->cb.on_set_ch_detect = [&](int idx, bool on){

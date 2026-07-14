@@ -72,10 +72,14 @@ bool     g_tex_dirty = true;
 double   g_t0=0, g_t1=0;
 double   g_f0=0, g_f1=0;
 
-// 메인 워터폴의 display_power_min/max를 공유 — 프레임 사이 변화 감지용 캐시.
-// draw_modal()이 매 프레임 비교해 다르면 g_tex_dirty=true 후 rebuild_texture 재호출.
-float    g_view_db_min_cached = 0.0f;
-float    g_view_db_max_cached = 0.0f;
+// 색 윈도 — 열린 파일 자체를 스캔해 얻는다 (라이브 워터폴과 무관).
+// 헤더의 db_min/db_max 는 byte↔dB 눈금자일 뿐, 파일이 실제로 담고 있는 신호
+// 범위와 다르다 (파일 오픈 시점의 값이라 stale 하기도 하다). 그래서 전 행의
+// 바이트 히스토그램을 세어 실시간 autoscale 과 같은 공식으로 윈도를 잡는다.
+float    g_file_db_min = 0.0f;
+float    g_file_db_max = 0.0f;
+uint64_t g_scanned_rows = 0;      // 스캔 완료 행 수 (LIVE 증가분만 추가 스캔)
+uint64_t g_hist[256] = {0};       // 바이트 히스토그램 (누적)
 
 // Right-panel split ratio (file list width fraction, 0..1)
 float    g_right_ratio = 0.22f;
@@ -180,6 +184,8 @@ void close_open(){
     g_open = OpenFile{};
     g_last_known_rows = 0;
     g_tex_dirty = true;
+    std::memset(g_hist, 0, sizeof(g_hist));
+    g_scanned_rows = 0;
 }
 
 bool open_file(const std::string& path){
@@ -307,6 +313,61 @@ void refresh_size_live(){
         g_tex_dirty = true;
         g_last_known_rows = g_open.num_rows;
     }
+}
+
+// 열린 파일의 dB 색 윈도를 파일 데이터 자체에서 구한다.
+// 실시간 autoscale (rtlsdr_io.cpp 등) 과 같은 공식: 노이즈플로어 = 하위 15% 분위수,
+// pmin = noise - 5dB, pmax = peak + 20dB, 최소 스팬 20dB.
+// 전 행을 훑되 바이트 히스토그램(256칸)만 누적하므로 분위수·최대값이 O(1) 로 나온다.
+// LIVE 파일은 계속 자라므로 새로 추가된 행만 이어서 스캔한다 (g_scanned_rows).
+static void scan_file_db_range(){
+    if(!g_open.fp || g_open.hdr.fft_size == 0) return;
+    const uint32_t fft_sz = g_open.hdr.fft_size;
+    if(g_scanned_rows > g_open.num_rows){    // 다른 파일로 교체됨 → 처음부터
+        std::memset(g_hist, 0, sizeof(g_hist));
+        g_scanned_rows = 0;
+    }
+    if(g_scanned_rows == g_open.num_rows) return;
+
+    std::vector<uint8_t> rowbuf(fft_sz);
+    for(uint64_t r = g_scanned_rows; r < g_open.num_rows; r++){
+        uint64_t off = sizeof(LongWaterfall::FileHeader) + r * fft_sz;
+        const uint8_t* p;
+        if(g_open.map && off + fft_sz <= g_open.map_size){
+            p = g_open.map + off;
+        } else {
+            fseek(g_open.fp, (long)off, SEEK_SET);
+            if(fread(rowbuf.data(), 1, fft_sz, g_open.fp) != fft_sz) break;
+            p = rowbuf.data();
+        }
+        // bin 0 은 DC — 실시간 autoscale 도 i=1 부터 누적하므로 동일하게 제외.
+        for(uint32_t i = 1; i < fft_sz; i++) g_hist[p[i]]++;
+        g_scanned_rows = r + 1;
+    }
+
+    uint64_t total = 0;
+    for(int b = 0; b < 256; b++) total += g_hist[b];
+    if(total == 0){                          // 빈 파일 → 헤더 눈금자 그대로
+        g_file_db_min = g_open.hdr.db_min;
+        g_file_db_max = g_open.hdr.db_max;
+        return;
+    }
+    uint64_t want = (uint64_t)(total * 0.15);
+    int noise_b = 0, peak_b = 0;
+    uint64_t acc = 0;
+    for(int b = 0; b < 256; b++){
+        acc += g_hist[b];
+        if(acc > want){ noise_b = b; break; }
+    }
+    for(int b = 255; b >= 0; b--){
+        if(g_hist[b]){ peak_b = b; break; }
+    }
+    const float fmin = g_open.hdr.db_min, fmax = g_open.hdr.db_max;
+    float noise = LongWaterfall::byte_to_db((uint8_t)noise_b, fmin, fmax);
+    float peak  = LongWaterfall::byte_to_db((uint8_t)peak_b,  fmin, fmax);
+    g_file_db_min = noise - 5.0f;
+    g_file_db_max = peak + 20.0f;
+    if(g_file_db_max - g_file_db_min < 20.f) g_file_db_max = g_file_db_min + 20.f;
 }
 
 void rebuild_texture(float view_db_min, float view_db_max){
@@ -667,6 +728,12 @@ void draw_modal(FFTViewer& v, NetClient* cli){
     } else {
         // host의 LIVE 파일이면 file size 폴링 (JOIN 측 hist/live/ mirror 는 v4.6.0 에서 제거).
         if(g_open.path == live_path) refresh_size_live();
+        // 색 윈도는 파일 데이터에서 — LIVE 로 자라면 새 행만 이어서 스캔.
+        {
+            float pmin = g_file_db_min, pmax = g_file_db_max;
+            scan_file_db_range();
+            if(g_file_db_min != pmin || g_file_db_max != pmax) g_tex_dirty = true;
+        }
         const auto& h = g_open.hdr;
         int off_h = header_utc_offset(h);
         uint32_t row_rate = (uint32_t)std::max(1.0f, h.row_rate_hz);
@@ -689,8 +756,8 @@ void draw_modal(FFTViewer& v, NetClient* cli){
         }
         ImGui::Text("Start : %s", fmt_local_time(h.start_utc_unix, off_h).c_str());
         ImGui::Text("Stop  : %s", fmt_local_time(stop_utc, off_h).c_str());
-        ImGui::Text("Color : %.1f / %.1f dB (shared with main)",
-            v.display_power_min, v.display_power_max);
+        ImGui::Text("Color : %.1f / %.1f dB (from file)",
+            g_file_db_min, g_file_db_max);
         ImGui::Unindent(10.0f);
         ImGui::Dummy(ImVec2(0, 2));
         ImGui::Separator();
@@ -706,14 +773,7 @@ void draw_modal(FFTViewer& v, NetClient* cli){
                 g_tex_w = target_w; g_tex_h = target_h;
                 g_tex_dirty = true;
             }
-            // 메인 워터폴 dB 윈도가 바뀌면 HIST 텍스처도 재빌드.
-            if(v.display_power_min != g_view_db_min_cached ||
-               v.display_power_max != g_view_db_max_cached){
-                g_view_db_min_cached = v.display_power_min;
-                g_view_db_max_cached = v.display_power_max;
-                g_tex_dirty = true;
-            }
-            if(g_tex_dirty) rebuild_texture(v.display_power_min, v.display_power_max);
+            if(g_tex_dirty) rebuild_texture(g_file_db_min, g_file_db_max);
 
             ImVec2 img_pos = ImGui::GetCursorScreenPos();
             if(g_tex){
