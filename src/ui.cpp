@@ -391,6 +391,10 @@ void FFTViewer::update_channel_squelch(){
                 if(!locked){
                     det_pending.push_back({c, best_lo-DET_GUARD_MHZ, best_hi+DET_GUARD_MHZ, true});
                     ch.det_ext_cnt = 0;
+                } else if(bewe_mod_ch_spec_bw(c) > 0.f){
+                    // 폭이 디코더 규격으로 고정된 채널 — 확장하지 않는다 (확장해도 lock
+                    // 적용부가 규격 폭으로 되돌려, stop_dem/start_dem 만 반복되고 복조가 끊긴다).
+                    ch.det_ext_cnt = 0;
                 } else if(best_lo < ch.s || best_hi > ch.e){
                     // 현재 대역 밖으로 삐져나감 → 확장 후보. 노이즈 스파이크 한 번으로 넓히지 않도록
                     // 연속 프레임 동안 관측될 때만 반영하고, 그동안 관측된 최대치를 누적한다.
@@ -471,8 +475,18 @@ void FFTViewer::update_channel_squelch(){
             d.s = std::max(d.s, ch.det_s);
             d.e = std::min(d.e, ch.det_e);
             if(d.e <= d.s) continue;
-            // 항공 AM 대역(118~137MHz)이면 AM, 그 외는 FM — 하드코딩
             float mid = (d.s + d.e) * 0.5f;
+            // 디코더가 켜져 있으면 폭은 그 신호 규격이 정한다 (중심주파수만 검출값 사용).
+            // 검출 폭은 버스트마다 흔들려서 그대로 필터로 쓰면 디코더 통과대역도 흔들린다.
+            float spec_bw = bewe_mod_ch_spec_bw(d.ch);
+            if(spec_bw > 0.f){
+                float half = spec_bw * 0.5e-6f;              // Hz → MHz, 반폭
+                d.s = mid - half; d.e = mid + half;
+                d.s = std::max(d.s, ch.det_s);               // 탐색 대역 밖으로 나가지 않게
+                d.e = std::min(d.e, ch.det_e);
+                if(d.e <= d.s) continue;
+            }
+            // 항공 AM 대역(118~137MHz)이면 AM, 그 외는 FM — 하드코딩
             Channel::DemodMode md = (mid >= 118.0f && mid <= 137.0f)
                                         ? Channel::DM_AM : Channel::DM_FM;
             bool was = ch.det_locked.load(std::memory_order_relaxed);

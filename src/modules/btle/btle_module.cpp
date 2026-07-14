@@ -268,6 +268,7 @@ static bool s_registered = [](){
     m.label = "Bluetooth LE";
     m.planned = false;
     m.target_modes = (uint8_t)(1u << Channel::DM_FM);   // GFSK → FM 채널필터에 노출
+    m.spec_bw_hz   = 2000000.0f;  // BT 4.x: 1 Mbit/s GFSK — 2 MHz 채널간격
 #ifndef BEWE_HEADLESS
     m.draw_content = &draw_content;
 #endif

@@ -25,6 +25,11 @@ struct BeweModule {
     const char* label;     // DEMOD 패널 표시 이름 ("ACARS")
     uint8_t target_modes;  // 적합 채널 demod 모드 비트 (1<<DM_AM 등). 0 = 채널타깃형 아님
     bool planned;          // true = 예정(placeholder) 모듈: 런처 목록에 비활성 표시, 기능 없음
+    // 신호 규격이 요구하는 채널 대역폭 (Hz). 0 = 미지정(사용자가 그린 폭을 그대로 씀).
+    // detect 채널이 신호를 잡으면 중심주파수는 검출값으로, **폭은 이 값으로** 필터를 잡는다
+    // — 디코더가 원하는 통과대역과 화면의 필터가 어긋나지 않게 하고, 버스트마다 검출 폭이
+    // 흔들려도 디코더 입력이 흔들리지 않게 한다.
+    float spec_bw_hz;
     // ── GUI hooks (CLI 빌드에선 nullptr) ──
     void (*init)(FFTViewer& v);                            // 시작 시 1회 (DB 로드 등)
     void (*draw_content)(FFTViewer& v, bool just_opened);  // 데이터 뷰 탭 내용
@@ -64,6 +69,11 @@ void bewe_mod_host_mask_clear(FFTViewer& v, const char* id, int ch); // 워커 �
 uint64_t bewe_mod_host_mask(const char* id);                     // HOST 자기 mask (ch 0~63)
 bool bewe_mod_ch_has_decoder(int ch);                            // 이 채널서 도는 디코더 1개+ 있으면 true
 bool bewe_mod_ch_decode_on(bool remote, int ch);                 // decode 활성 여부 (HOST=host_mask / JOIN=targets 미러)
+// 이 채널에 켜진 디코더들이 요구하는 대역폭 (Hz). 없거나 전부 미지정이면 0.
+// 여러 디코더가 동시에 켜져 있으면 가장 넓은 규격을 쓴다 (좁게 잡으면 신호가 잘린다).
+// detect 가 신호를 잡을 때 필터 폭을 이 값으로 맞추는 데 쓴다 — 중심주파수는 검출값,
+// 폭은 규격값.
+float bewe_mod_ch_spec_bw(int ch);
 void bewe_mod_reconcile(FFTViewer& v);                           // want↔host_mask 재조정 (HOST 주기 호출)
 void bewe_mod_want_clear_ch(int ch);                             // 채널 진짜 삭제 시 그 ch want 해제
 void bewe_mod_rec_request(const char* id, const char* station, int ch, uint64_t rec_id);            // JOIN→HOST: 녹음 WAV 요청

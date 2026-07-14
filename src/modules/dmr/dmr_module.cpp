@@ -310,6 +310,7 @@ static bool s_registered = [](){
     m.id    = "dmr";
     m.label = "DMR";
     m.target_modes = (uint8_t)(1u << Channel::DM_FM);
+    m.spec_bw_hz   = 12500.0f;   // ETSI TS 102 361: 12.5 kHz 채널 (4FSK 9600 bps)
     m.planned = false;
 #ifndef BEWE_HEADLESS
     m.draw_content = &draw_content;

@@ -308,6 +308,7 @@ static bool s_registered = [](){
     m.label = "AIS";
     m.planned = false;
     m.target_modes = (uint8_t)(1u << Channel::DM_FM);   // GMSK → FM 채널필터에 활성화
+    m.spec_bw_hz   = 25000.0f;   // ITU-R M.1371: 25 kHz 채널 (9600 bps GMSK)
 #ifndef BEWE_HEADLESS
     m.draw_content = &draw_content;
 #endif

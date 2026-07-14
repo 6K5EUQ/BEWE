@@ -169,6 +169,18 @@ bool bewe_mod_ch_decode_on(bool remote, int ch){
     return false;
 }
 
+float bewe_mod_ch_spec_bw(int ch){
+    if(ch<0 || ch>=64) return 0.f;
+    float best = 0.f;
+    std::lock_guard<std::mutex> lk(g_fw_mtx);
+    for(auto& kv : g_fw){
+        if(!((kv.second.host_mask>>ch)&1)) continue;
+        const BeweModule* m = find_mod(kv.first.c_str());
+        if(m && m->spec_bw_hz > best) best = m->spec_bw_hz;
+    }
+    return best;
+}
+
 void bewe_mod_host_announce(FFTViewer& v){
     (void)v;
     for(auto& m : reg()) if(m.target_modes) host_send_state(m.id);

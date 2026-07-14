@@ -303,6 +303,7 @@ static bool s_registered = [](){
     m.id    = "acars";
     m.label = "ACARS";
     m.target_modes = (uint8_t)(1u << Channel::DM_AM);
+    m.spec_bw_hz   = 12500.0f;   // ARINC 618: 2400 baud MSK/AM — 12.5 kHz 항공채널
 #ifndef BEWE_HEADLESS
     m.init         = &init_gui;
     m.draw_content = &draw_content;
