@@ -2,11 +2,45 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <cstddef>
 #include <cerrno>
 #include <atomic>
+#include <chrono>
 #include <vector>
 #include <sys/socket.h>
 #include <unistd.h>
+
+// ── 누적 바이트 카운터 → KB/s 레이트 샘플러 ──────────────────────────────
+// UI/HB 에서 주기 호출. 창(window)이 min_win_sec 미만이면 직전 값 유지.
+// 누적 카운터는 read-only 로만 참조 — 기존 통계 로거와 간섭 없음.
+struct ByteRateMeter {
+    double   kbps = 0.0;
+    double   sample(uint64_t total_bytes, double min_win_sec = 1.0){
+        auto now = std::chrono::steady_clock::now();
+        if(!started_){ started_ = true; last_ = now; prev_ = total_bytes; return kbps; }
+        double win = std::chrono::duration<double>(now - last_).count();
+        if(win < min_win_sec) return kbps;
+        // 카운터 리셋(재연결) 방어 — 음수 델타면 0 으로 재기준
+        uint64_t d = (total_bytes >= prev_) ? (total_bytes - prev_) : 0;
+        kbps = (double)d / win / 1024.0;
+        last_ = now; prev_ = total_bytes;
+        return kbps;
+    }
+    void reset(){ started_ = false; kbps = 0.0; prev_ = 0; }
+private:
+    bool     started_ = false;
+    uint64_t prev_    = 0;
+    std::chrono::steady_clock::time_point last_{};
+};
+
+// KB/s → heartbeat 전송용 0.01KB/s 정수. double 로 클램프 후 캐스팅 —
+// float→uint32 직캐스팅은 범위초과/NaN 시 UB(쓰레기값) 라서 반드시 경유.
+inline uint32_t kbps_to_x100(double kbps){
+    if(!(kbps > 0.0)) return 0;                      // 음수·NaN → 0
+    double x = kbps * 100.0;
+    if(x >= 4294967295.0) return 4294967295u;        // +inf 포함 포화
+    return (uint32_t)x;
+}
 
 // ── Magic & version ───────────────────────────────────────────────────────
 static constexpr uint8_t BEWE_MAGIC[4] = {'B','E','W','E'};
@@ -565,6 +599,7 @@ struct __attribute__((packed)) PktHeartbeat {
     uint8_t host_bat_pct;    // HOST 배터리 % (255=배터리 없음/데스크탑)
     char    antenna[32];     // HOST 안테나 자유텍스트 (JOIN/HOST 모두에 표시)
     char    sdr_kind[16];    // HOST SDR 모델명 (BladeRF/Pluto/RTL-SDR/Unknown)
+    uint32_t host_up_x100;   // HOST→Central 업로드 레이트 (0.01 KB/s 단위, 상한 ~41GB/s = 실질 무포화)
 };
 
 // ── IQ_CHUNK ──────────────────────────────────────────────────────────────

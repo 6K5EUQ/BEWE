@@ -619,11 +619,14 @@ void NetClient::handle_packet(PacketType type,
         remote_sdr_temp_c.store(hb->sdr_temp_c);
         remote_sdr_state.store(hb->sdr_state);
         remote_iq_on.store(hb->iq_on);
-        if(len >= sizeof(PktHeartbeat)){
+        // 구 HOST(host_up_x100 이전)와의 호환 — 확장 필드는 별도 게이트
+        if(len >= offsetof(PktHeartbeat, host_up_x100)){
             remote_host_cpu.store(hb->host_cpu_pct);
             remote_host_ram.store(hb->host_ram_pct);
             remote_host_cpu_temp.store(hb->host_cpu_temp_c);
             remote_host_bat.store(hb->host_bat_pct);
+            if(len >= sizeof(PktHeartbeat))
+                remote_host_up_x100.store(hb->host_up_x100);
             std::lock_guard<std::mutex> lk(remote_antenna_mtx);
             memcpy(remote_antenna, hb->antenna, sizeof(remote_antenna));
             remote_antenna[sizeof(remote_antenna)-1] = '\0';

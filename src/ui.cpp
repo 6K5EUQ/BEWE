@@ -5354,6 +5354,17 @@ void run_streaming_viewer(){
                 v.sysmon_ram=read_ram();
                 v.sysmon_io =io_pct;
                 v.sysmon_bat.store(read_bat_pct());
+                // 네트워크 레이트 (1초 창) — HOST: Central 업로드 / JOIN: Central 다운로드.
+                // 누적 카운터를 read-only 로 샘플링 (기존 [HOST]/[JOIN] 통계 로거와 무간섭).
+                {
+                    static ByteRateMeter up_meter, down_meter;
+                    v.net_up_kbps.store(
+                        (float)up_meter.sample(central_cli.stat_tx_total_bytes.load(std::memory_order_relaxed)));
+                    if(v.net_cli)
+                        v.net_down_kbps.store(
+                            (float)down_meter.sample(v.net_cli->stat_rx_bytes.load(std::memory_order_relaxed)));
+                    else { down_meter.reset(); v.net_down_kbps.store(0.f); }
+                }
                 // 자기 머신의 recordings 디스크 여유 측정 (1초마다 — 미션창 좌측 트리 Local 표시용)
                 {
                     struct statvfs vfs{};
@@ -5430,8 +5441,10 @@ void run_streaming_viewer(){
                 uint8_t h_ram = (uint8_t)std::min(100.f, std::max(0.f, v.sysmon_ram));
                 uint8_t h_ct  = (uint8_t)std::min(255, std::max(0, v.sysmon_cpu_temp_c.load()));
                 const char* sk = v.dev_blade ? "BladeRF" : v.pluto_ctx ? "Pluto" : v.dev_rtl ? "RTL-SDR" : "Unknown";
+                // 업로드 레이트 → JOIN 의 STATUS 패널 HOST 줄에 표시 (0.01KB/s 단위)
+                uint32_t h_up = kbps_to_x100(v.net_up_kbps.load());
                 v.net_srv->broadcast_heartbeat(hst, sdr_t_hb, sdr_st, iq_st, h_cpu, h_ram, h_ct, v.host_antenna, sk,
-                                               v.sysmon_bat.load());
+                                               v.sysmon_bat.load(), h_up);
             }
         }
 
@@ -6982,30 +6995,46 @@ void run_streaming_viewer(){
                                               : vv.header.sample_rate/1e6;
                     ImGui::Text("Freq : %.4fMHz  /  Sample Rate : %.3fMSPS", cf_mhz, sr_mhz);
                 }
-                // HOST CPU/RAM/Bat
+                // 레이트 표기: 1000KB/s 미만 → ###.##KB/s, 이상 → ##.##MB/s
+                auto fmt_rate = [](char* buf, size_t n, float kbps){
+                    if(!(kbps > 0.f)) kbps = 0.f;   // 음수/NaN 방어
+                    if(kbps >= 1000.f) snprintf(buf, n, "%.2fMB/s", kbps / 1024.f);
+                    else               snprintf(buf, n, "%.2fKB/s", kbps);
+                };
+                char rbuf[32];
+                // HOST CPU/RAM/Upload/Bat
+                // Upload = 그 HOST 가 Central 로 올리는 업로드량.
+                //   HOST 창: 자기 CentralClient tx 레이트(net_up_kbps).
+                //   JOIN 창: 원격 HOST 가 heartbeat 로 보내온 값(remote_host_up_x100).
                 if(vv.net_cli){
                     int h_cpu = vv.net_cli->remote_host_cpu.load();
                     int h_ram = vv.net_cli->remote_host_ram.load();
                     int h_ct  = vv.net_cli->remote_host_cpu_temp.load();
                     int h_bat = vv.net_cli->remote_host_bat.load();
+                    fmt_rate(rbuf, sizeof(rbuf), vv.net_cli->remote_host_up_x100.load() / 100.0f);
                     if(h_bat <= 100)
-                        ImGui::Text("HOST | CPU : %d%% [%d\xC2\xB0""C]  /  RAM : %d%%  /  Bat. : %d%%", h_cpu, h_ct, h_ram, h_bat);
+                        ImGui::Text("HOST | CPU : %d%% [%d\xC2\xB0""C]  /  RAM : %d%%  /  Upload : %s  /  Bat. : %d%%",
+                            h_cpu, h_ct, h_ram, rbuf, h_bat);
                     else
-                        ImGui::Text("HOST | CPU : %d%% [%d\xC2\xB0""C]  /  RAM : %d%%", h_cpu, h_ct, h_ram);
+                        ImGui::Text("HOST | CPU : %d%% [%d\xC2\xB0""C]  /  RAM : %d%%  /  Upload : %s",
+                            h_cpu, h_ct, h_ram, rbuf);
                 } else {
                     int ct  = vv.sysmon_cpu_temp_c.load();
                     int bat = vv.sysmon_bat.load();
+                    fmt_rate(rbuf, sizeof(rbuf), vv.net_up_kbps.load());
                     if(bat <= 100)
-                        ImGui::Text("HOST | CPU : %d%% [%d\xC2\xB0""C]  /  RAM : %d%%  /  Bat. : %d%%",
-                            (int)vv.sysmon_cpu, ct, (int)vv.sysmon_ram, bat);
+                        ImGui::Text("HOST | CPU : %d%% [%d\xC2\xB0""C]  /  RAM : %d%%  /  Upload : %s  /  Bat. : %d%%",
+                            (int)vv.sysmon_cpu, ct, (int)vv.sysmon_ram, rbuf, bat);
                     else
-                        ImGui::Text("HOST | CPU : %d%% [%d\xC2\xB0""C]  /  RAM : %d%%",
-                            (int)vv.sysmon_cpu, ct, (int)vv.sysmon_ram);
+                        ImGui::Text("HOST | CPU : %d%% [%d\xC2\xB0""C]  /  RAM : %d%%  /  Upload : %s",
+                            (int)vv.sysmon_cpu, ct, (int)vv.sysmon_ram, rbuf);
                 }
+                // JOIN Download = 이 창이 접속한 그 기지 하나로부터 받는 양 (창별 독립, 합산 아님)
                 if(vv.net_cli){
                     int jct = vv.sysmon_cpu_temp_c.load();
-                    ImGui::Text("JOIN | CPU : %d%% [%d\xC2\xB0""C]  /  RAM : %d%%",
-                        (int)vv.sysmon_cpu, jct, (int)vv.sysmon_ram);
+                    fmt_rate(rbuf, sizeof(rbuf), vv.net_down_kbps.load());
+                    ImGui::Text("JOIN | CPU : %d%% [%d\xC2\xB0""C]  /  RAM : %d%%  /  Download : %s",
+                        (int)vv.sysmon_cpu, jct, (int)vv.sysmon_ram, rbuf);
                 }
             };
 

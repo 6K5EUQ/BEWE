@@ -1767,6 +1767,10 @@ void run_cli_host(){
                 long long io_now=read_io_ms();
                 v.sysmon_io=std::min(100.0f,(float)(io_now-io_last_ms)/10.0f);
                 io_last_ms=io_now;
+                // Central 업로드 레이트 (1초 창) — heartbeat 로 JOIN STATUS 패널에 전달
+                static ByteRateMeter up_meter;
+                v.net_up_kbps.store(
+                    (float)up_meter.sample(central_cli.stat_tx_total_bytes.load(std::memory_order_relaxed)));
             }
         }
 
@@ -1933,9 +1937,10 @@ void run_cli_host(){
                 uint8_t ram_pct  = (uint8_t)std::min(255.f, std::max(0.f, v.sysmon_ram));
                 uint8_t cpu_temp = (uint8_t)std::min(255, std::max(0, v.sysmon_cpu_temp_c.load()));
                 const char* sk = v.dev_blade ? "BladeRF" : v.pluto_ctx ? "Pluto" : v.dev_rtl ? "RTL-SDR" : "Unknown";
+                uint32_t up_x100 = kbps_to_x100(v.net_up_kbps.load());
                 v.net_srv->broadcast_heartbeat(hst, sdr_t_hb, sdr_st, iq_st,
                                                cpu_pct, ram_pct, cpu_temp, v.host_antenna, sk,
-                                               v.sysmon_bat.load());
+                                               v.sysmon_bat.load(), up_x100);
             }
         }
 

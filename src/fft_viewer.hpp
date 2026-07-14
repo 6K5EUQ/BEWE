@@ -160,6 +160,10 @@ public:
     float sysmon_cpu=0, sysmon_ghz=0, sysmon_ram=0, sysmon_io=0;
     std::atomic<int>     sysmon_cpu_temp_c{0};   // CPU 온도 (정수 °C, heartbeat 전송용)
     std::atomic<uint8_t> sysmon_bat{255};         // 배터리 % (255=없음/데스크탑)
+    // 네트워크 레이트 (STATUS 패널 / heartbeat 송신용, 1초 창)
+    // HOST: 자기 → Central 업로드. JOIN: Central → 자기(접속 기지 1개) 다운로드.
+    std::atomic<float> net_up_kbps{0.f};          // HOST 모드에서만 유효
+    std::atomic<float> net_down_kbps{0.f};        // JOIN 모드에서만 유효
     // 자기 머신의 recordings 디스크 여유 (JOIN 의 "Local" 표시용 / HOST 자기 disk_stat 송신 시 참조 가능)
     std::atomic<uint64_t> local_disk_free{0};
     std::atomic<uint64_t> local_disk_total{0};
@@ -954,6 +958,9 @@ public:
     // ── 에너지 디텍션 (Detect 모드) ────────────────────────────────────────
     // 복조 없는 채널을 detect 모드로 전환/해제 (HOST 로컬 적용).
     void set_channel_detect(int ch_idx, bool on);
+    // CFAR 로컬 플로어 스크래치 — update_channel_squelch() 전용 (UI/CLI 스퀄치 스레드).
+    // 채널·행마다 재사용해 매 행 alloc 을 피한다.
+    std::vector<float> det_floor, det_scratch;
 
     // ── demod.cpp ─────────────────────────────────────────────────────────
     void dem_worker(int ch_idx);
