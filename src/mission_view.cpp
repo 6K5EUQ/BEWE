@@ -2100,53 +2100,6 @@ static void draw_delete_confirm_submodal(FFTViewer& v, NetClient* cli){
     bool open = true;
     if(ImGui::BeginPopupModal("Delete Mission##mission_del", &open,
         ImGuiWindowFlags_NoResize|ImGuiWindowFlags_AlwaysAutoResize)){
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.f),
-            "PERMANENTLY DELETE mission %04d/%s ?",
-            g_del_year, g_del_code.c_str());
-        ImGui::Separator();
-        // station 은 history → active → g_cf_known_missions (JOIN 모드에선 history 비어있음) 순서로 lookup.
-        std::string del_station;
-        {
-            std::lock_guard<std::mutex> lk(v.mission_mtx);
-            for(auto& h : v.mission_history){
-                if(h.year == g_del_year &&
-                   strncmp(h.code, g_del_code.c_str(), sizeof(h.code)) == 0){
-                    if(h.station_name[0]) del_station = h.station_name;
-                    break;
-                }
-            }
-            if(del_station.empty() && v.mission_state == Mission::State::ACTIVE &&
-               v.mission_year == g_del_year &&
-               strncmp(v.mission_code, g_del_code.c_str(), sizeof(v.mission_code)) == 0){
-                if(v.mission_station_name[0]) del_station = v.mission_station_name;
-            }
-        }
-        if(del_station.empty()){
-            // JOIN 모드 — Central widescan 캐시 (g_cf_known_missions) 에서 station 찾기.
-            // 현재 station_name 우선 매칭 (같은 (year,code) 다른 station 미션 있을 수 있음).
-            std::lock_guard<std::mutex> lk(g_cf_km_mtx);
-            for(auto& km : g_cf_known_missions){
-                if(km.year == g_del_year && km.code == g_del_code){
-                    if(km.station == v.station_name){ del_station = km.station; break; }
-                    if(del_station.empty()) del_station = km.station;
-                }
-            }
-        }
-        if(del_station.empty()) del_station = "_unknown_";
-        std::string mdir = BEWEPaths::mission_dir(del_station, g_del_year, g_del_code);
-        ImGui::TextDisabled("Directory:");
-        ImGui::SameLine();
-        ImGui::TextWrapped("%s", mdir.c_str());
-        ImGui::Spacing();
-        ImGui::TextDisabled("All files will be removed:");
-        ImGui::BulletText("IQ recordings (iq/*.wav)");
-        ImGui::BulletText("DEMOD recordings (audio/*.wav)");
-        ImGui::BulletText("HIST waterfalls (hist/*.bewehist)");
-        ImGui::BulletText("mission.info + .info sidecars");
-        ImGui::Spacing();
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.f),
-            "This action cannot be undone.");
-        ImGui::Spacing();
         if(ImGui::Button("Cancel", ImVec2(120, 0))){
             g_del_year = 0; g_del_code.clear();
             ImGui::CloseCurrentPopup();
