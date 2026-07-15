@@ -122,9 +122,9 @@ make -j$(nproc)
 ./bewe_central
 ```
 
-The server runs in the foreground and logs to stdout. For unattended
-operation, deploy under `systemd` (a unit file is not bundled — operations
-group provisions per site policy).
+The server runs in the foreground and logs to stdout. For unattended operation
+(systemd unit, HIST compression, fleet SSH strategy, and machine migration) see
+the detailed runbook: [`CENTRAL_SETUP.md`](CENTRAL_SETUP.md).
 
 ### Storage layout
 

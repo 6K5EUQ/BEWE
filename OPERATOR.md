@@ -115,7 +115,12 @@ Press **`L`** to open the Signal Library overlay.
 
 Press **`H`** to open the HISTORY overlay.
 
-- Each HOST records a continuous waterfall archive segmented by hour.
+- A continuous waterfall archive is recorded per site, segmented by hour, from
+  the HOST's FFT stream. Central is the authoritative store: the HOST writes a
+  transient local copy while recording and removes it once the file is safely
+  mirrored on Central (it is only pushed whole if the Central link was down
+  during recording — gap recovery). Permanent storage lives on Central under
+  `DataBase/missions/<station>/<year>/<code>/hist/`.
 - Files are mission-coded and embed station name, lat/lon, and UTC range in
   the header.
 - Frequency changes automatically rotate to a fresh segment so each file
@@ -123,6 +128,14 @@ Press **`H`** to open the HISTORY overlay.
 - `Ctrl+Right-drag` measures any region (`BW / Duration`).
 - An opt-in live mode lets a JOIN operator observe the archive grow row-by-row
   on a remote site.
+- **On-disk compression (v13.2.0).** When a segment is finalized on Central, a
+  background worker rewrites it as a losslessly compressed container (per-block
+  zstd with a frequency-delta transform). This is fully transparent — the
+  waterfall renders byte-identically, and every viewer reads both the raw and
+  compressed formats. Files still being recorded stay uncompressed until they
+  close. Typical reduction ≈ 1.9x on a native-width (headless-host) archive and
+  up to ≈ 4.7x on a 4x-padded (GUI-host) archive. Compression runs only when
+  `BEWE_HIST_COMPRESS=1` is set in the Central service environment.
 
 ---
 
@@ -218,9 +231,10 @@ disconnected interval:
 
 - All IQ, demodulated audio, and waterfall data continue recording to local
   disk without interruption.
-- The currently active HIST file is flagged as "dirty"; on successful
-  reconnect, the file is pushed to Central on next mission rotation to fill
-  the gap in the row stream.
+- The currently active HIST file is flagged as "dirty". On finalize, a clean
+  file (link healthy throughout) is discarded locally because Central already
+  holds the mirror, whereas a dirty file is pushed whole to Central to fill the
+  gap in the row stream. Either way no permanent HIST copy is kept on the HOST.
 - No operator action is required.
 
 To diagnose persistent disconnects, inspect the HOST log for repeated
@@ -229,10 +243,11 @@ the Central Server is unreachable.
 
 ### 4.5 HOST disk space exhausted
 
-The HOST local archive uses a 2-month rotating policy keyed to the mission
-code (alphabetic month). On the first mission of month `C`, all month `A`
-mission directories are purged from the local disk. The Central archive
-retains the data permanently.
+The HOST local archive (IQ and demodulated audio; HIST is not retained
+locally — see §2.7) uses a 2-month rotating policy keyed to the mission code
+(alphabetic month). On the first mission of month `C`, all month `A` mission
+directories are purged from the local disk. The Central archive retains the
+data permanently.
 
 If the disk fills before the auto-purge cycle (for example, after extended
 high-bandwidth collection), purge older missions manually:
