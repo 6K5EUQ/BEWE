@@ -82,7 +82,7 @@ struct JoinEntry {
     std::set<std::string> mod_recv;   // 구독 중 모듈 id
 
     // ── 독립 송신 큐 ──────────────────────────────────────────────────────
-    // 우선순위: ctrl_queue > file_queue > send_queue(FFT) > audio_queue
+    // 우선순위: ctrl_queue > audio_queue > send_queue(FFT) > file_queue
     // 단일 send 스레드가 우선순위 순서로 큐에서 꺼내 전송
     static constexpr size_t SEND_QUEUE_MAX_BYTES  = 2 * 1024 * 1024; // FFT 2MB (~0.5초)
     static constexpr size_t AUDIO_QUEUE_MAX_BYTES = 512 * 1024;      // 오디오 512KB (~0.5초)
@@ -132,7 +132,7 @@ struct JoinEntry {
     }
 
     void start_send_worker(){
-        // 단일 스레드: ctrl → FFT → 오디오 우선순위 순서로 배치 전송
+        // 단일 스레드: ctrl → 오디오 → FFT → file 우선순위 순서로 배치 전송
         send_thr = std::thread([this](){
             while(true){
                 std::vector<std::vector<uint8_t>> batch;
@@ -154,18 +154,17 @@ struct JoinEntry {
                             ctrl_queue.pop_front();
                         }
                     } else {
-                        // FILE 청크 최대 4개/라운드 (1MB) — drain 속도 ↑, drain 시 enqueue 깨움.
-                        // FFT는 v1.5.15부터 다운로드 중 JOIN에 안 보내므로 파일에 더 양보 가능.
-                        int nf = 0;
-                        while(!file_queue.empty() && nf++ < 4){
-                            size_t sz = file_queue.front().size();
-                            batch.push_back(std::move(file_queue.front()));
-                            file_queue.pop_front();
-                            if(file_queue_bytes >= sz) file_queue_bytes -= sz;
-                            else file_queue_bytes = 0;
+                        // 오디오 최우선(1순위): 대역폭이 작아 라운드마다 전부 flush해도
+                        // 부담 없음. file/FFT보다 먼저 batch에 담아 파일 다운로드 중에도
+                        // audio 끊김 방지 (다운링크가 느려도 audio는 항상 앞질러 나감).
+                        while(!audio_queue.empty()){
+                            size_t sz = audio_queue.front().size();
+                            batch.push_back(std::move(audio_queue.front()));
+                            audio_queue.pop_front();
+                            if(audio_queue_bytes >= sz) audio_queue_bytes -= sz;
+                            else audio_queue_bytes = 0;
                         }
-                        if(nf > 0) file_drain_cv.notify_one();
-                        // FFT 최대 4개 (burst 완화)
+                        // FFT 최대 4개 (burst 완화) — file보다 우선(2순위).
                         int n = 0;
                         while(!send_queue.empty() && n++ < 4){
                             size_t sz = send_queue.front().size();
@@ -174,15 +173,17 @@ struct JoinEntry {
                             if(send_queue_bytes >= sz) send_queue_bytes -= sz;
                             else send_queue_bytes = 0;
                         }
-                        // 오디오 최대 8개 (burst 완화)
-                        n = 0;
-                        while(!audio_queue.empty() && n++ < 8){
-                            size_t sz = audio_queue.front().size();
-                            batch.push_back(std::move(audio_queue.front()));
-                            audio_queue.pop_front();
-                            if(audio_queue_bytes >= sz) audio_queue_bytes -= sz;
-                            else audio_queue_bytes = 0;
+                        // FILE 최하위(3순위): 2개/라운드(512KB)로 축소해 audio/FFT 라운드
+                        // 지연 감소. iq/file은 3순위라 느려도 됨. drain 시 enqueue 깨움.
+                        int nf = 0;
+                        while(!file_queue.empty() && nf++ < 2){
+                            size_t sz = file_queue.front().size();
+                            batch.push_back(std::move(file_queue.front()));
+                            file_queue.pop_front();
+                            if(file_queue_bytes >= sz) file_queue_bytes -= sz;
+                            else file_queue_bytes = 0;
                         }
+                        if(nf > 0) file_drain_cv.notify_one();
                     }
                 }
                 for(auto& pkt : batch) send_raw(pkt);
