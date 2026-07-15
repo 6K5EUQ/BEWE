@@ -19,6 +19,13 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <cstdlib>              // getenv, atoi
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <atomic>
+#include <chrono>
 
 namespace {
 // 파일명/경로 컴포넌트 sanitization.
@@ -76,6 +83,166 @@ const char* subdir_name(uint8_t s){
     }
 }
 } // anonymous namespace
+
+// ── HIST 압축 백그라운드 워커 ─────────────────────────────────────────────
+// finalize(-LIVE→-HHMM rename) 직후, 완료된 raw v3 .bewehist 를 블록 zstd + footer
+// index (v4) 로 압축한다. room 수신 스레드([archive_hist_on_live_stop])를 막지 않도록
+// 별도 스레드에서 처리 — 580MB 파일이 Pi 에서 10~20s 걸려도 FFT ingestion 무영향.
+// 실패 시 raw v3 원본을 그대로 남긴다(무손실 보장). BEWE_HIST_COMPRESS 게이트는 호출부에서.
+namespace {
+
+std::mutex               g_hc_mtx;
+std::condition_variable  g_hc_cv;
+std::deque<std::string>  g_hc_q;      // 압축 대상 파일 절대경로
+std::thread              g_hc_thr;
+std::atomic<bool>        g_hc_running{false};
+
+// raw v3 .bewehist → v4 (블록 zstd + index). 성공 시 원자적 rename-over.
+bool compress_hist_file(const std::string& path){
+    FILE* in = fopen(path.c_str(), "rb");
+    if(!in) return false;
+    LongWaterfall::FileHeader h{};
+    if(fread(&h, 1, sizeof(h), in) != sizeof(h) ||
+       memcmp(h.magic, "BWWF", 4) != 0 ||
+       h.version != LongWaterfall::FILE_VERSION ||   // 이미 v4 등은 skip
+       h.fft_size == 0){
+        fclose(in); return false;
+    }
+    const uint32_t fft_size = h.fft_size;
+    if(fseek(in, 0, SEEK_END) != 0){ fclose(in); return false; }
+    long endpos = ftell(in);
+    if(endpos < (long)sizeof(h)){ fclose(in); return false; }
+    const uint64_t body_bytes = (uint64_t)endpos - sizeof(h);
+    const uint64_t num_rows   = body_bytes / fft_size;   // torn 마지막 행은 버림(가드)
+    if(num_rows == 0){ fclose(in); return false; }       // 빈 파일 — 압축 안 함
+    if(fseek(in, (long)sizeof(h), SEEK_SET) != 0){ fclose(in); return false; }
+
+    const uint32_t block_rows = LongWaterfall::hist_default_block_rows(fft_size);
+    const uint32_t num_blocks = (uint32_t)((num_rows + block_rows - 1) / block_rows);
+
+    int level = 3;
+    if(const char* e = getenv("BEWE_HIST_ZSTD_LEVEL")){
+        int l = atoi(e); if(l >= 1 && l <= 19) level = l;
+    }
+
+    const std::string tmp = path + ".zst.tmp";
+    FILE* out = fopen(tmp.c_str(), "wb");
+    if(!out){ fclose(in); return false; }
+
+    // v4 헤더 — v3 필드 그대로, version 만 교체 + reserved_v3 확장 채움.
+    LongWaterfall::FileHeader vh = h;
+    vh.version = LongWaterfall::FILE_VERSION_ZSTD;
+    LongWaterfall::V4Ext& ext = LongWaterfall::v4ext(vh);
+    ext.codec        = LongWaterfall::HIST_CODEC_ZSTD;
+    ext.flags        = LongWaterfall::HIST_V4_FLAG_COL_DELTA;
+    ext.block_rows   = block_rows;
+    ext.num_blocks   = num_blocks;
+    ext.num_rows     = num_rows;
+    ext.index_offset = 0;   // 마지막에 patch
+
+    bool ok = (fwrite(&vh, 1, sizeof(vh), out) == sizeof(vh));
+
+    std::vector<uint8_t> rawbuf((size_t)block_rows * fft_size);
+    std::vector<uint8_t> deltabuf(rawbuf.size());   // col-delta 변환본
+    std::vector<uint8_t> compbuf(ZSTD_compressBound(rawbuf.size()));
+    std::vector<LongWaterfall::HistBlockIndex> index;
+    index.reserve(num_blocks);
+
+    uint64_t file_off = sizeof(vh);   // out 파일 내 현재 오프셋
+    for(uint32_t b = 0; b < num_blocks && ok; b++){
+        const uint64_t rows_here = std::min<uint64_t>(block_rows,
+                                       num_rows - (uint64_t)b * block_rows);
+        const size_t raw_len = (size_t)rows_here * fft_size;
+        if(fread(rawbuf.data(), 1, raw_len, in) != raw_len){ ok = false; break; }
+        // col-delta: 각 행에서 d[i]=x[i]-x[i-1], d[0]=x[0] (uint8 wrap) — 압축비 개선.
+        for(uint64_t rr = 0; rr < rows_here; rr++){
+            const uint8_t* s = rawbuf.data()   + (size_t)rr * fft_size;
+            uint8_t*       d = deltabuf.data() + (size_t)rr * fft_size;
+            uint8_t prev = 0;
+            for(uint32_t i = 0; i < fft_size; i++){ d[i] = (uint8_t)(s[i] - prev); prev = s[i]; }
+        }
+        const size_t cz = ZSTD_compress(compbuf.data(), compbuf.size(),
+                                        deltabuf.data(), raw_len, level);
+        if(ZSTD_isError(cz)){ ok = false; break; }
+        if(fwrite(compbuf.data(), 1, cz, out) != cz){ ok = false; break; }
+        LongWaterfall::HistBlockIndex e{};
+        e.frame_offset = file_off;
+        e.comp_len     = (uint32_t)cz;
+        e.raw_rows     = (uint32_t)rows_here;
+        index.push_back(e);
+        file_off += cz;
+    }
+
+    const uint64_t index_off = file_off;
+    if(ok){
+        const size_t iw = fwrite(index.data(), sizeof(LongWaterfall::HistBlockIndex),
+                                 index.size(), out);
+        if(iw != index.size()) ok = false;
+    }
+    if(ok){
+        ext.index_offset = index_off;                 // vh.reserved_v3 갱신
+        fflush(out);
+        if(fseek(out, 0, SEEK_SET) != 0) ok = false;
+        else if(fwrite(&vh, 1, sizeof(vh), out) != sizeof(vh)) ok = false;
+    }
+    if(ok){
+        fflush(out);
+        int fd = fileno(out);
+        if(fd >= 0) fsync(fd);
+    }
+    fclose(in);
+    fclose(out);
+
+    if(!ok){
+        unlink(tmp.c_str());
+        fprintf(stderr, "[Central][Archive] HIST compress FAIL %s — keep raw v3\n",
+                path.c_str());
+        return false;
+    }
+    if(rename(tmp.c_str(), path.c_str()) != 0){
+        unlink(tmp.c_str());
+        fprintf(stderr, "[Central][Archive] HIST compress rename FAIL %s errno=%d — keep raw v3\n",
+                path.c_str(), errno);
+        return false;
+    }
+    const uint64_t raw_sz = sizeof(h) + body_bytes;
+    const uint64_t new_sz = index_off + (uint64_t)index.size() * sizeof(LongWaterfall::HistBlockIndex);
+    printf("[Central][Archive] HIST compress OK %s: %.1f→%.1f MB (%.2fx, %llu rows, %u blocks, L%d)\n",
+           path.c_str(), raw_sz/1e6, new_sz/1e6,
+           new_sz ? (double)raw_sz/(double)new_sz : 0.0,
+           (unsigned long long)num_rows, num_blocks, level);
+    return true;
+}
+
+void hist_compress_loop(){
+    while(g_hc_running.load()){
+        std::string job;
+        {
+            std::unique_lock<std::mutex> lk(g_hc_mtx);
+            g_hc_cv.wait_for(lk, std::chrono::seconds(2), []{
+                return !g_hc_running.load() || !g_hc_q.empty();
+            });
+            if(!g_hc_running.load()) break;
+            if(g_hc_q.empty()) continue;
+            job = std::move(g_hc_q.front());
+            g_hc_q.pop_front();
+        }
+        compress_hist_file(job);
+    }
+}
+
+// finalize 훅에서 호출. 최초 호출 시 프로세스 수명 워커를 lazy-start.
+void hist_compress_enqueue(const std::string& path){
+    std::lock_guard<std::mutex> lk(g_hc_mtx);
+    if(!g_hc_running.exchange(true)){
+        g_hc_thr = std::thread(hist_compress_loop);
+        g_hc_thr.detach();   // Central 프로세스 수명동안 상주
+    }
+    g_hc_q.push_back(path);
+    g_hc_cv.notify_all();
+}
+
+} // anonymous namespace (HIST 압축 워커)
 
 std::string CentralServer::archive_root() const {
     const char* home = getenv("HOME");
@@ -799,6 +966,7 @@ void CentralServer::archive_hist_on_live_stop(std::shared_ptr<HostRoom> room,
     std::string base = fname;
     std::string fin  = LongWaterfall::build_hist_filename_finalize(
                         base, (uint64_t)time(nullptr), 0);
+    std::string fin_path;   // 압축 대상: 성공적으로 finalize된 최종 파일
     if(fin != base){
         auto slash = it->second.archive_path.find_last_of('/');
         std::string dir2 = (slash == std::string::npos) ? ""
@@ -806,14 +974,21 @@ void CentralServer::archive_hist_on_live_stop(std::shared_ptr<HostRoom> room,
         std::string finalp = dir2 + fin;
         if(rename(it->second.archive_path.c_str(), finalp.c_str()) == 0){
             printf("[Central][Archive] HIST finalize %s -> %s\n", base.c_str(), fin.c_str());
+            fin_path = finalp;
         } else {
             printf("[Central][Archive] HIST finalize rename FAIL %s -> %s errno=%d (%s)\n",
                    it->second.archive_path.c_str(), finalp.c_str(),
                    errno, strerror(errno));
         }
+    } else {
+        fin_path = it->second.archive_path;   // 이미 최종 이름
     }
     printf("[Central][Archive] HIST stream CLOSE %s (%u rows)\n",
            it->second.archive_path.c_str(), it->second.rows_written);
+    // v13.2: 완료 파일을 백그라운드에서 블록 zstd(v4)로 압축. 게이트: BEWE_HIST_COMPRESS.
+    // 실패해도 raw v3 원본 유지(무손실). LIVE 핫 경로는 무변경.
+    if(!fin_path.empty() && getenv("BEWE_HIST_COMPRESS"))
+        hist_compress_enqueue(fin_path);
     room->hist_streams.erase(it);
 }
 

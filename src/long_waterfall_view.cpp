@@ -34,6 +34,7 @@
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <zstd.h>
 
 namespace {
 
@@ -58,6 +59,18 @@ struct OpenFile {
     int            fd = -1;
     const uint8_t* map = nullptr;
     size_t         map_size = 0;
+    std::vector<uint8_t> rowbuf;   // v3 mmap 실패 시 1행 fread fallback 버퍼
+    // ── v4 (블록 zstd) ────────────────────────────────────────────────────
+    // get_row() 가 v4 면 block 을 해제해 cache_buf 에 담고 그 안 포인터를 반환.
+    // 단일 블록 캐시로 충분: 두 소비자(scan_file_db_range, rebuild_texture)는
+    // 반환 포인터를 다음 get_row 전에 소비하고 r 을 단조 증가로 훑는다.
+    bool     is_v4 = false;
+    uint8_t  v4_flags = 0;      // HIST_V4_FLAG_* (col-delta 등)
+    uint32_t block_rows = 0;
+    std::vector<LongWaterfall::HistBlockIndex> index;   // num_blocks entries
+    int                  cache_block = -1;              // 캐시된 블록 번호 (-1=없음)
+    std::vector<uint8_t> cache_buf;                     // block_rows * fft_size (해제본)
+    std::vector<uint8_t> frame_buf;                     // mmap 실패 시 압축 프레임 읽기
 };
 OpenFile g_open;
 
@@ -194,7 +207,8 @@ bool open_file(const std::string& path){
     if(!fp) return false;
     LongWaterfall::FileHeader h{};
     if(fread(&h, 1, sizeof(h), fp) != sizeof(h) || memcmp(h.magic,"BWWF",4)!=0
-       || h.version != LongWaterfall::FILE_VERSION){
+       || (h.version != LongWaterfall::FILE_VERSION
+           && h.version != LongWaterfall::FILE_VERSION_ZSTD)){
         fclose(fp); return false;
     }
     fseek(fp, 0, SEEK_END);
@@ -204,7 +218,6 @@ bool open_file(const std::string& path){
     g_open.path = path;
     g_open.hdr = h;
     g_open.total_size = sz;
-    g_open.num_rows = (uint32_t)((sz - sizeof(h)) / h.fft_size);
     g_open.fp = fp;
     // mmap (RDONLY, SHARED) — 실패해도 fp fallback으로 동작.
     g_open.fd = ::open(path.c_str(), O_RDONLY);
@@ -218,6 +231,30 @@ bool open_file(const std::string& path){
         } else {
             ::close(g_open.fd); g_open.fd = -1;
         }
+    }
+    if(h.version == LongWaterfall::FILE_VERSION_ZSTD){
+        // v4: 헤더의 authoritative num_rows + footer index. size 산술 안 씀.
+        const LongWaterfall::V4Ext& ext = LongWaterfall::v4ext(h);
+        const uint32_t nb   = ext.num_blocks;
+        const uint64_t ioff = ext.index_offset;
+        const size_t   need = (size_t)nb * sizeof(LongWaterfall::HistBlockIndex);
+        if(ext.codec != LongWaterfall::HIST_CODEC_ZSTD || ext.block_rows == 0 ||
+           nb == 0 || ioff < sizeof(h) || ioff + need > sz){
+            close_open(); return false;
+        }
+        g_open.is_v4      = true;
+        g_open.v4_flags   = ext.flags;
+        g_open.block_rows = ext.block_rows;
+        g_open.num_rows   = (uint32_t)ext.num_rows;
+        g_open.index.resize(nb);
+        if(g_open.map && ioff + need <= g_open.map_size){
+            memcpy(g_open.index.data(), g_open.map + ioff, need);
+        } else if(fseek(fp, (long)ioff, SEEK_SET) != 0 ||
+                  fread(g_open.index.data(), 1, need, fp) != need){
+            close_open(); return false;
+        }
+    } else {
+        g_open.num_rows = (uint32_t)((sz - sizeof(h)) / h.fft_size);
     }
     g_t0 = 0; g_t1 = std::max<uint32_t>(1, g_open.num_rows);
     g_f0 = 0; g_f1 = h.fft_size;
@@ -275,7 +312,8 @@ bool read_header_only(const std::string& path, LongWaterfall::FileHeader& h, uin
     FILE* fp = fopen(path.c_str(), "rb");
     if(!fp) return false;
     if(fread(&h, 1, sizeof(h), fp) != sizeof(h) || memcmp(h.magic,"BWWF",4)!=0
-       || h.version != LongWaterfall::FILE_VERSION){
+       || (h.version != LongWaterfall::FILE_VERSION
+           && h.version != LongWaterfall::FILE_VERSION_ZSTD)){
         fclose(fp); return false;
     }
     fseek(fp, 0, SEEK_END);
@@ -284,8 +322,17 @@ bool read_header_only(const std::string& path, LongWaterfall::FileHeader& h, uin
     return true;
 }
 
+// 헤더+파일크기로부터 행 수. v4 는 헤더의 authoritative num_rows, v3 는 size 산술.
+static uint64_t hist_rows_from_header(const LongWaterfall::FileHeader& h, uint64_t file_size){
+    if(h.version == LongWaterfall::FILE_VERSION_ZSTD)
+        return LongWaterfall::v4ext(h).num_rows;
+    if(h.fft_size == 0) return 0;
+    return (file_size - sizeof(h)) / h.fft_size;
+}
+
 void refresh_size_live(){
     if(!g_open.fp) return;
+    if(g_open.is_v4) return;   // v4(완료·압축)는 성장하지 않음 — size 재계산 금지
     struct stat st{};
     if(stat(g_open.path.c_str(), &st) != 0) return;
     uint64_t sz = (uint64_t)st.st_size;
@@ -315,6 +362,58 @@ void refresh_size_live(){
     }
 }
 
+// 행 r 의 fft_size 바이트 시작 포인터. v3=mmap/fread 직접, v4=해당 블록을 zstd
+// 해제해 캐시(cache_buf) 안 포인터 반환. 실패(범위밖/디코드오류) 시 nullptr.
+// 반환 포인터는 "다음 get_row 호출 전까지"만 유효 (v4 단일 블록 캐시).
+static const uint8_t* get_row(uint32_t r){
+    const uint32_t fft_sz = g_open.hdr.fft_size;
+    if(fft_sz == 0 || r >= g_open.num_rows) return nullptr;
+
+    if(!g_open.is_v4){
+        const uint64_t off = sizeof(LongWaterfall::FileHeader) + (uint64_t)r * fft_sz;
+        if(g_open.map && off + fft_sz <= g_open.map_size)
+            return g_open.map + off;                 // mmap fast path (syscall 없음)
+        if(!g_open.fp) return nullptr;
+        if(g_open.rowbuf.size() != fft_sz) g_open.rowbuf.resize(fft_sz);
+        if(fseek(g_open.fp, (long)off, SEEK_SET) != 0) return nullptr;
+        if(fread(g_open.rowbuf.data(), 1, fft_sz, g_open.fp) != fft_sz) return nullptr;
+        return g_open.rowbuf.data();
+    }
+
+    // v4: 블록 zstd 해제 + 단일 블록 캐시.
+    if(g_open.block_rows == 0) return nullptr;
+    const uint32_t block = r / g_open.block_rows;
+    if(block != (uint32_t)g_open.cache_block){
+        if(block >= g_open.index.size()) return nullptr;
+        const auto& e = g_open.index[block];
+        const uint8_t* src;
+        if(g_open.map && e.frame_offset + e.comp_len <= g_open.map_size){
+            src = g_open.map + e.frame_offset;
+        } else {
+            if(!g_open.fp) return nullptr;
+            if(g_open.frame_buf.size() < e.comp_len) g_open.frame_buf.resize(e.comp_len);
+            if(fseek(g_open.fp, (long)e.frame_offset, SEEK_SET) != 0) return nullptr;
+            if(fread(g_open.frame_buf.data(), 1, e.comp_len, g_open.fp) != e.comp_len) return nullptr;
+            src = g_open.frame_buf.data();
+        }
+        const size_t cap  = (size_t)g_open.block_rows * fft_sz;
+        const size_t want = (size_t)e.raw_rows * fft_sz;
+        if(g_open.cache_buf.size() < cap) g_open.cache_buf.resize(cap);
+        const size_t d = ZSTD_decompress(g_open.cache_buf.data(), cap, src, e.comp_len);
+        if(ZSTD_isError(d) || d != want){ g_open.cache_block = -1; return nullptr; }
+        if(g_open.v4_flags & LongWaterfall::HIST_V4_FLAG_COL_DELTA){
+            // un-delta (freq): x[i]=d[i]+x[i-1] per row (블록 로드 1회만).
+            for(uint32_t rr = 0; rr < e.raw_rows; rr++){
+                uint8_t* row = g_open.cache_buf.data() + (size_t)rr * fft_sz;
+                for(uint32_t i = 1; i < fft_sz; i++) row[i] = (uint8_t)(row[i] + row[i-1]);
+            }
+        }
+        g_open.cache_block = (int)block;
+    }
+    const uint32_t within = r - block * g_open.block_rows;
+    return g_open.cache_buf.data() + (size_t)within * fft_sz;
+}
+
 // 열린 파일의 dB 색 윈도를 파일 데이터 자체에서 구한다.
 // 실시간 autoscale (rtlsdr_io.cpp 등) 과 같은 공식: 노이즈플로어 = 하위 15% 분위수,
 // pmin = noise - 5dB, pmax = peak + 20dB, 최소 스팬 20dB.
@@ -329,17 +428,9 @@ static void scan_file_db_range(){
     }
     if(g_scanned_rows == g_open.num_rows) return;
 
-    std::vector<uint8_t> rowbuf(fft_sz);
     for(uint64_t r = g_scanned_rows; r < g_open.num_rows; r++){
-        uint64_t off = sizeof(LongWaterfall::FileHeader) + r * fft_sz;
-        const uint8_t* p;
-        if(g_open.map && off + fft_sz <= g_open.map_size){
-            p = g_open.map + off;
-        } else {
-            fseek(g_open.fp, (long)off, SEEK_SET);
-            if(fread(rowbuf.data(), 1, fft_sz, g_open.fp) != fft_sz) break;
-            p = rowbuf.data();
-        }
+        const uint8_t* p = get_row((uint32_t)r);
+        if(!p) break;
         // bin 0 은 DC — 실시간 autoscale 도 i=1 부터 누적하므로 동일하게 제외.
         for(uint32_t i = 1; i < fft_sz; i++) g_hist[p[i]]++;
         g_scanned_rows = r + 1;
@@ -413,7 +504,6 @@ void rebuild_texture(float view_db_min, float view_db_max){
         br_lo[1] = 0;                 br_hi[1] = lin_hi - fft_half; n_br = 2;
     }
 
-    std::vector<uint8_t> rowbuf(fft_sz);
     std::vector<uint8_t> col_max(fft_sz, 0);  // 호이스팅: 컬럼마다 가시 bin만 zero.
 
     int rows_total = (int)t_span;
@@ -438,16 +528,8 @@ void rebuild_texture(float view_db_min, float view_db_max){
 
         int n_sampled = 0;
         for(int r=ra; r<rb; r += rows_step){
-            uint64_t off = sizeof(LongWaterfall::FileHeader) + (uint64_t)r * fft_sz;
-            const uint8_t* rb_ptr;
-            if(g_open.map && off + fft_sz <= g_open.map_size){
-                // mmap fast path — syscall 없음, page cache 직접 액세스.
-                rb_ptr = g_open.map + off;
-            } else {
-                fseek(g_open.fp, (long)off, SEEK_SET);
-                if(fread(rowbuf.data(), 1, fft_sz, g_open.fp) != fft_sz) break;
-                rb_ptr = rowbuf.data();
-            }
+            const uint8_t* rb_ptr = get_row((uint32_t)r);   // v3=mmap/fread, v4=블록해제
+            if(!rb_ptr) break;
             // 가시 bin만 max-hold (off-screen bin 무시).
             uint8_t* cm_ptr = col_max.data();
             for(int k=0; k<n_br; k++){
@@ -612,7 +694,7 @@ void draw_info_modal(){
 
         int off_h = header_utc_offset(h);
         uint32_t row_rate = (uint32_t)std::max(1.0f, h.row_rate_hz);
-        uint64_t dur_sec = (uint64_t)((sz - sizeof(h)) / std::max<uint32_t>(1,h.fft_size)) / row_rate;
+        uint64_t dur_sec = hist_rows_from_header(h, sz) / row_rate;
         uint64_t stop_utc = h.start_utc_unix + dur_sec;
 
         const float L = 110.f;
@@ -1124,7 +1206,7 @@ void draw_modal(FFTViewer& v, NetClient* cli){
                     LongWaterfall::FileHeader hh{}; uint64_t fsz=0;
                     read_header_only(e.path, hh, fsz);
                     Row r; r.id = e.path; r.base = e.base; r.size = e.size;
-                    r.rows = hh.fft_size > 0 ? (uint32_t)((fsz - sizeof(hh)) / hh.fft_size) : 0;
+                    r.rows = (uint32_t)hist_rows_from_header(hh, fsz);
                     r.row_rate = hh.row_rate_hz;
                     r.is_live = false; r.is_remote = false;
                     r.cf_hz = hh.center_freq_hz;
@@ -1279,7 +1361,7 @@ void draw_modal(FFTViewer& v, NetClient* cli){
                 ImGui::PushID(e.path.c_str());
                 LongWaterfall::FileHeader hh{}; uint64_t fsz=0;
                 read_header_only(e.path, hh, fsz);
-                uint32_t rows_ct = hh.fft_size > 0 ? (uint32_t)((fsz - sizeof(hh)) / hh.fft_size) : 0;
+                uint32_t rows_ct = (uint32_t)hist_rows_from_header(hh, fsz);
                 // ARCHIVE 동일 패턴
                 float pw   = ImGui::GetContentRegionAvail().x;
                 float fn_w = pw * 0.66f;

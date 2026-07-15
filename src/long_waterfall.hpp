@@ -49,7 +49,51 @@ struct FileHeader {
 #pragma pack(pop)
 static_assert(sizeof(FileHeader) == 128, "LongWaterfall::FileHeader v3 must be 128");
 
-constexpr uint16_t FILE_VERSION = 0x0003;
+constexpr uint16_t FILE_VERSION      = 0x0003;
+constexpr uint16_t FILE_VERSION_ZSTD = 0x0004;   // v4: block-zstd compressed body
+
+// ── v4 압축 컨테이너 (블록 zstd + footer index) ───────────────────────────
+// v4 파일은 v3 헤더와 바이트 동일하되 version=0x0004, 그리고 reserved_v3[28] 에
+// 아래 확장 필드를 담는다. body = [독립 zstd 프레임 × num_blocks][footer index].
+// 프레임 i = rows [i*block_rows, min((i+1)*block_rows, num_rows)) 를 raw(1B/bin)로
+// 이어붙인 뒤 통째 압축. reader 는 size 산술 대신 헤더 num_rows 를 신뢰한다.
+constexpr uint8_t HIST_CODEC_ZSTD           = 1;
+constexpr uint8_t HIST_V4_FLAG_FRAME_CKSUM  = 0x01;
+// 각 행을 주파수축 delta(d[i]=x[i]-x[i-1], uint8 wrap)로 변환 후 압축 → 압축비 개선
+// (32768폭 실측 3.7→4.7x). reader 는 해제 후 행별 prefix-sum 으로 복원.
+constexpr uint8_t HIST_V4_FLAG_COL_DELTA    = 0x02;
+
+#pragma pack(push, 1)
+struct V4Ext {                 // FileHeader.reserved_v3 (파일오프셋 100) 위에 overlay
+    uint8_t  codec;            // HIST_CODEC_ZSTD
+    uint8_t  flags;            // HIST_V4_FLAG_*
+    uint32_t block_rows;       // 프레임당 행 수
+    uint32_t num_blocks;       // == ceil(num_rows / block_rows)
+    uint64_t num_rows;         // authoritative 행 수 (size 산술 대체)
+    uint64_t index_offset;     // 파일오프셋: footer index 시작
+};
+struct HistBlockIndex {        // footer index entry (16B)
+    uint64_t frame_offset;     // 파일오프셋: zstd 프레임 시작
+    uint32_t comp_len;         // 압축 바이트 길이 (ZSTD_decompress srcSize)
+    uint32_t raw_rows;         // 해제 후 행 수 (마지막 블록 부분 + 검증)
+};
+#pragma pack(pop)
+static_assert(sizeof(V4Ext) <= sizeof(FileHeader::reserved_v3),
+              "V4Ext must fit in FileHeader::reserved_v3");
+static_assert(sizeof(HistBlockIndex) == 16, "HistBlockIndex must be 16 bytes");
+
+// reserved_v3 overlay 접근자 (packed struct — 코드베이스 net-struct 관행과 동일).
+inline V4Ext&       v4ext(FileHeader& h){ return *reinterpret_cast<V4Ext*>(h.reserved_v3); }
+inline const V4Ext& v4ext(const FileHeader& h){ return *reinterpret_cast<const V4Ext*>(h.reserved_v3); }
+
+// 블록당 ~2MB(raw) 목표. reader 는 헤더 block_rows 를 쓰므로 writer 만 이걸 호출.
+inline uint32_t hist_default_block_rows(uint32_t fft_size){
+    if(fft_size == 0) return 256;
+    uint64_t br = (2ull*1024*1024) / fft_size;
+    if(br < 64)   br = 64;
+    if(br > 1024) br = 1024;
+    return (uint32_t)br;
+}
 
 constexpr float DEFAULT_ROW_RATE_HZ = 5.0f;
 constexpr float DEFAULT_DB_MIN = -120.0f;
