@@ -226,6 +226,19 @@ inline std::string build_hist_filename_finalize(const std::string& live_name,
     return live_name.substr(0, pos) + tail;
 }
 
+// 짧은-수명 조각 판별 — finalize 대신 discard 하기 위한 게이트.
+// 정각 hourly rotate(mission.cpp)로 파일이 열린 뒤, 스케줄 녹화 retune
+// (sched_record.cpp) 이나 Central 재연결(cli_host.cpp) 이 정각 직후 몇십 초 안에
+// 또 rotate 를 쳐서 방금 연 파일이 곧바로 닫히면 HHMM-HHMM~HHMM 조각이 남는다.
+// (실측: 12~77초, 60~387행). 정상 HIST 세그먼트는 정시분할이라 항상 수십 분 이상.
+// 판별은 파일 "수명"(open→close) 기준 — 분 경계를 넘겨 닫혀도(예: 0000-0001) 잡힌다.
+// start_utc = 헤더 start_utc_unix (파일 open 시각), end_utc = close 시각.
+constexpr uint32_t HIST_STUB_MAX_SECS = 90;   // 이 미만이면 조각으로 간주
+inline bool hist_is_short_stub(uint64_t start_utc, uint64_t end_utc){
+    if(end_utc < start_utc) return false;                 // 시계 역행 방어
+    return (end_utc - start_utc) < HIST_STUB_MAX_SECS;
+}
+
 } // namespace LongWaterfall
 
 // ── GUI viewer (defined in long_waterfall_view.cpp; not built in headless) ──

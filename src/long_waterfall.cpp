@@ -82,27 +82,30 @@ void close_file_locked(){
 
     if(g_fp){ fflush(g_fp); fclose(g_fp); g_fp = nullptr; }
 
-    // Empty file (header-only, no rows flushed) — discard instead of finalize.
-    // Common at midnight rollover: mission_end + mission_start + utc0_worker call
-    // request_rotate() three times within seconds; one cycle opens 0000-LIVE and
-    // closes it immediately, leaving a 128B 0000-0000.bewehist.
-    if(rows_snapshot == 0){
-        std::string discard_path;
-        {
-            std::lock_guard<std::mutex> lk(g_path_mtx);
-            discard_path = g_cur_path;
-            g_cur_path.clear();
+    // 조각 파일 discard — finalize 대신 버린다. 두 경우:
+    //  (1) 0행 (header-only): 정각 rotate 에서 열자마자 닫힌 파일.
+    //  (2) 짧은-수명 조각: 정각 rotate 로 연 파일이 스케줄 retune / Central 재연결의
+    //      추가 rotate 로 정각 직후 몇십 초 만에 닫힌 경우(실측 12~77초, 예 0000-0001).
+    //      종전 가드는 rows==0 만 잡아 몇십~수백 행 조각이 finalize 되어 남았다.
+    //  정상 HIST 세그먼트는 정시분할이라 항상 수십 분 이상 → 절대 안 걸린다.
+    {
+        bool short_stub =
+            hist_is_short_stub(g_hdr_cur.start_utc_unix, (uint64_t)time(nullptr));
+        if(rows_snapshot == 0 || short_stub){
+            std::string discard_path;
+            { std::lock_guard<std::mutex> lk(g_path_mtx); discard_path = g_cur_path; g_cur_path.clear(); }
+            if(!discard_path.empty()){
+                printf("[LongWaterfall] discard %s file: %s\n",
+                       rows_snapshot == 0 ? "empty" : "short-stub",
+                       discard_path.c_str());
+                unlink(discard_path.c_str());
+                unlink((discard_path + ".info").c_str());
+            }
+            g_acc_db.clear();
+            g_acc_count = 0;
+            g_file_dirty.store(false);
+            return;
         }
-        if(!discard_path.empty()){
-            printf("[LongWaterfall] discard empty file (no rows): %s\n",
-                   discard_path.c_str());
-            unlink(discard_path.c_str());
-            unlink((discard_path + ".info").c_str());
-        }
-        g_acc_db.clear();
-        g_acc_count = 0;
-        g_file_dirty.store(false);
-        return;
     }
 
     // Finalize: -LIVE → -<HHMM>Z based on close time.

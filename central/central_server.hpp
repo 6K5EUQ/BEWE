@@ -46,6 +46,7 @@ struct MissionHistStream {
                                     // HOST 가 LIVE_START 에 fsz=fis 로 넣는다 (long_waterfall.cpp).
                                     // FFT_FRAME 의 bin 수(padded)와 다를 수 있다 → v13.3 폴딩 참조.
     uint32_t    rows_written = 0;
+    uint64_t    start_utc = 0;      // 파일 open 시각(헤더 start_utc_unix) — 짧은-수명 조각 판별용
 };
 
 struct JoinEntry {
