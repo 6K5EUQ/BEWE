@@ -122,6 +122,29 @@ struct Meas {
 };
 Meas g_meas;
 
+// ── 좌드래그 줌 (박스 친 영역으로 바로 확대) + 줌 히스토리 (뒤로가기) ──
+struct ZoomDrag {
+    bool   active = false;                 // dragging out a zoom box
+    double t0=0, t1=0, f0=0, f1=0;          // box in data coords (row idx / freq idx)
+    double px0=0, py0=0;                    // screen px where drag started (실수클릭 판정용)
+};
+ZoomDrag g_zdrag;
+
+struct ViewRect { double t0, t1, f0, f1; };
+std::vector<ViewRect> g_zoom_hist;         // 이전 뷰들 (뒤로가기 스택)
+void push_zoom_hist(){
+    // 현재 뷰를 스택에 저장. 과도한 성장 방지 상한.
+    g_zoom_hist.push_back({g_t0, g_t1, g_f0, g_f1});
+    if(g_zoom_hist.size() > 64) g_zoom_hist.erase(g_zoom_hist.begin());
+}
+void pop_zoom_hist(){
+    if(g_zoom_hist.empty()) return;
+    ViewRect r = g_zoom_hist.back();
+    g_zoom_hist.pop_back();
+    g_t0 = r.t0; g_t1 = r.t1; g_f0 = r.f0; g_f1 = r.f1;
+    g_tex_dirty = true;
+}
+
 // File-list selection + context state.
 // g_sel_path = primary single-selection (drives "open" on plain click). Kept for
 // legacy callers (close_open / scroll-to / open_file flow).
@@ -199,6 +222,8 @@ void close_open(){
     g_tex_dirty = true;
     std::memset(g_hist, 0, sizeof(g_hist));
     g_scanned_rows = 0;
+    g_zoom_hist.clear();
+    g_zdrag = ZoomDrag{};
 }
 
 bool open_file(const std::string& path){
@@ -838,7 +863,7 @@ void draw_modal(FFTViewer& v, NetClient* cli){
         }
         ImGui::Text("Start : %s", fmt_local_time(h.start_utc_unix, off_h).c_str());
         ImGui::Text("Stop  : %s", fmt_local_time(stop_utc, off_h).c_str());
-        ImGui::Text("Color : %.1f / %.1f dB (from file)",
+        ImGui::Text("Color : %.1f / %.1f dB",
             g_file_db_min, g_file_db_max);
         ImGui::Unindent(10.0f);
         ImGui::Dummy(ImVec2(0, 2));
@@ -895,18 +920,36 @@ void draw_modal(FFTViewer& v, NetClient* cli){
                 g_tex_dirty = true;
             }
             if(focused && !io.WantTextInput){
-                double span = g_t1 - g_t0;
-                double total = (double)g_open.num_rows;
+                // 방향키 = 줌 크기 유지 팬. 좌우=시간, 상하=주파수. 한 번에 화면의 50%.
+                double tspan = g_t1 - g_t0;
+                double ttotal = (double)g_open.num_rows;
+                double tstep = tspan * 0.5;
                 if(ImGui::IsKeyPressed(ImGuiKey_LeftArrow, false)){
-                    double t0 = g_t0 - span;
+                    double t0 = g_t0 - tstep;
                     if(t0 < 0) t0 = 0;
-                    g_t0 = t0; g_t1 = t0 + span;
+                    g_t0 = t0; g_t1 = t0 + tspan;
                     g_tex_dirty = true;
                 }
                 if(ImGui::IsKeyPressed(ImGuiKey_RightArrow, false)){
-                    double t1 = g_t1 + span;
-                    if(t1 > total) t1 = total;
-                    g_t0 = t1 - span; g_t1 = t1;
+                    double t1 = g_t1 + tstep;
+                    if(t1 > ttotal) t1 = ttotal;
+                    g_t0 = t1 - tspan; g_t1 = t1;
+                    g_tex_dirty = true;
+                }
+                double fspan = g_f1 - g_f0;
+                double ftotal = (double)h.fft_size;
+                double fstep = fspan * 0.5;
+                // Up = 주파수 위로(높은 쪽), Down = 아래로
+                if(ImGui::IsKeyPressed(ImGuiKey_UpArrow, false)){
+                    double f1 = g_f1 + fstep;
+                    if(f1 > ftotal) f1 = ftotal;
+                    g_f0 = f1 - fspan; g_f1 = f1;
+                    g_tex_dirty = true;
+                }
+                if(ImGui::IsKeyPressed(ImGuiKey_DownArrow, false)){
+                    double f0 = g_f0 - fstep;
+                    if(f0 < 0) f0 = 0;
+                    g_f0 = f0; g_f1 = f0 + fspan;
                     g_tex_dirty = true;
                 }
             }
@@ -1067,6 +1110,66 @@ void draw_modal(FFTViewer& v, NetClient* cli){
                    ImGui::IsKeyPressed(ImGuiKey_Delete, false)){
                     g_meas.active = false;
                     g_meas.edit = Meas::EDIT_NONE;
+                }
+
+                // ── 좌드래그 줌 (박스 친 영역으로 바로 확대) ────────────────
+                // Meas 편집(모서리/이동)과 겹치지 않게: Meas 편집 중이 아닐 때만.
+                // Ctrl 없이 이미지 위에서 좌클릭 드래그 → 빨간박스 → 놓으면 그 영역으로 줌.
+                bool meas_busy = g_meas.selecting || g_meas.edit != Meas::EDIT_NONE;
+                if(!ctrl && !meas_busy){
+                    if(in_img && ImGui::IsMouseClicked(ImGuiMouseButton_Left)){
+                        g_zdrag.active = true;
+                        g_zdrag.px0 = mp.x; g_zdrag.py0 = mp.y;
+                        g_zdrag.t0 = g_zdrag.t1 = px_to_t(mp.x);
+                        g_zdrag.f0 = g_zdrag.f1 = px_to_f(mp.y);
+                    }
+                    if(g_zdrag.active && ImGui::IsMouseDown(ImGuiMouseButton_Left)){
+                        g_zdrag.t1 = px_to_t(mp.x);
+                        g_zdrag.f1 = px_to_f(mp.y);
+                    }
+                    if(g_zdrag.active && ImGui::IsMouseReleased(ImGuiMouseButton_Left)){
+                        g_zdrag.active = false;
+                        // 실수 클릭 방지 — 화면상 드래그 폭이 양축 모두 임계 미만이면 무시
+                        const float MIN_DRAG_PX = 6.f;
+                        if(std::fabs(mp.x - g_zdrag.px0) >= MIN_DRAG_PX &&
+                           std::fabs(mp.y - g_zdrag.py0) >= MIN_DRAG_PX){
+                            double nt0 = std::min(g_zdrag.t0, g_zdrag.t1);
+                            double nt1 = std::max(g_zdrag.t0, g_zdrag.t1);
+                            double nf0 = std::min(g_zdrag.f0, g_zdrag.f1);
+                            double nf1 = std::max(g_zdrag.f0, g_zdrag.f1);
+                            if(nt1 - nt0 >= 1.0 && nf1 - nf0 >= 1.0){
+                                push_zoom_hist();        // 현재 뷰를 뒤로가기 스택에 저장
+                                g_t0 = nt0; g_t1 = nt1;
+                                g_f0 = nf0; g_f1 = nf1;
+                                g_tex_dirty = true;
+                            }
+                        }
+                    }
+                    // 드래그 중 빨간 박스 렌더 (Meas와 동일 스타일 재사용)
+                    if(g_zdrag.active){
+                        float rx0 = t_to_px(g_zdrag.t0), rx1 = t_to_px(g_zdrag.t1);
+                        float ry0 = f_to_py(g_zdrag.f0), ry1 = f_to_py(g_zdrag.f1);
+                        if(rx1 < rx0) std::swap(rx0, rx1);
+                        if(ry1 < ry0) std::swap(ry0, ry1);
+                        ImDrawList* dlz = ImGui::GetWindowDrawList();
+                        dlz->AddRectFilled(ImVec2(rx0, ry0), ImVec2(rx1, ry1),
+                                           IM_COL32(255,60,60,40));
+                        dlz->AddRect(ImVec2(rx0, ry0), ImVec2(rx1, ry1),
+                                     IM_COL32(255,80,80,220), 0.f, 0, 1.5f);
+                    }
+                }
+
+                // ── 줌 뒤로가기 ── Ctrl+Z 또는 순수 우클릭(드래그 없는 단일 클릭)
+                if(focused && !io.WantTextInput && ctrl &&
+                   ImGui::IsKeyPressed(ImGuiKey_Z, false)){
+                    pop_zoom_hist();
+                }
+                // 우클릭: Ctrl+우클릭은 Meas 생성이라 제외. 순수 우클릭 = 뒤로가기.
+                if(in_img && !ctrl && ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
+                   !g_meas.selecting){
+                    ImVec2 dm = ImGui::GetMouseDragDelta(ImGuiMouseButton_Right);
+                    if(std::fabs(dm.x) < 4.f && std::fabs(dm.y) < 4.f)
+                        pop_zoom_hist();
                 }
             }
 
