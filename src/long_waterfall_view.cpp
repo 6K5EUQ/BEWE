@@ -91,7 +91,8 @@ double   g_f0=0, g_f1=0;
 // 바이트 히스토그램을 세어 실시간 autoscale 과 같은 공식으로 윈도를 잡는다.
 float    g_file_db_min = 0.0f;
 float    g_file_db_max = 0.0f;
-uint64_t g_scanned_rows = 0;      // 스캔 완료 행 수 (LIVE 증가분만 추가 스캔)
+uint64_t g_scanned_rows = 0;      // 스캔한 표본 행수 (진단용)
+uint64_t g_scan_cursor  = 0;      // 다음 스캔할 행 인덱스 (서브샘플 커서)
 uint64_t g_hist[256] = {0};       // 바이트 히스토그램 (누적)
 
 // Right-panel split ratio (file list width fraction, 0..1)
@@ -222,6 +223,7 @@ void close_open(){
     g_tex_dirty = true;
     std::memset(g_hist, 0, sizeof(g_hist));
     g_scanned_rows = 0;
+    g_scan_cursor = 0;
     g_zoom_hist.clear();
     g_zdrag = ZoomDrag{};
 }
@@ -442,23 +444,34 @@ static const uint8_t* get_row(uint32_t r){
 // 열린 파일의 dB 색 윈도를 파일 데이터 자체에서 구한다.
 // 실시간 autoscale (rtlsdr_io.cpp 등) 과 같은 공식: 노이즈플로어 = 하위 15% 분위수,
 // pmin = noise - 5dB, pmax = peak + 20dB, 최소 스팬 20dB.
-// 전 행을 훑되 바이트 히스토그램(256칸)만 누적하므로 분위수·최대값이 O(1) 로 나온다.
-// LIVE 파일은 계속 자라므로 새로 추가된 행만 이어서 스캔한다 (g_scanned_rows).
+// 바이트 히스토그램(256칸)만 누적하므로 분위수·최대값이 O(1) 로 나온다.
+//
+// 대형 파일 로딩 지연 방지 — 서브샘플 스캔:
+//  전 행 대신 행 stride 로 건너뛰며 최대 ~SCAN_ROW_TARGET 행만 스캔. 분위수·피크는
+//  통계적으로 거의 동일하나 zstd 압축해제량이 수십분의 1 → 한 프레임에 끝나도 안 멈춤.
+//  (프레임 분할은 오히려 색 수렴 중 매 프레임 텍스처 재빌드를 유발해 더 느려서 제거.)
+// LIVE 파일은 계속 자라므로 stride 재산출한 채 새 행 커서로 이어 스캔한다.
+static constexpr uint64_t SCAN_ROW_TARGET = 8000;  // 목표 스캔 표본 행수
 static void scan_file_db_range(){
     if(!g_open.fp || g_open.hdr.fft_size == 0) return;
     const uint32_t fft_sz = g_open.hdr.fft_size;
-    if(g_scanned_rows > g_open.num_rows){    // 다른 파일로 교체됨 → 처음부터
+    if(g_scan_cursor > g_open.num_rows){     // 다른 파일로 교체됨 → 처음부터
         std::memset(g_hist, 0, sizeof(g_hist));
-        g_scanned_rows = 0;
+        g_scan_cursor = 0; g_scanned_rows = 0;
     }
-    if(g_scanned_rows == g_open.num_rows) return;
+    // stride 는 현재 행수 기준으로 갱신 (LIVE 로 자라면 점점 성겨짐).
+    uint64_t stride = g_open.num_rows / SCAN_ROW_TARGET;
+    if(stride < 1) stride = 1;
 
-    for(uint64_t r = g_scanned_rows; r < g_open.num_rows; r++){
-        const uint8_t* p = get_row((uint32_t)r);
-        if(!p) break;
-        // bin 0 은 DC — 실시간 autoscale 도 i=1 부터 누적하므로 동일하게 제외.
-        for(uint32_t i = 1; i < fft_sz; i++) g_hist[p[i]]++;
-        g_scanned_rows = r + 1;
+    if(g_scan_cursor < g_open.num_rows){
+        for(uint64_t r = g_scan_cursor; r < g_open.num_rows; r += stride){
+            const uint8_t* p = get_row((uint32_t)r);
+            if(!p) break;
+            // bin 0 은 DC — 실시간 autoscale 도 i=1 부터 누적하므로 동일하게 제외.
+            for(uint32_t i = 1; i < fft_sz; i++) g_hist[p[i]]++;
+            g_scan_cursor = r + stride;
+            g_scanned_rows++;
+        }
     }
 
     uint64_t total = 0;
