@@ -459,18 +459,37 @@ static void scan_file_db_range(){
         std::memset(g_hist, 0, sizeof(g_hist));
         g_scan_cursor = 0; g_scanned_rows = 0;
     }
-    // stride 는 현재 행수 기준으로 갱신 (LIVE 로 자라면 점점 성겨짐).
-    uint64_t stride = g_open.num_rows / SCAN_ROW_TARGET;
-    if(stride < 1) stride = 1;
-
+    // v13.3.2 — 블록 단위 서브샘플.
+    //  v4 압축 파일은 get_row() 가 행 하나를 위해 블록 전체(~2MB)를 zstd 해제하고
+    //  블록 1개만 캐시한다. 행을 stride 로 흩뿌리면 매 행이 캐시 미스라 해제 횟수가
+    //  표본 행수와 같아진다 (8000회) — 전 행 순차 스캔(블록당 1회)보다 오히려 느리다.
+    //  그래서 블록을 건너뛰되 고른 블록 안에서는 연속으로 읽는다:
+    //  해제 횟수 = 고른 블록 수(수십), 표본 수는 그대로 유지.
+    //  비압축(mmap) 파일은 block_rows==0 → 종전 행 stride 그대로.
+    //  비압축은 청크=1 이라 자연히 v13.3.1 의 행 stride 와 동일해진다.
+    const uint64_t chunk = (g_open.block_rows > 0) ? g_open.block_rows : 1;
     if(g_scan_cursor < g_open.num_rows){
-        for(uint64_t r = g_scan_cursor; r < g_open.num_rows; r += stride){
-            const uint8_t* p = get_row((uint32_t)r);
-            if(!p) break;
-            // bin 0 은 DC — 실시간 autoscale 도 i=1 부터 누적하므로 동일하게 제외.
-            for(uint32_t i = 1; i < fft_sz; i++) g_hist[p[i]]++;
-            g_scan_cursor = r + stride;
-            g_scanned_rows++;
+        // 표본 목표를 맞추는 청크 stride (청크 단위로 건너뜀).
+        // 압축: 청크당 block_rows 행을 통째로 세므로 목표 행수를 청크 수로 환산.
+        // 비압축: chunk==1 → want_chunks==SCAN_ROW_TARGET → 행 stride 와 동일.
+        const uint64_t total_chunks = (g_open.num_rows + chunk - 1) / chunk;
+        const uint64_t want_chunks  = (SCAN_ROW_TARGET + chunk - 1) / chunk;
+        uint64_t cstride = (want_chunks > 0) ? total_chunks / want_chunks : 1;
+        if(cstride < 1) cstride = 1;
+
+        for(uint64_t c = g_scan_cursor / chunk; c * chunk < g_open.num_rows; c += cstride){
+            const uint64_t r0 = c * chunk;
+            const uint64_t r1 = std::min<uint64_t>(r0 + chunk, g_open.num_rows);
+            bool ok = true;
+            for(uint64_t r = r0; r < r1; r++){
+                const uint8_t* p = get_row((uint32_t)r);
+                if(!p){ ok = false; break; }
+                // bin 0 은 DC — 실시간 autoscale 도 i=1 부터 누적하므로 동일하게 제외.
+                for(uint32_t i = 1; i < fft_sz; i++) g_hist[p[i]]++;
+                g_scanned_rows++;
+            }
+            g_scan_cursor = r0 + cstride * chunk;
+            if(!ok) break;
         }
     }
 

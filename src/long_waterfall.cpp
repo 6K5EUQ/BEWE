@@ -389,9 +389,13 @@ void worker_loop(){
               // v4.5.3 — HIST 파일은 1× FFT (fft_input_size) 로 저장.
               // 4× zero-pad 는 display 전용 — HIST 디스크 소비 4× 절감.
               fis  = (uint32_t)g_v->fft_input_size;
-              fsz  = fis;
-              dmin = g_v->display_power_min;
-              dmax = g_v->display_power_max; }
+              fsz  = fis; }
+            // v13.3.2 — 양자화 범위를 화면 슬라이더에서 따오지 않는다.
+            // 슬라이더 상한을 넘는 신호가 db_to_byte() 에서 255 로 포화되어
+            // 스펙트럼 꼭대기가 평평하게 잘려 기록되던 문제 (복구 불가).
+            // 고정 범위 -120..0 dB → 0.47 dB/step, 실사용 전 구간 커버.
+            dmin = DEFAULT_DB_MIN;
+            dmax = DEFAULT_DB_MAX;
             float    lon = g_v->station_lon;
             float    lat = g_v->station_lat;
             std::string sn = g_v->station_name;     // const std::string copy

@@ -282,6 +282,16 @@ static double                         g_cf_last_req_time = 0.0;
 // 안전 타임아웃 12초 — 응답이 영영 안 와도 갱신 복귀.
 static bool                           g_cf_req_pending = false;
 static double                         g_cf_req_sent_at = 0.0;
+// v13.3.2 — 이미 목록을 받아온 (station,year,code) 집합. 종료된 미션은 파일이 더
+// 늘지 않으므로 프로그램 종료까지 재요청하지 않는다 (다운로드 중 Central 응답이
+// 늦어져 목록이 오래 비어 보이던 문제 해소). ACTIVE 미션은 계속 갱신.
+struct CentralListKey { std::string station; int year; std::string code; };
+static std::vector<CentralListKey>    g_cf_fetched;
+static bool cf_already_fetched(const char* station, int year, const std::string& code){
+    for(auto& k : g_cf_fetched)
+        if(k.year == year && k.code == code && k.station == station) return true;
+    return false;
+}
 
 
 // ── Download 진행 상태 (단일 동시 다운로드) ──────────────────────────────
@@ -674,6 +684,28 @@ static void maybe_request_central_list(FFTViewer& v, NetClient* cli){
                        (g_cf_req_code != g_sel_code) ||
                        (strncmp(g_cf_req_station, station, 64) != 0);
     double now = ImGui::GetTime();
+    // v13.3.2 — 선택 미션이 ACTIVE(녹화중) 인가? ACTIVE 면 파일이 계속 늘어나므로
+    // 종전대로 5초 refresh. 종료 미션이면 한 번 받은 뒤 캐시로만 본다.
+    bool sel_is_active;
+    {
+        std::lock_guard<std::mutex> lk(v.mission_mtx);
+        sel_is_active = (v.mission_state == Mission::State::ACTIVE &&
+                         v.mission_year == g_sel_year &&
+                         strncmp(v.mission_code, g_sel_code.c_str(), 8) == 0);
+    }
+    bool cached;
+    {   // g_cf_fetched 는 net 콜백(on_mission_file_list_recv)도 push 하므로 g_cf_mtx 보호
+        std::lock_guard<std::mutex> lk(g_cf_mtx);
+        cached = cf_already_fetched(station, g_sel_year, g_sel_code);
+    }
+    if(!sel_is_active && cached){
+        // 이미 받아둔 종료 미션 — 요청 없이 캐시 표시. 다만 요청 scope 는 맞춰둬야
+        // draw 필터와 stale 정리 기준이 어긋나지 않는다.
+        g_cf_req_year = g_sel_year;
+        g_cf_req_code = g_sel_code;
+        strncpy(g_cf_req_station, station, sizeof(g_cf_req_station) - 1);
+        return;
+    }
     bool refresh_due = (now - g_cf_last_req_time) > 5.0;  // 5초마다 refresh
     // 이전 LIST_REQ 의 응답을 기다리는 중이면 새 요청 막음 (12초 timeout 안전망).
     // sel_changed 는 사용자 명시 의도라 강제 진행.
@@ -685,7 +717,11 @@ static void maybe_request_central_list(FFTViewer& v, NetClient* cli){
             // 같은 mission 만 비워 (다른 mission rows 는 유지해도 무방하나 단순화).
             // refresh-due 경로에서는 선제 비우지 않음 — 응답 지연 시 화면이 일시 비어 보이는
             // 부작용 방지. 응답 도착 시 page-level dedup (on_mission_file_list_recv) 이 멱등 갱신.
-            if(sel_changed) g_cf_rows.clear();
+            // v13.3.2 — sel_changed 여도 비우지 않는다. rows 는 (station,year,code)
+            // 로 스코프되어 draw 가 필터하므로 다른 미션 row 가 섞여 보이지 않고,
+            // 비우면 응답 도착까지 화면이 빈다 (다운로드로 응답이 늦으면 길게).
+            // 사라진 파일은 is_last_page 의 req_stale 정리가 처리.
+            (void)sel_changed;
             g_cf_last_page = false;
         }
         g_cf_req_year = g_sel_year;
@@ -1222,6 +1258,16 @@ static void draw_central_list(FFTViewer& v, NetClient* cli, uint8_t subdir){
         if(ImGui::SmallButton("Refresh##cf")){
             g_cf_last_req_time = 0;
             g_cf_req_pending = false;  // 강제 새로고침
+            // v13.3.2 — 캐시 기록에서 이 미션을 빼야 재요청이 나간다
+            // (종료 미션은 캐시 히트로 요청을 건너뛰므로).
+            std::lock_guard<std::mutex> lk(g_cf_mtx);
+            g_cf_fetched.erase(
+                std::remove_if(g_cf_fetched.begin(), g_cf_fetched.end(),
+                    [&](const CentralListKey& k){
+                        return k.year == g_sel_year && k.code == g_sel_code &&
+                               k.station == g_cf_req_station;
+                    }),
+                g_cf_fetched.end());
         }
     }
     ImGui::Separator();
@@ -2311,6 +2357,12 @@ void on_mission_file_list_recv(const PktMissionFileList& page,
                         g_cf_rows.end());
         g_cf_last_page = true;
         g_cf_req_pending = false;   // 다음 refresh 허용
+        // v13.3.2 — 이 (station,year,code) 는 전체 목록을 받았다고 기록.
+        // 종료 미션이면 maybe_request_central_list() 가 이후 재요청을 건너뛴다.
+        if(g_cf_req_year != 0 && !g_cf_req_code.empty()){
+            if(!cf_already_fetched(g_cf_req_station, g_cf_req_year, g_cf_req_code))
+                g_cf_fetched.push_back({g_cf_req_station, g_cf_req_year, g_cf_req_code});
+        }
     }
 }
 
