@@ -71,7 +71,17 @@ struct OpenFile {
     int                  cache_block = -1;              // 캐시된 블록 번호 (-1=없음)
     std::vector<uint8_t> cache_buf;                     // block_rows * fft_size (해제본)
     std::vector<uint8_t> frame_buf;                     // mmap 실패 시 압축 프레임 읽기
+    // ── v13.3.2: v4 전체 선해제 (open 시 1회) ─────────────────────────────
+    // 열 때 전 블록을 풀어 RAM 에 상주시키면 이후 get_row() 는 포인터 반환만 하고
+    // zstd 해제가 사라진다 — 팬/줌마다 도는 rebuild_texture 가 순수 메모리 접근이
+    // 되어 조작이 매끄러워진다. "열 때 좀 걸려도 이후 안 버벅" 을 택한 것.
+    // LIVE(자라는 파일)·과대 파일은 선해제하지 않고 종전 블록캐시로 동작.
+    std::vector<uint8_t> full_buf;   // num_rows * fft_size (비면 미사용)
+    bool                 full_ready = false;
 };
+// 선해제 상한 — 이보다 큰 파일은 종전 블록캐시 경로. HIST 뷰어는 8GB+ PC 에서
+// 쓰지만 무제한으로 물면 여러 파일을 열 때 누적된다.
+static constexpr uint64_t FULL_DECOMP_MAX_BYTES = 768ull * 1024 * 1024;
 OpenFile g_open;
 
 // ── Texture ──────────────────────────────────────────────────────────────
@@ -228,6 +238,8 @@ void close_open(){
     g_zdrag = ZoomDrag{};
 }
 
+static void preload_full_v4();   // 정의는 get_row 뒤 (블록캐시 경로를 재사용)
+
 bool open_file(const std::string& path){
     close_open();
     FILE* fp = fopen(path.c_str(), "rb");
@@ -287,6 +299,9 @@ bool open_file(const std::string& path){
     g_f0 = 0; g_f1 = h.fft_size;
     g_tex_dirty = true;
     g_last_known_rows = g_open.num_rows;
+    // v13.3.2 — 종료된 v4 파일은 여기서 전체를 풀어 둔다 (열 때 한 번 비용을 치르고
+    // 이후 팬/줌을 매끄럽게). LIVE 는 계속 자라므로 제외 — 종전 블록캐시로 동작.
+    if(path.find("-LIVE.bewehist") == std::string::npos) preload_full_v4();
     return true;
 }
 
@@ -407,6 +422,13 @@ static const uint8_t* get_row(uint32_t r){
         return g_open.rowbuf.data();
     }
 
+    // v13.3.2: 선해제본이 있으면 해제 없이 바로 포인터.
+    if(g_open.full_ready){
+        const size_t off = (size_t)r * fft_sz;
+        if(off + fft_sz <= g_open.full_buf.size()) return g_open.full_buf.data() + off;
+        return nullptr;
+    }
+
     // v4: 블록 zstd 해제 + 단일 블록 캐시.
     if(g_open.block_rows == 0) return nullptr;
     const uint32_t block = r / g_open.block_rows;
@@ -439,6 +461,35 @@ static const uint8_t* get_row(uint32_t r){
     }
     const uint32_t within = r - block * g_open.block_rows;
     return g_open.cache_buf.data() + (size_t)within * fft_sz;
+}
+
+// v13.3.2 — v4(zstd) 파일 전체를 한 번에 풀어 RAM 에 올린다 (open 시 1회).
+// 성공하면 이후 get_row() 는 압축해제 없이 포인터만 반환하므로 팬/줌마다 도는
+// rebuild_texture 가 매끄러워진다. 실패/미적용 시 조용히 종전 블록캐시로 동작.
+// LIVE(자라는 파일)에는 쓰지 않는다 — 새 행이 붙으면 선해제본이 곧 낡는다.
+static void preload_full_v4(){
+    if(!g_open.is_v4 || g_open.full_ready) return;
+    if(g_open.num_rows == 0 || g_open.hdr.fft_size == 0) return;
+    const uint64_t need = (uint64_t)g_open.num_rows * g_open.hdr.fft_size;
+    if(need > FULL_DECOMP_MAX_BYTES) return;      // 과대 — 종전 경로 유지
+
+    std::vector<uint8_t> buf;
+    try { buf.resize((size_t)need); }
+    catch(const std::bad_alloc&){ return; }       // RAM 부족 — 종전 경로 유지
+
+    // 블록 순서대로 해제 (get_row 의 블록캐시 경로를 그대로 재사용 — full_ready 는
+    // 아직 false 라 재귀하지 않는다). 블록당 1회 해제로 전체를 채운다.
+    const uint32_t fft_sz = g_open.hdr.fft_size;
+    for(uint32_t r = 0; r < g_open.num_rows; r++){
+        const uint8_t* p = get_row(r);
+        if(!p) return;                            // 손상/실패 — 선해제 포기
+        memcpy(buf.data() + (size_t)r * fft_sz, p, fft_sz);
+    }
+    g_open.full_buf.swap(buf);
+    g_open.full_ready = true;
+    // 블록캐시는 이제 안 쓰므로 메모리 반환.
+    g_open.cache_buf.clear(); g_open.cache_buf.shrink_to_fit();
+    g_open.cache_block = -1;
 }
 
 // 열린 파일의 dB 색 윈도를 파일 데이터 자체에서 구한다.
@@ -1022,11 +1073,11 @@ void draw_modal(FFTViewer& v, NetClient* cli){
                         g_meas.active = true;
                 }
 
-                // Render rectangle
-                if(g_meas.active || g_meas.selecting){
-                    float rx0 = t_to_px(g_meas.t0), rx1 = t_to_px(g_meas.t1);
-                    float ry_lo = f_to_py(g_meas.f0);          // f0 (low) → bottom in screen
-                    float ry_hi = f_to_py(g_meas.f1);          // f1 (high) → top
+                // 박스 + BW/Duration 라벨 렌더 (Meas 영역과 좌드래그 줌박스 공용)
+                auto draw_region_box = [&](double bt0, double bt1, double bf0, double bf1){
+                    float rx0 = t_to_px(bt0), rx1 = t_to_px(bt1);
+                    float ry_lo = f_to_py(bf0);                // 낮은 주파수 → 화면 아래
+                    float ry_hi = f_to_py(bf1);                // 높은 주파수 → 화면 위
                     if(rx1 < rx0) std::swap(rx0, rx1);
                     if(ry_hi > ry_lo) std::swap(ry_hi, ry_lo);
                     ImDrawList* dlf = ImGui::GetWindowDrawList();
@@ -1036,29 +1087,31 @@ void draw_modal(FFTViewer& v, NetClient* cli){
                                  IM_COL32(255,80,80,220), 0.f, 0, 1.5f);
 
                     // Info text: BW (MHz), Duration (s)
-                    if(g_meas.active || g_meas.selecting){
-                        double f_lo_idx = std::min(g_meas.f0, g_meas.f1);
-                        double f_hi_idx = std::max(g_meas.f0, g_meas.f1);
-                        double bw_mhz = (f_hi_idx - f_lo_idx) / (double)h.fft_size * (h.sample_rate_hz / 1e6);
-                        double t_lo = std::min(g_meas.t0, g_meas.t1);
-                        double t_hi = std::max(g_meas.t0, g_meas.t1);
-                        double dur_s = (t_hi - t_lo) / (double)std::max(1.f, h.row_rate_hz);
-                        char info[96];
-                        if(bw_mhz > 1.0)
-                            snprintf(info, sizeof(info), "BW : %.3f MHz   Duration : %.3f s",
-                                     bw_mhz, dur_s);
-                        else
-                            snprintf(info, sizeof(info), "BW : %.1f kHz   Duration : %.3f s",
-                                     bw_mhz * 1000.0, dur_s);
-                        ImVec2 ts = ImGui::CalcTextSize(info);
-                        float tx = rx0 + 4.f;
-                        float ty = ry_hi - ts.y - 4.f;
-                        if(ty < img_pos.y + 2) ty = ry_lo + 4.f;
-                        dlf->AddRectFilled(ImVec2(tx-3, ty-2), ImVec2(tx+ts.x+3, ty+ts.y+2),
-                                           IM_COL32(0,0,0,170));
-                        dlf->AddText(ImVec2(tx, ty), IM_COL32(255,200,200,255), info);
-                    }
-                }
+                    double f_lo_idx = std::min(bf0, bf1);
+                    double f_hi_idx = std::max(bf0, bf1);
+                    double bw_mhz = (f_hi_idx - f_lo_idx) / (double)h.fft_size * (h.sample_rate_hz / 1e6);
+                    double t_lo = std::min(bt0, bt1);
+                    double t_hi = std::max(bt0, bt1);
+                    double dur_s = (t_hi - t_lo) / (double)std::max(1.f, h.row_rate_hz);
+                    char info[96];
+                    if(bw_mhz > 1.0)
+                        snprintf(info, sizeof(info), "BW : %.3f MHz   Duration : %.3f s",
+                                 bw_mhz, dur_s);
+                    else
+                        snprintf(info, sizeof(info), "BW : %.1f kHz   Duration : %.3f s",
+                                 bw_mhz * 1000.0, dur_s);
+                    ImVec2 ts = ImGui::CalcTextSize(info);
+                    float tx = rx0 + 4.f;
+                    float ty = ry_hi - ts.y - 4.f;
+                    if(ty < img_pos.y + 2) ty = ry_lo + 4.f;
+                    dlf->AddRectFilled(ImVec2(tx-3, ty-2), ImVec2(tx+ts.x+3, ty+ts.y+2),
+                                       IM_COL32(0,0,0,170));
+                    dlf->AddText(ImVec2(tx, ty), IM_COL32(255,200,200,255), info);
+                };
+
+                // Render rectangle
+                if(g_meas.active || g_meas.selecting)
+                    draw_region_box(g_meas.t0, g_meas.t1, g_meas.f0, g_meas.f1);
 
                 // Edit (resize/move) via 좌클릭 — region active 일 때만
                 if(g_meas.active && !g_meas.selecting && !ctrl){
@@ -1177,18 +1230,9 @@ void draw_modal(FFTViewer& v, NetClient* cli){
                             }
                         }
                     }
-                    // 드래그 중 빨간 박스 렌더 (Meas와 동일 스타일 재사용)
-                    if(g_zdrag.active){
-                        float rx0 = t_to_px(g_zdrag.t0), rx1 = t_to_px(g_zdrag.t1);
-                        float ry0 = f_to_py(g_zdrag.f0), ry1 = f_to_py(g_zdrag.f1);
-                        if(rx1 < rx0) std::swap(rx0, rx1);
-                        if(ry1 < ry0) std::swap(ry0, ry1);
-                        ImDrawList* dlz = ImGui::GetWindowDrawList();
-                        dlz->AddRectFilled(ImVec2(rx0, ry0), ImVec2(rx1, ry1),
-                                           IM_COL32(255,60,60,40));
-                        dlz->AddRect(ImVec2(rx0, ry0), ImVec2(rx1, ry1),
-                                     IM_COL32(255,80,80,220), 0.f, 0, 1.5f);
-                    }
+                    // 드래그 중 빨간 박스 + BW/Duration 렌더 (Meas와 동일 코드 재사용)
+                    if(g_zdrag.active)
+                        draw_region_box(g_zdrag.t0, g_zdrag.t1, g_zdrag.f0, g_zdrag.f1);
                 }
 
                 // ── 줌 뒤로가기 ── Ctrl+Z 또는 순수 우클릭(드래그 없는 단일 클릭)

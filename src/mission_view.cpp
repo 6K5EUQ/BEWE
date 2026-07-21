@@ -2261,10 +2261,12 @@ void draw_modal(FFTViewer& v, NetClient* cli){
         ImGui::SameLine();
 
         ImGui::BeginChild("##mission_right", ImVec2(0, 0), true);
-        // 미션창을 새로 열 때 1회만 기본 선택 결정:
+        // 기본 선택은 세션 최초 1회만 결정:
         //   ACTIVE 미션 있으면 자동선택, IDLE 이면 미선택(=LOCAL 로컬 녹음 먼저).
-        // 매 프레임 가드(X) — 토글 해제(g_sel_year=0) 후 just_opened=false 라 재선택 안 됨.
-        if(just_opened){
+        // 이후 M 토글로 닫았다 열면 사용자가 마지막에 보던 선택 그대로 유지한다.
+        static bool s_first_open_done = false;
+        if(just_opened && !s_first_open_done){
+            s_first_open_done = true;
             if(hdr_active){ g_sel_year = hdr_year; g_sel_code = hdr_code; }
             else          { g_sel_year = 0; g_sel_code.clear(); }
         }
