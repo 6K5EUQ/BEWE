@@ -21,7 +21,14 @@
 #include <sys/statvfs.h>
 #include <dirent.h>
 
-static constexpr int HOST_TIMEOUT_SEC  = 3;   // HB 간격 1s 가정, 3초 미수신 시 dead 처리 (globe에서 즉시 제거)
+// HB 간격 1s. 예전엔 3s 였으나 그 여유(2s)로는 Pi5+SD 환경을 못 버텼다:
+// 정각 HIST finalize 마다 도는 zstd 압축(기지당 540MB 읽기+290MB 쓰기, 실측 15~20s)이
+// SD 를 포화시켜 아카이브 write 가 막히고, recv 루프가 수초 멎으면서 멀쩡한 HOST 가
+// age=4s 로 끊겼다. HOST 는 재연결하며 request_rotate() 를 쳐서(cli_host.cpp) 정각에
+// 연 HIST 를 수십 초 만에 닫고, 그 조각이 short-stub 으로 삭제돼 세그먼트가 1~2분
+// 늦게 시작했다 (0702-0800, 1401-1500 …). 워치독은 HOST 사망 감지용이지 I/O 지연
+// 감지용이 아니므로, 압축 창(2기지 30~40s)을 넉넉히 덮는 값으로 올린다.
+static constexpr int HOST_TIMEOUT_SEC  = 20;  // HB 1s 가정 — 20s 미수신 시 dead 처리
 static constexpr int HANDSHAKE_TIMEOUT = 10;
 static constexpr size_t PIPE_BUF_SZ    = 65536;
 
