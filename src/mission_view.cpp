@@ -1350,6 +1350,10 @@ static void draw_central_list(FFTViewer& v, NetClient* cli, uint8_t subdir){
             if(r.subdir != subdir) continue;
             if(r.year != g_sel_year) continue;
             if(strncmp(r.code, g_sel_code.c_str(), 8) != 0) continue;
+            // station 도 봐야 한다 — 여러 기지가 같은 (year,code) 를 쓰므로,
+            // 빠뜨리면 DGS-2 를 보는데 DGS-3 파일이 같이 나온다.
+            if(g_cf_req_station[0] &&
+               strncmp(r.station, g_cf_req_station, sizeof(r.station)) != 0) continue;
             rows.push_back(r);
         }
     }

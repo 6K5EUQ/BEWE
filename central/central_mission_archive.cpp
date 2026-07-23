@@ -585,21 +585,43 @@ void CentralServer::handle_mission_file_list_req(std::shared_ptr<HostRoom> room,
 void CentralServer::handle_mission_sync_req(std::shared_ptr<HostRoom> room,
                                              std::shared_ptr<JoinEntry> requester,
                                              const uint8_t* payload, size_t plen){
-    if(plen < sizeof(PktMissionSyncReq)) return;
+    if(plen < sizeof(PktMissionSyncReq)){
+        printf("[Central][Mission] SYNC_REQ short plen=%zu\n", plen);
+        return;
+    }
     const auto* r = reinterpret_cast<const PktMissionSyncReq*>(payload);
     char st[65] = {}; memcpy(st, r->station, 64); st[64] = 0;
-    if(!st[0]) return;
+    if(!st[0]){ printf("[Central][Mission] SYNC_REQ empty station\n"); return; }
 
     PktMissionSyncFor out{};
     strncpy(out.station, st, sizeof(out.station) - 1);
     {
         std::lock_guard<std::mutex> jlk(missions_json_mtx_);
-        auto it = missions_by_station_.find(st);
-        // 캐시는 BEWE 프레임 통짜 — 헤더를 벗겨 payload 만 복사.
-        if(it != missions_by_station_.end() &&
-           it->second.size() >= BEWE_HDR_SIZE + sizeof(PktMissionSync)){
-            memcpy(&out.sync, it->second.data() + BEWE_HDR_SIZE, sizeof(PktMissionSync));
-            out.found = 1;
+        // 캐시 키는 station 이름이 아니라 room id ("DGS-2_SW" 처럼 <station>_<host>).
+        // 아카이브 디렉터리는 station 이름으로 나뉘므로 키를 그대로 못 쓴다.
+        // blob 안의 station_name (active 우선, 없으면 history) 으로 매칭한다.
+        for(const auto& kv : missions_by_station_){
+            if(kv.second.size() < BEWE_HDR_SIZE + sizeof(PktMissionSync)) continue;
+            const auto* s = reinterpret_cast<const PktMissionSync*>(
+                                kv.second.data() + BEWE_HDR_SIZE);
+            bool hit = false;
+            if(s->active_valid && s->active.valid &&
+               strncmp(s->active.station_name, st, sizeof(s->active.station_name)) == 0)
+                hit = true;
+            if(!hit){
+                uint16_t n = s->history_count;
+                if(n > MAX_MISSION_HISTORY_PER_PKT) n = MAX_MISSION_HISTORY_PER_PKT;
+                for(uint16_t i = 0; i < n; i++){
+                    if(s->entries[i].valid &&
+                       strncmp(s->entries[i].station_name, st,
+                               sizeof(s->entries[i].station_name)) == 0){ hit = true; break; }
+                }
+            }
+            if(hit){
+                memcpy(&out.sync, s, sizeof(PktMissionSync));
+                out.found = 1;
+                break;
+            }
         }
     }
     printf("[Central][Mission] SYNC_REQ station='%s' → found=%u\n", st, out.found);
