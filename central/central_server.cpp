@@ -2770,7 +2770,21 @@ void CentralServer::load_missions_from_json(){
             uint32_t plen = sizeof(PktMissionSync);
             memcpy(bewe.data()+5, &plen, 4);
             memcpy(bewe.data()+BEWE_HDR_SIZE, &pkt, sizeof(PktMissionSync));
-            missions_by_station_[sid] = std::move(bewe);
+            // v13.4.2 — 저장 키를 station 이름으로 정규화. 구 파일은 room id
+            // ("DGS-2_SW") 로 키잉돼 있어 그대로 실으면 한 기지가 여러 항목으로 남는다.
+            // 같은 station 이 이미 로드됐으면 미션이 더 많은 쪽을 남긴다.
+            std::string key = mission_sync_station_key(nullptr, bewe.data(), bewe.size());
+            if(key.empty()) key = sid;
+            auto it = missions_by_station_.find(key);
+            if(it != missions_by_station_.end() &&
+               it->second.size() >= BEWE_HDR_SIZE + sizeof(PktMissionSync)){
+                const auto* old = reinterpret_cast<const PktMissionSync*>(
+                                      it->second.data() + BEWE_HDR_SIZE);
+                int old_n = old->history_count + (old->active_valid ? 1 : 0);
+                int new_n = hist_n + (pkt.active_valid ? 1 : 0);
+                if(new_n <= old_n) continue;   // 기존 항목이 더 많다 — 유지
+            }
+            missions_by_station_[key] = std::move(bewe);
         }
     }
     printf("[Central] loaded %zu mission entries across %zu stations\n",
