@@ -653,7 +653,7 @@ static void draw_meta_block(FFTViewer& v){
     bool   is_active = false;
     int    year = 0;
     char   code[8] = {}, station[64] = {}, host[32] = {},
-           started_by[32] = {}, sdr_kind[24] = {}, antenna[64] = {};
+           sdr_kind[24] = {}, antenna[64] = {};
     float  lat = 0.f, lon = 0.f;
     time_t start_utc = 0, end_utc = 0;
 
@@ -665,7 +665,6 @@ static void draw_meta_block(FFTViewer& v){
             memcpy(code,       e.code,         sizeof(code));
             memcpy(station,    e.station_name, sizeof(station));
             memcpy(host,       e.host_name,    sizeof(host));
-            memcpy(started_by, e.started_by,   sizeof(started_by));
             memcpy(sdr_kind,   e.sdr_kind,     sizeof(sdr_kind));
             memcpy(antenna,    e.antenna,      sizeof(antenna));
             lat = e.lat; lon = e.lon;
@@ -705,7 +704,6 @@ static void draw_meta_block(FFTViewer& v){
             memcpy(code,        v.mission_code,         sizeof(code));
             memcpy(station,     v.mission_station_name, sizeof(station));
             memcpy(host,        v.mission_host_name,    sizeof(host));
-            memcpy(started_by,  v.mission_started_by,   sizeof(started_by));
             memcpy(sdr_kind,    v.mission_sdr_kind,     sizeof(sdr_kind));
             memcpy(antenna,     v.mission_antenna,      sizeof(antenna));
             lat = v.mission_lat;
@@ -723,7 +721,6 @@ static void draw_meta_block(FFTViewer& v){
                     memcpy(code,        e.code,         sizeof(code));
                     memcpy(station,     e.station_name, sizeof(station));
                     memcpy(host,        e.host_name,    sizeof(host));
-                    memcpy(started_by,  e.started_by,   sizeof(started_by));
                     memcpy(sdr_kind,    e.sdr_kind,     sizeof(sdr_kind));
                     memcpy(antenna,     e.antenna,      sizeof(antenna));
                     lat = e.lat; lon = e.lon;
@@ -752,7 +749,6 @@ static void draw_meta_block(FFTViewer& v){
     row("Status:",  is_active ? "ACTIVE" : "CLOSED");
     row("Started:", fmt_utc(start_utc).c_str());
     if(!is_active) row("Ended:", fmt_utc(end_utc).c_str());
-    row("By:",      started_by);
     row("Station:", station);
     row("Host:",    host);
     // host의 좌표 그대로 N/S/E/W 단위 표기 (long_waterfall.hpp 공용 헬퍼).

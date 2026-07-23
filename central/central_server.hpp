@@ -474,6 +474,9 @@ private:
     void handle_mission_sync_req(std::shared_ptr<HostRoom> room,
                                  std::shared_ptr<JoinEntry> requester,
                                  const uint8_t* payload, size_t plen);
+    // v13.4.1 — missions.json 저장 키: blob 의 station_name (로그인 ID 무관).
+    std::string mission_sync_station_key(std::shared_ptr<HostRoom> room,
+                                         const uint8_t* bewe_pkt, size_t bewe_len);
     void handle_mission_file_delete(std::shared_ptr<HostRoom> room,
                                     std::shared_ptr<JoinEntry> requester,
                                     const uint8_t* payload, size_t plen);

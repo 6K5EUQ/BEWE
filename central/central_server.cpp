@@ -780,8 +780,13 @@ void CentralServer::dispatch_to_joins(std::shared_ptr<HostRoom> room,
             room->cached_mission_sync.assign(bewe_pkt, bewe_pkt + bewe_len);
         }
         {
+            // 키는 station 이름만 쓴다 (v13.4.1). room->station_id 는
+            // "<station>_<login_id>" 라서 같은 기지도 로그인 ID 마다 새 항목이 생겨,
+            // 한 기지의 미션이 여러 blob 으로 흩어지고 파일이 무한히 커졌다.
+            // 아카이브 디렉터리(missions/<station>/...)와도 이제 기준이 같다.
+            std::string key = mission_sync_station_key(room, bewe_pkt, bewe_len);
             std::lock_guard<std::mutex> jlk(missions_json_mtx_);
-            missions_by_station_[room->station_id].assign(bewe_pkt, bewe_pkt + bewe_len);
+            missions_by_station_[key].assign(bewe_pkt, bewe_pkt + bewe_len);
         }
         save_missions_to_json();
         // Mission File Archive: active mission shadow 갱신 (LWF tap 경로 결정용)

@@ -578,6 +578,27 @@ void CentralServer::handle_mission_file_list_req(std::shared_ptr<HostRoom> room,
     }
 }
 
+// ── missions.json 저장 키 (v13.4.1) ──────────────────────────────────────
+// MISSION_SYNC blob 안의 station_name (active 우선, 없으면 첫 유효 history) 을 키로 쓴다.
+// room->station_id 는 "<station>_<login_id>" 라 로그인 ID 가 바뀌면 같은 기지가
+// 새 항목으로 쌓인다. 이름을 못 찾으면 station_id 로 폴백 (기록 유실보다 낫다).
+std::string CentralServer::mission_sync_station_key(std::shared_ptr<HostRoom> room,
+                                                     const uint8_t* bewe_pkt, size_t bewe_len){
+    if(bewe_len >= BEWE_HDR_SIZE + sizeof(PktMissionSync)){
+        const auto* s = reinterpret_cast<const PktMissionSync*>(bewe_pkt + BEWE_HDR_SIZE);
+        auto name_of = [](const MissionSyncEntry& e) -> const char* {
+            return (e.valid && e.station_name[0]) ? e.station_name : nullptr;
+        };
+        if(s->active_valid)
+            if(const char* n = name_of(s->active)) return std::string(n);
+        uint16_t cnt = s->history_count;
+        if(cnt > MAX_MISSION_HISTORY_PER_PKT) cnt = MAX_MISSION_HISTORY_PER_PKT;
+        for(uint16_t i = 0; i < cnt; i++)
+            if(const char* n = name_of(s->entries[i])) return std::string(n);
+    }
+    return room ? room->station_id : std::string();
+}
+
 // ── SYNC_REQ (v13.4) ─────────────────────────────────────────────────────
 // JOIN 이 접속하지 않은 station 의 미션 메타(started_by/lat/lon/SDR/안테나/ACTIVE)를
 // 요청한다. missions_by_station_ 에 HOST 가 보낸 MISSION_SYNC 패킷이 통째로 캐시돼
@@ -595,36 +616,64 @@ void CentralServer::handle_mission_sync_req(std::shared_ptr<HostRoom> room,
 
     PktMissionSyncFor out{};
     strncpy(out.station, st, sizeof(out.station) - 1);
+    int scanned = 0;
     {
         std::lock_guard<std::mutex> jlk(missions_json_mtx_);
-        // 캐시 키는 station 이름이 아니라 room id ("DGS-2_SW" 처럼 <station>_<host>).
-        // 아카이브 디렉터리는 station 이름으로 나뉘므로 키를 그대로 못 쓴다.
-        // blob 안의 station_name (active 우선, 없으면 history) 으로 매칭한다.
+        // 캐시 키는 station 이름이 아니라 room id ("DGS-2_SW" 처럼 <station>_<host>) 이고,
+        // 같은 station 이 host_name 을 바꿔 접속할 때마다 새 키가 생긴다. 즉 한 station 의
+        // blob 이 여러 개 흩어져 있고, 그중 아무거나 집으면 몇 달 전 미션이 ACTIVE 로 뜬다.
+        // → station_name 이 일치하는 entry 를 전부 모아 start_utc 기준 최신순으로 합성한다.
+        std::vector<MissionSyncEntry> hist;
+        bool have_active = false;
+
+        auto match = [&](const MissionSyncEntry& e){
+            return e.valid && strncmp(e.station_name, st, sizeof(e.station_name)) == 0;
+        };
+        auto push_hist = [&](const MissionSyncEntry& e){
+            // 같은 (year, code) 는 최신 start_utc 하나만 남긴다.
+            for(auto& h : hist){
+                if(h.year == e.year && strncmp(h.code, e.code, sizeof(h.code)) == 0){
+                    if(e.start_utc > h.start_utc) h = e;
+                    return;
+                }
+            }
+            hist.push_back(e);
+        };
+
         for(const auto& kv : missions_by_station_){
             if(kv.second.size() < BEWE_HDR_SIZE + sizeof(PktMissionSync)) continue;
             const auto* s = reinterpret_cast<const PktMissionSync*>(
                                 kv.second.data() + BEWE_HDR_SIZE);
-            bool hit = false;
-            if(s->active_valid && s->active.valid &&
-               strncmp(s->active.station_name, st, sizeof(s->active.station_name)) == 0)
-                hit = true;
-            if(!hit){
-                uint16_t n = s->history_count;
-                if(n > MAX_MISSION_HISTORY_PER_PKT) n = MAX_MISSION_HISTORY_PER_PKT;
-                for(uint16_t i = 0; i < n; i++){
-                    if(s->entries[i].valid &&
-                       strncmp(s->entries[i].station_name, st,
-                               sizeof(s->entries[i].station_name)) == 0){ hit = true; break; }
+            scanned++;
+            // ACTIVE 는 가장 늦게 시작된 것 하나만 (여러 blob 이 각자 옛 ACTIVE 를 들고 있다).
+            if(s->active_valid && match(s->active) &&
+               s->active.state == 1 /* Mission::State::ACTIVE */){
+                if(!have_active || s->active.start_utc > out.sync.active.start_utc){
+                    out.sync.active = s->active;
+                    out.sync.active_valid = 1;
+                    have_active = true;
                 }
             }
-            if(hit){
-                memcpy(&out.sync, s, sizeof(PktMissionSync));
-                out.found = 1;
-                break;
-            }
+            uint16_t n = s->history_count;
+            if(n > MAX_MISSION_HISTORY_PER_PKT) n = MAX_MISSION_HISTORY_PER_PKT;
+            for(uint16_t i = 0; i < n; i++)
+                if(match(s->entries[i])) push_hist(s->entries[i]);
+            // active 도 종료됐다면 history 로 취급 (blob 이 갱신되기 전 상태일 수 있다).
+            if(s->active_valid && match(s->active) && s->active.state != 1)
+                push_hist(s->active);
         }
+
+        std::sort(hist.begin(), hist.end(),
+                  [](const MissionSyncEntry& a, const MissionSyncEntry& b){
+                      return a.start_utc > b.start_utc;
+                  });
+        uint16_t n = (uint16_t)std::min(hist.size(), (size_t)MAX_MISSION_HISTORY_PER_PKT);
+        for(uint16_t i = 0; i < n; i++) out.sync.entries[i] = hist[i];
+        out.sync.history_count = n;
+        out.found = (have_active || n > 0) ? 1 : 0;
     }
-    printf("[Central][Mission] SYNC_REQ station='%s' → found=%u\n", st, out.found);
+    printf("[Central][Mission] SYNC_REQ station='%s' → found=%u active=%u hist=%u (scanned %d blobs)\n",
+           st, out.found, out.sync.active_valid, out.sync.history_count, scanned);
 
     auto bewe = CentralServer::make_bewe_packet(
         BEWE_TYPE_MISSION_SYNC_FOR, &out, sizeof(out));
