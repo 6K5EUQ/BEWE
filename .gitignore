@@ -90,14 +90,14 @@ fftw_wisdom.f
 # BEAE AI 모듈 (venv 6.9GB torch — 코드만 추적)
 BEAE/ais/.venv/
 BEAE/ais/**/__pycache__/
-# data/ 는 ai_model(스냅샷)·ai_history(차트/CSV) 만 추적. aicap(raw IQ, 매일 수십MB
-# 누적)·ai.sock·ai_status.json(런타임 상태)·ai_daemon.log 는 계속 제외.
+# data/ 는 ai_history(차트/CSV) 만 추적. aicap(raw IQ, 매일 수십MB 누적)·ai.sock·
+# ai_status.json(런타임 상태)·ai_daemon.log 는 계속 제외.
 BEAE/ais/data/aicap_*.bin
 BEAE/ais/data/ai.sock
 BEAE/ais/data/ai_status.json
 BEAE/ais/data/ai_daemon.log
-BEAE/ais/data/ai_model/*.bak
-BEAE/ais/data/ai_model/*.v*bak
+# 모델 스냅샷 — 학습마다 2.5MB .pt 가 새로 쌓여 리포가 비대해짐. 머신 로컬에만 둔다.
+BEAE/ais/data/ai_model/
 # few-shot 프로토타입 모듈 — 아직 실험 단계라 스냅샷·로그 전부 제외 (리포엔 코드만)
 BEAE/ais/data/ai_model_proto/
 # GUARD 런타임 출력 — 일자별 alert JSONL(실선박 MMSI·좌표)·데몬 로그. 공개 리포라 추적 금지.
