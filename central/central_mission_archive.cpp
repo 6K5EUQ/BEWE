@@ -578,6 +578,42 @@ void CentralServer::handle_mission_file_list_req(std::shared_ptr<HostRoom> room,
     }
 }
 
+// ── SYNC_REQ (v13.4) ─────────────────────────────────────────────────────
+// JOIN 이 접속하지 않은 station 의 미션 메타(started_by/lat/lon/SDR/안테나/ACTIVE)를
+// 요청한다. missions_by_station_ 에 HOST 가 보낸 MISSION_SYNC 패킷이 통째로 캐시돼
+// 있으므로 그 payload 를 그대로 회신에 실어 보낸다 (재파싱 불필요).
+void CentralServer::handle_mission_sync_req(std::shared_ptr<HostRoom> room,
+                                             std::shared_ptr<JoinEntry> requester,
+                                             const uint8_t* payload, size_t plen){
+    if(plen < sizeof(PktMissionSyncReq)) return;
+    const auto* r = reinterpret_cast<const PktMissionSyncReq*>(payload);
+    char st[65] = {}; memcpy(st, r->station, 64); st[64] = 0;
+    if(!st[0]) return;
+
+    PktMissionSyncFor out{};
+    strncpy(out.station, st, sizeof(out.station) - 1);
+    {
+        std::lock_guard<std::mutex> jlk(missions_json_mtx_);
+        auto it = missions_by_station_.find(st);
+        // 캐시는 BEWE 프레임 통짜 — 헤더를 벗겨 payload 만 복사.
+        if(it != missions_by_station_.end() &&
+           it->second.size() >= BEWE_HDR_SIZE + sizeof(PktMissionSync)){
+            memcpy(&out.sync, it->second.data() + BEWE_HDR_SIZE, sizeof(PktMissionSync));
+            out.found = 1;
+        }
+    }
+    printf("[Central][Mission] SYNC_REQ station='%s' → found=%u\n", st, out.found);
+
+    auto bewe = CentralServer::make_bewe_packet(
+        BEWE_TYPE_MISSION_SYNC_FOR, &out, sizeof(out));
+    if(requester){
+        requester->enqueue_ctrl(bewe.data(), bewe.size());
+    } else {
+        enqueue_host_send(room, 0xFFFF, CentralMuxType::DATA,
+                          bewe.data(), (uint32_t)bewe.size());
+    }
+}
+
 // ── DL_REQ ───────────────────────────────────────────────────────────────
 void CentralServer::handle_mission_file_dl_req(std::shared_ptr<HostRoom> room,
                                                 std::shared_ptr<JoinEntry> requester,

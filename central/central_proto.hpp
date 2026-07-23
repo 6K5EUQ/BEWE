@@ -180,6 +180,9 @@ static constexpr uint8_t BEWE_TYPE_MISSION_FILE_DELETE    = 0x54;
 static constexpr uint8_t BEWE_TYPE_MISSION_FILE_RENAME    = 0x55;
 static constexpr uint8_t BEWE_TYPE_MISSION_FILE_PUSH_ACK  = 0x56;
 static constexpr uint8_t BEWE_TYPE_MISSION_FILE_SET_NOTE  = 0x57;
+// v13.4 — 크로스 스테이션 미션 메타 조회 (JOIN 이 남의 기지 메타/ACTIVE 를 보기 위함)
+static constexpr uint8_t BEWE_TYPE_MISSION_SYNC_REQ       = 0x5A;
+static constexpr uint8_t BEWE_TYPE_MISSION_SYNC_FOR       = 0x5B;
 
 static constexpr uint8_t BEWE_TYPE_CHAT     = 0x07;
 

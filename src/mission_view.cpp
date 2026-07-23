@@ -13,6 +13,7 @@
 #include "kst_time.hpp"
 
 #include <imgui.h>
+#include <cfloat>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -144,6 +145,45 @@ static double                   g_disk_scan_time = -1.0;
 // 광역 LIST_REQ(station, year=0, code="") 응답에서 unique (year, code, station)
 // 누적. mission_history 와 union 되어 disk/history 비어있어도 좌측 트리에 표시.
 struct KnownMission { int year; std::string code; std::string station; };
+
+// ── station 열람 override (v13.4.0) ──────────────────────────────────────
+// Central 아카이브는 station 별로 나뉘어 있고 LIST/DL 프로토콜 모두 station 을 인자로
+// 받으므로, 접속 station 이 아닌 다른 기지의 미션도 그대로 조회·다운로드된다.
+// 비어 있으면 접속 station (v.station_name) 을 그대로 쓴다.
+static std::string g_view_station;
+// station="" 광역 LIST_REQ 응답에서 모은 station 이름 (드롭다운 목록용)
+static std::mutex               g_station_mtx;
+static std::vector<std::string> g_known_stations;
+static double                   g_stations_last_req = -1.0;
+
+// 리모트 station 의 미션 메타 (MISSION_SYNC_FOR 응답 캐시).
+// 로컬 station 은 기존 v.mission_* / v.mission_history 를 그대로 쓴다.
+static std::mutex          g_rms_mtx;
+static std::string         g_rms_station;      // 이 캐시가 어느 station 것인지
+static bool                g_rms_found = false;
+static PktMissionSync      g_rms_sync{};
+static std::string         g_rms_req_station;  // 마지막으로 요청한 station
+static double              g_rms_req_time = -1.0;
+
+// 접속 station 사본 — FFTViewer& 를 못 받는 하위 draw 함수에서 쓰기 잠금 판정용.
+// draw_mission_modal 진입 시 매 프레임 갱신.
+static std::string g_local_station;
+
+// 화면에서 쓸 station. override 있으면 그것, 없으면 접속 station.
+static std::string view_station(const FFTViewer& v){
+    return g_view_station.empty() ? v.station_name : g_view_station;
+}
+// 접속 station 이 아닌 남의 기지를 보는 중인가 (쓰기 작업 잠금 조건).
+static bool viewing_remote_station(const FFTViewer& v){
+    return !g_view_station.empty() && g_view_station != v.station_name;
+}
+// 이 station 의 데이터에 쓰기(삭제/이름변경/note)를 허용해도 되는가.
+// 남의 기지 파일은 열람·다운로드만 — 실수로 지우는 사고 방지.
+static bool station_writable(const char* station){
+    if(!station || !station[0]) return true;              // station 불명 → 기존 동작 유지
+    if(g_local_station.empty())  return true;             // LOCAL/HOST 모드
+    return g_local_station == station;
+}
 static std::mutex                     g_cf_km_mtx;
 static std::vector<KnownMission>      g_cf_known_missions;
 static double                         g_cf_km_last_req_time = 0.0;
@@ -221,6 +261,28 @@ static void maybe_request_all_missions(NetClient* cli, const std::string& statio
     g_cf_km_last_req_station = station;
     g_cf_km_last_req_time = now;
     cli->send_mission_file_list_req(station.c_str(), /*year=*/0, /*code=*/"", /*subdir=*/0);
+}
+
+// station 목록 조회 — station="" 로 보내면 Central 이 아카이브의 모든 station 을 순회한다.
+// 응답의 entry.station 을 on_mission_file_list_recv 가 g_known_stations 에 모은다.
+// 전 station 전체 walk 라 비용이 있어 60초 캐시.
+// 리모트 station 메타 요청 — station 이 바뀌면 즉시, 그 외엔 10초마다 (ACTIVE 상태 추적).
+static void maybe_request_remote_meta(NetClient* cli, const std::string& station){
+    if(!cli || station.empty()) return;
+    double now = ImGui::GetTime();
+    bool changed = (station != g_rms_req_station);
+    if(!changed && g_rms_req_time >= 0.0 && (now - g_rms_req_time) < 10.0) return;
+    g_rms_req_station = station;
+    g_rms_req_time = now;
+    cli->send_mission_sync_req(station.c_str());
+}
+
+static void maybe_request_station_list(NetClient* cli){
+    if(!cli) return;
+    double now = ImGui::GetTime();
+    if(g_stations_last_req >= 0.0 && (now - g_stations_last_req) < 60.0) return;
+    g_stations_last_req = now;
+    cli->send_mission_file_list_req(/*station=*/"", /*year=*/0, /*code=*/"", /*subdir=*/0);
 }
 
 struct FileItem { std::string name; uint64_t size; time_t mtime; };
@@ -594,7 +656,46 @@ static void draw_meta_block(FFTViewer& v){
            started_by[32] = {}, sdr_kind[24] = {}, antenna[64] = {};
     float  lat = 0.f, lon = 0.f;
     time_t start_utc = 0, end_utc = 0;
-    {
+
+    // 리모트 station 열람 중이면 MISSION_SYNC_FOR 캐시가 유일한 소스 —
+    // v.mission_* / v.mission_history 는 접속 station 것이라 쓰면 안 된다.
+    if(viewing_remote_station(v)){
+        auto take = [&](const MissionSyncEntry& e){
+            year = e.year;
+            memcpy(code,       e.code,         sizeof(code));
+            memcpy(station,    e.station_name, sizeof(station));
+            memcpy(host,       e.host_name,    sizeof(host));
+            memcpy(started_by, e.started_by,   sizeof(started_by));
+            memcpy(sdr_kind,   e.sdr_kind,     sizeof(sdr_kind));
+            memcpy(antenna,    e.antenna,      sizeof(antenna));
+            lat = e.lat; lon = e.lon;
+            start_utc = (time_t)e.start_utc;
+            end_utc   = (time_t)e.end_utc;
+        };
+        std::lock_guard<std::mutex> lk(g_rms_mtx);
+        if(g_rms_found && g_rms_station == g_view_station){
+            const MissionSyncEntry& a = g_rms_sync.active;
+            if(g_rms_sync.active_valid && a.valid && a.code[0] &&
+               (g_sel_code.empty() ||
+                ((int)a.year == g_sel_year && g_sel_code == std::string(a.code, strnlen(a.code, 8))))){
+                is_active = true;
+                take(a);
+            } else {
+                uint16_t n = g_rms_sync.history_count;
+                if(n > MAX_MISSION_HISTORY_PER_PKT) n = MAX_MISSION_HISTORY_PER_PKT;
+                for(uint16_t i = 0; i < n; i++){
+                    const MissionSyncEntry& e = g_rms_sync.entries[i];
+                    if(!e.valid) continue;
+                    if((int)e.year == g_sel_year &&
+                       g_sel_code == std::string(e.code, strnlen(e.code, 8))){
+                        take(e);
+                        break;
+                    }
+                }
+            }
+        }
+        if(year == 0) return;   // 아직 응답 전이거나 캐시 없음 — 메타 블록 표시 안 함
+    } else {
         std::lock_guard<std::mutex> lk(v.mission_mtx);
         if(v.mission_state == Mission::State::ACTIVE && v.mission_code[0] &&
            (g_sel_code.empty() ||
@@ -611,8 +712,13 @@ static void draw_meta_block(FFTViewer& v){
             lon = v.mission_lon;
             start_utc = v.mission_start_utc;
         } else {
+            // station 도 비교 — 다른 기지의 같은 (year,code) 미션을 잘못 집지 않도록.
+            std::string want_st = view_station(v);
             for(auto& e : v.mission_history){
-                if(e.year == g_sel_year && g_sel_code == e.code){
+                if(e.year == g_sel_year && g_sel_code == e.code &&
+                   (want_st.empty() || e.station_name[0] == 0 ||
+                    want_st == std::string(e.station_name,
+                                           strnlen(e.station_name, sizeof(e.station_name))))){
                     year = e.year;
                     memcpy(code,        e.code,         sizeof(code));
                     memcpy(station,     e.station_name, sizeof(station));
@@ -665,8 +771,9 @@ static void maybe_request_central_list(FFTViewer& v, NetClient* cli){
     char station[64] = {};
     {
         std::lock_guard<std::mutex> lk(v.mission_mtx);
-        if(!v.station_name.empty()){
-            strncpy(station, v.station_name.c_str(), sizeof(station) - 1);
+        std::string vs = view_station(v);
+        if(!vs.empty()){
+            strncpy(station, vs.c_str(), sizeof(station) - 1);
         } else if(v.mission_state == Mission::State::ACTIVE &&
                   v.mission_year == g_sel_year &&
                   strncmp(v.mission_code, g_sel_code.c_str(), 8) == 0){
@@ -789,6 +896,8 @@ static void process_delete_key(NetClient* cli){
         std::vector<CentralSelKey> kept;
         for(auto& s : g_sel_central_keys){
             if(s.subdir != want_sub){ kept.push_back(s); continue; }
+            // 다른 기지 파일은 읽기전용 — 삭제 건너뜀 (선택은 유지).
+            if(!station_writable(s.station)){ kept.push_back(s); continue; }
             MissionFileKey k{};
             strncpy(k.station,  s.station,  sizeof(k.station)  - 1);
             k.year   = s.year;
@@ -997,15 +1106,17 @@ static bool start_download(NetClient* cli, const CentralFileRow& row){
 // Right-click context for a Central-side file row.
 static void central_context_menu(NetClient* cli, const CentralFileRow& row){
     if(ImGui::BeginPopupContextItem("##cf_ctx")){
+        // 다른 기지 파일은 읽기전용 — Download 만 허용, Note/Delete 잠금.
+        bool wr = station_writable(row.station);
         if(ImGui::MenuItem("Download")){
             start_download(cli, row);
         }
-        if(ImGui::MenuItem("Note")){
+        if(ImGui::MenuItem("Note", nullptr, false, wr)){
             open_note_central(row);
         }
         ImGui::Separator();
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.35f, 0.35f, 1.f));
-        if(ImGui::MenuItem("Delete")){
+        if(ImGui::MenuItem("Delete", nullptr, false, wr)){
             MissionFileKey k{};
             strncpy(k.station,  row.station,  sizeof(k.station)  - 1);
             k.year   = row.year;
@@ -1972,17 +2083,32 @@ static void draw_file_tabs(FFTViewer& v, NetClient* cli){
 
 static void draw_left_tree(FFTViewer& v){
     // [+] 제거. "Start Mission" 중앙정렬 (Button 의 ImVec2(-1,0) 은 full width).
+    // 다른 기지 열람 중엔 비활성 — 미션은 접속 station 에만 시작할 수 있다.
+    g_local_station = v.station_name;      // station_writable() 이 참조 (하위 draw 함수용)
+    bool remote_view = viewing_remote_station(v);
+    ImGui::BeginDisabled(remote_view);
     if(ImGui::Button("Start Mission", ImVec2(-1, 0))){
         v.mission_start_modal_open = true;
     }
+    ImGui::EndDisabled();
     ImGui::Separator();
 
     // 현재 station — JOIN 연결 station 또는 HOST 자기 station. left tree 를 이 station 의
     // 미션으로 필터링. cur_station 비면 LOCAL 모드 fallback (전부 표시).
-    std::string cur_station = v.station_name;
+    std::string cur_station = view_station(v);
     int act_year = 0;
     std::string act_code;
-    {
+    if(viewing_remote_station(v)){
+        // 리모트 열람 — ACTIVE 표식([*])도 그 station 기준으로.
+        std::lock_guard<std::mutex> lk(g_rms_mtx);
+        if(g_rms_found && g_rms_station == g_view_station &&
+           g_rms_sync.active_valid && g_rms_sync.active.valid &&
+           g_rms_sync.active.code[0]){
+            act_year = g_rms_sync.active.year;
+            act_code.assign(g_rms_sync.active.code,
+                            strnlen(g_rms_sync.active.code, sizeof(g_rms_sync.active.code)));
+        }
+    } else {
         std::lock_guard<std::mutex> lk(v.mission_mtx);
         if(v.mission_state == Mission::State::ACTIVE && v.mission_code[0]){
             act_year = v.mission_year;
@@ -1993,7 +2119,67 @@ static void draw_left_tree(FFTViewer& v){
     }
 
     if(!cur_station.empty()){
-        ImGui::TextColored(ImVec4(0.55f, 0.85f, 1.0f, 1.f), "Station: %s", cur_station.c_str());
+        // 클릭하면 Central 아카이브에 존재하는 station 목록에서 열람 대상 전환.
+        // 남의 기지를 보는 중이면 노란색 + [REMOTE] 로 구분하고 쓰기 작업은 잠근다.
+        bool remote_view = viewing_remote_station(v);
+        char label[128];
+        snprintf(label, sizeof(label), "Station: %s%s##station_sel",
+                 cur_station.c_str(), remote_view ? " [REMOTE]" : "");
+        ImGui::PushStyleColor(ImGuiCol_Text, remote_view ? ImVec4(1.00f, 0.82f, 0.30f, 1.f)
+                                                         : ImVec4(0.55f, 0.85f, 1.0f, 1.f));
+        bool clicked = ImGui::Selectable(label, false, 0,
+                                         ImVec2(0, ImGui::GetTextLineHeight() + 6.f));
+        ImGui::PopStyleColor();
+        if(clicked) ImGui::OpenPopup("##station_pick");
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4.f, 4.f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(4.f, 2.f));
+        if(ImGui::BeginPopup("##station_pick")){
+            std::vector<std::string> sts;
+            {
+                std::lock_guard<std::mutex> lks(g_station_mtx);
+                sts = g_known_stations;
+            }
+            // 접속 station 은 목록에 없어도 항상 첫 항목으로 보장 (아카이브가 비었을 때 대비).
+            if(!v.station_name.empty() &&
+               std::find(sts.begin(), sts.end(), v.station_name) == sts.end())
+                sts.insert(sts.begin(), v.station_name);
+            if(sts.empty()){
+                ImGui::TextDisabled("(no stations)");
+            } else {
+                // 전 항목 동일 폭 — 이름 길이가 달라도 하이라이트가 들쭉날쭉하지 않게.
+                float item_w = 0.f;
+                for(auto& s : sts)
+                    item_w = std::max(item_w, ImGui::CalcTextSize(s.c_str()).x);
+                item_w += ImGui::GetFontSize();   // 좌우 여백
+                for(size_t si = 0; si < sts.size(); si++){
+                    const std::string& s = sts[si];
+                    if(si) ImGui::Separator();
+                    bool sel = (s == cur_station);
+                    bool is_local = (s == v.station_name);
+                    char it[96];
+                    snprintf(it, sizeof(it), " %s ", s.c_str());
+                    // Station: 줄과 같은 색 규칙 — 접속 station 파란색, 나머지 노란색.
+                    ImGui::PushStyleColor(ImGuiCol_Text, is_local ? ImVec4(0.55f, 0.85f, 1.0f, 1.f)
+                                                                  : ImVec4(1.00f, 0.82f, 0.30f, 1.f));
+                    // 폭 고정 — 0 이면 남은 폭 전부라 오른쪽이 크게 비어 보인다.
+                    bool pick = ImGui::Selectable(it, sel, 0,
+                                                  ImVec2(item_w,
+                                                         ImGui::GetTextLineHeight() + 4.f));
+                    ImGui::PopStyleColor();
+                    if(pick){
+                        // 접속 station 을 고르면 override 해제 (기본 동작으로 복귀).
+                        g_view_station = is_local ? std::string() : s;
+                        // 트리 선택 초기화 — 다른 station 의 (year,code) 는 의미가 다르다.
+                        g_sel_year = 0;
+                        g_sel_code.clear();
+                        g_cf_km_last_req_station.clear();   // 광역 재조회 강제
+                    }
+                }
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::PopStyleVar(2);
     }
 
     // ── 디스크 여유공간 표시 (Central / Host / Local 순서, <10GB 빨간색) ──
@@ -2070,7 +2256,9 @@ static void draw_left_tree(FFTViewer& v){
                 if(is_active) ImGui::TextDisabled("Mission %s (ACTIVE)", code.c_str());
                 else          ImGui::TextDisabled("Mission %s", code.c_str());
                 ImGui::Separator();
-                if(ImGui::MenuItem("Delete Mission...")){
+                // 다른 기지 열람 중이면 미션 삭제 잠금 (트리는 view_station 으로 필터됨).
+                bool wr = g_view_station.empty() || station_writable(g_view_station.c_str());
+                if(ImGui::MenuItem("Delete Mission...", nullptr, false, wr)){
                     g_del_year = y;
                     g_del_code = code;
                 }
@@ -2223,7 +2411,18 @@ void draw_modal(FFTViewer& v, NetClient* cli){
 
         int hdr_year = 0; char hdr_code[8] = {};
         bool hdr_active = false;
-        {
+        bool hdr_remote = viewing_remote_station(v);
+        if(hdr_remote){
+            // 리모트 열람 — 그 station 의 MISSION_SYNC_FOR 캐시가 ACTIVE 여부를 준다.
+            std::lock_guard<std::mutex> lk(g_rms_mtx);
+            if(g_rms_found && g_rms_station == g_view_station &&
+               g_rms_sync.active_valid && g_rms_sync.active.valid &&
+               g_rms_sync.active.code[0]){
+                hdr_active = true;
+                hdr_year = g_rms_sync.active.year;
+                memcpy(hdr_code, g_rms_sync.active.code, sizeof(hdr_code));
+            }
+        } else {
             std::lock_guard<std::mutex> lk(v.mission_mtx);
             hdr_active = (v.mission_state == Mission::State::ACTIVE && v.mission_code[0]);
             hdr_year = v.mission_year;
@@ -2236,7 +2435,8 @@ void draw_modal(FFTViewer& v, NetClient* cli){
         } else {
             ImGui::TextColored(ImVec4(0.85f,0.85f,0.45f,1.f), "IDLE");
         }
-        if(hdr_active){
+        // End Mission 은 접속 station 미션에만 — 남의 기지 미션은 끝낼 수 없다.
+        if(hdr_active && !hdr_remote){
             ImGui::SameLine();
             float btnw = 130.f;
             ImGui::SetCursorPosX(ImGui::GetWindowWidth() - btnw - 16.f);
@@ -2250,8 +2450,14 @@ void draw_modal(FFTViewer& v, NetClient* cli){
 
         // Central 광역 LIST_REQ — station 의 모든 미션 목록을 좌측 트리에 표시하기 위해.
         // 30초 캐시 (maybe_request_all_missions 내부). station 변경 시 즉시 재요청.
-        if(cli && !v.station_name.empty())
-            maybe_request_all_missions(cli, v.station_name);
+        if(cli){
+            std::string vs = view_station(v);
+            if(!vs.empty()) maybe_request_all_missions(cli, vs);
+            // 드롭다운에 띄울 station 목록 (station="" 광역, 60초 캐시).
+            maybe_request_station_list(cli);
+            // 리모트 열람 중이면 그 station 의 미션 메타(ACTIVE 포함) 도 받아온다.
+            if(viewing_remote_station(v)) maybe_request_remote_meta(cli, g_view_station);
+        }
 
         float left_w = 200.f;
         ImGui::BeginChild("##mission_left", ImVec2(left_w, 0), true);
@@ -2292,6 +2498,13 @@ void draw_modal(FFTViewer& v, NetClient* cli){
 }
 
 // ── NetClient callback hooks (ui.cpp 에서 registration) ─────────────────
+void on_mission_sync_for_recv(const PktMissionSyncFor& p){
+    std::lock_guard<std::mutex> lk(g_rms_mtx);
+    g_rms_station.assign(p.station, strnlen(p.station, sizeof(p.station)));
+    g_rms_found = (p.found != 0);
+    g_rms_sync  = p.sync;
+}
+
 void on_mission_file_list_recv(const PktMissionFileList& page,
                                const std::vector<MissionFileEntry>& rows){
     std::lock_guard<std::mutex> lk(g_cf_mtx);
@@ -2340,6 +2553,18 @@ void on_mission_file_list_recv(const PktMissionFileList& page,
             }
             if(!dup) g_cf_known_missions.push_back({(int)src.year, code_s, st_s});
         }
+    }
+    // station 드롭다운 목록 — 어떤 응답이든 등장한 station 을 누적 (멱등).
+    {
+        std::lock_guard<std::mutex> lks(g_station_mtx);
+        for(auto& src : rows){
+            std::string st_s(src.station, strnlen(src.station, sizeof(src.station)));
+            if(st_s.empty()) continue;
+            if(std::find(g_known_stations.begin(), g_known_stations.end(), st_s)
+               == g_known_stations.end())
+                g_known_stations.push_back(st_s);
+        }
+        std::sort(g_known_stations.begin(), g_known_stations.end());
     }
     if(page.is_last_page){
         // 이 응답이 커버한 scope(요청 필터) 안에서, 이번 세대에 다시 확인되지 않은 row 제거.

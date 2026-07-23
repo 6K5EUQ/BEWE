@@ -125,6 +125,11 @@ enum class PacketType : uint8_t {
     // ── Module data pipe (src/modules/ 선택형 모듈 공용 전송로) ─────────
     MODULE_PIPE            = 0x58,  // 양방향: PktModulePipe + payload (mod_id 다중화, Central opaque relay)
     FFT_META               = 0x59,  // HOST → JOIN: FFT 입력 크기 메타. 구 JOIN 은 미지 타입이라 무시
+    // v13.4 — 크로스 스테이션 미션 메타 조회. 파일 목록(0x50)은 station 인자를 갖지만
+    // MISSION_SYNC(0x48) 는 room 스코프라 남의 기지 메타를 볼 수 없었다.
+    // 구 Central 은 0x5A 를 모르므로 응답이 없고, JOIN 은 메타 없음으로 표시한다 (안전).
+    MISSION_SYNC_REQ       = 0x5A,  // JOIN → central: PktMissionSyncReq (station 지정)
+    MISSION_SYNC_FOR       = 0x5B,  // central → caller: PktMissionSyncFor (station + PktMissionSync)
 };
 
 // ── Packet header (9 bytes, packed) ──────────────────────────────────────
@@ -871,6 +876,22 @@ struct __attribute__((packed)) PktMissionSync {
     uint16_t         _pad2;
     MissionSyncEntry active;             // 현재 ACTIVE 미션 (없으면 valid=0)
     MissionSyncEntry entries[MAX_MISSION_HISTORY_PER_PKT];
+};
+
+// ── 크로스 스테이션 미션 메타 (v13.4) ─────────────────────────────────────
+// JOIN → Central: 지정 station 의 미션 메타 요청. Central 은 missions_by_station_
+// (HOST 가 보낸 MISSION_SYNC 캐시) 에서 그 station 항목을 꺼내 회신한다.
+struct __attribute__((packed)) PktMissionSyncReq {
+    char station[64];        // 조회할 station (빈 문자열이면 응답 안 함)
+};
+
+// Central → caller: 요청 station 과 그 station 의 MISSION_SYNC 내용.
+// found=0 이면 sync 는 의미 없음 (그 station 의 캐시가 아직 없음).
+struct __attribute__((packed)) PktMissionSyncFor {
+    char           station[64];
+    uint8_t        found;
+    uint8_t        _pad[3];
+    PktMissionSync sync;
 };
 
 // JOIN/HOST → Central → HOST (relay) — v4.0: payload reduced to trigger only.

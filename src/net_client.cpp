@@ -754,6 +754,12 @@ void NetClient::handle_packet(PacketType type,
         if(on_mission_file_push_ack) on_mission_file_push_ack(*p);
         break;
     }
+    case PacketType::MISSION_SYNC_FOR: {
+        if(len < sizeof(PktMissionSyncFor)) break;
+        auto* p = reinterpret_cast<const PktMissionSyncFor*>(payload);
+        if(on_mission_sync_for) on_mission_sync_for(*p);
+        break;
+    }
 
     default: break;
     }
@@ -1104,6 +1110,13 @@ bool NetClient::send_mission_file_list_req(const char* station, uint16_t year,
     if(code){ strncpy(r.code, code, sizeof(r.code) - 1); }
     r.subdir = subdir;
     return raw_send(PacketType::MISSION_FILE_LIST_REQ, &r, sizeof(r));
+}
+
+bool NetClient::send_mission_sync_req(const char* station){
+    if(!station || !station[0]) return false;
+    PktMissionSyncReq r{};
+    strncpy(r.station, station, sizeof(r.station) - 1);
+    return raw_send(PacketType::MISSION_SYNC_REQ, &r, sizeof(r));
 }
 
 bool NetClient::send_mission_file_dl_req(const MissionFileKey& key, uint64_t start_offset){

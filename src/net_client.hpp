@@ -188,6 +188,8 @@ public:
                        const uint8_t* /*chunk*/, uint32_t /*chunk_len*/)> on_mission_file_dl_data;
     // PUSH ACK (HOST-side only; JOIN ignores).
     std::function<void(const PktMissionFilePushAck&)> on_mission_file_push_ack;
+    // v13.4 — 다른 station 의 미션 메타 응답 (found=0 이면 캐시 없음).
+    std::function<void(const PktMissionSyncFor&)> on_mission_sync_for;
 
     // 콜백 등록 전에 도착한 BAND_PLAN_SYNC / BAND_CAT_SYNC 보관 (race 방지)
     std::mutex                     band_plan_pending_mtx;
@@ -364,6 +366,8 @@ public:
     bool send_mission_file_list_req(const char* station, uint16_t year,
                                     const char* code, uint8_t subdir);
     bool send_mission_file_dl_req(const MissionFileKey& key, uint64_t start_offset = 0);
+    // v13.4 — 지정 station 의 미션 메타 요청 (MISSION_SYNC 는 접속 room 것만 오므로).
+    bool send_mission_sync_req(const char* station);
     bool send_mission_file_delete(const MissionFileKey& key);
     bool send_mission_file_rename(const MissionFileKey& key, const char* new_filename);
     bool send_mission_file_set_note(const MissionFileKey& key, const char* note);

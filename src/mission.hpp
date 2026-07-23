@@ -59,4 +59,6 @@ namespace MissionView {
                                    const std::vector<MissionFileEntry>& rows);
     void on_mission_file_dl_data_recv(const PktMissionFileDlData& d,
                                       const uint8_t* chunk, uint32_t chunk_len);
+    // v13.4 — 다른 station 의 미션 메타 응답 (Station 드롭다운으로 리모트 열람 시).
+    void on_mission_sync_for_recv(const PktMissionSyncFor& p);
 }

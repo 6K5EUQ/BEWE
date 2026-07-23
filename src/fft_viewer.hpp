@@ -1009,6 +1009,14 @@ public:
     int   freq_sorted_display_num(int arr_idx) const;
 
 #ifndef BEWE_HEADLESS
+    // 전체영역 오버레이(SA/LOG/HIST/LIB/MSN/DEMOD) 가 하나라도 열려 있는가.
+    // 열려 있으면 메인페이지 입력(마우스/키보드)은 전부 격리 차단한다 — 렌더와
+    // 내부 상태는 그대로 유지해서, 오버레이를 닫으면 즉시 정상 동작.
+    bool overlay_blocking() const {
+        return eid_panel_open || log_panel_open || lwf_modal_open
+            || sig_lib_panel_open || mission_modal_open || demod_panel_open;
+    }
+
     // ── ui.cpp (rendering — GUI only) ────────────────────────────────────
     void handle_new_channel_drag(float gx, float gw);
     void handle_channel_interactions(float gx, float gw, float gy, float gh);

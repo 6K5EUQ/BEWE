@@ -1548,7 +1548,7 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
         // 띠 위 hover/click — 별도 InvisibleButton
         ImGui::SetCursorScreenPos(ImVec2(gx, band_bar_y));
         ImGui::InvisibleButton("##band_bar", ImVec2(gw, BAND_BAR_H));
-        bool bar_hov = ImGui::IsItemHovered();
+        bool bar_hov = ImGui::IsItemHovered() && !overlay_blocking();
         if(bar_hov){
             ImVec2 mp = ImGui::GetIO().MousePos;
             float mhz_at = vis_lo + (mp.x - gx) / gw * (vis_hi - vis_lo);
@@ -1921,15 +1921,15 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
 
     ImGui::SetCursorScreenPos(ImVec2(gx,gy));
     ImGui::InvisibleButton("sp_graph",ImVec2(gw,gh));
-    bool hov=ImGui::IsItemHovered();
+    // 오버레이 열려있으면 hover 자체를 부정 — max hold/툴팁/줌휠/노치 더블클릭 일괄 차단.
+    bool hov=ImGui::IsItemHovered() && !overlay_blocking();
 
     // ── Ctrl+우클릭 드래그: 노치필터 생성 (파워스펙트럼 전용, 채널 생성보다 우선) ─
     {
         ImVec2 mp = ImGui::GetIO().MousePos;
         bool ctrl = ImGui::GetIO().KeyCtrl;
         bool in_sp = (mp.x>=gx && mp.x<=gx+gw && mp.y>=gy && mp.y<=gy+gh);
-        if(!eid_panel_open && !log_panel_open && !lwf_modal_open && !mission_modal_open && !demod_panel_open
-           && ctrl && in_sp &&
+        if(!overlay_blocking() && ctrl && in_sp &&
            ImGui::IsMouseClicked(ImGuiMouseButton_Right)){
             notch_drag.selecting = true;
             notch_drag.drag_x0 = notch_drag.drag_x1 = mp.x;
@@ -1993,12 +1993,10 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
         ImVec2 _mp = ImGui::GetIO().MousePos;
         bool in_band_bar = band_bar_active &&
                            _mp.y >= band_bar_y && _mp.y <= band_bar_y + BAND_BAR_H;
-        bool any_ovl = eid_panel_open || log_panel_open || lwf_modal_open || mission_modal_open || demod_panel_open;
-        if(!any_ovl && !in_band_bar) handle_new_channel_drag(gx,gw);
+        if(!overlay_blocking() && !in_band_bar) handle_new_channel_drag(gx,gw);
     }
     int sel_before = selected_ch;
-    bool any_ovl_b = eid_panel_open || log_panel_open || lwf_modal_open || sig_lib_panel_open || mission_modal_open || demod_panel_open;
-    if(!region.active && !any_ovl_b) handle_channel_interactions(gx,gw,gy,gh);
+    if(!region.active && !overlay_blocking()) handle_channel_interactions(gx,gw,gy,gh);
 
     // ── 좌클릭 토글 > Max Hold (채널 위가 아닌 빈 영역 클릭에서만) ──────
     // NOTE: 더블클릭 제거보다 먼저 실행해야 함 - 더블클릭 두 번째 클릭에서
@@ -2064,7 +2062,7 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
         dl->AddRectFilled(ImVec2(tx-2,ty),ImVec2(tx+ts.x+2,ty+ts.y+4),IM_COL32(20,20,20,220));
         dl->AddRect(ImVec2(tx-2,ty),ImVec2(tx+ts.x+2,ty+ts.y+4),IM_COL32(100,100,100,255));
         dl->AddText(ImVec2(tx,ty+2),IM_COL32(0,255,0,255),info);
-        if(!eid_panel_open) handle_zoom_scroll(gx,gw,mm.x);
+        if(!overlay_blocking()) handle_zoom_scroll(gx,gw,mm.x);
     }
     // 파워 축 드래그 (클릭 편집 제거됨; 드래그만 유지)
     // 드래그 방향: 위로 > 값 증가, 아래로 > 값 감소
@@ -2074,7 +2072,7 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
         ImGui::InvisibleButton("pax",ImVec2(AXIS_LABEL_WIDTH,gh));
         static float drag_start_y=0, drag_start_val=0;
         static bool  drag_is_max=false;
-        if(ImGui::IsItemActive()){
+        if(ImGui::IsItemActive() && !overlay_blocking()){
             if(ImGui::IsMouseClicked(ImGuiMouseButton_Left)){
                 ImVec2 m2=ImGui::GetMousePos();
                 float mid_y=gy+gh*0.5f;
@@ -2107,7 +2105,8 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
         float fax_h = BOTTOM_LABEL_HEIGHT;
         ImGui::SetCursorScreenPos(ImVec2(gx, fax_y));
         ImGui::InvisibleButton("freq_axis_drag", ImVec2(gw, fax_h));
-        bool fax_hov = ImGui::IsItemHovered();
+        // 오버레이 중엔 hover 부정 — 창 밖 클릭이 SDR 재튜닝시키던 문제 차단.
+        bool fax_hov = ImGui::IsItemHovered() && !overlay_blocking();
         if(fax_hov) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
 
         if(fax_hov && ImGui::IsMouseClicked(ImGuiMouseButton_Left)){
@@ -2219,26 +2218,26 @@ void FFTViewer::draw_waterfall_area(ImDrawList* dl, float full_x, float full_y, 
     }
     ImGui::SetCursorScreenPos(ImVec2(gx,gy));
     ImGui::InvisibleButton("wf_graph",ImVec2(gw,gh));
-    bool hov=ImGui::IsItemHovered();
+    // 오버레이 열려있으면 hover 부정 — 툴팁/줌휠/region 편집 일괄 차단.
+    bool hov=ImGui::IsItemHovered() && !overlay_blocking();
     {
         // 마우스가 워터폴 영역 안에 있을 때만 채널 드래그 시작 허용 (band bar 우클릭 보호)
         ImVec2 _mp = ImGui::GetIO().MousePos;
         bool in_wf_area = (_mp.y >= gy && _mp.y <= gy + gh);
-        bool any_ovl_w = eid_panel_open || log_panel_open || lwf_modal_open || sig_lib_panel_open || mission_modal_open || demod_panel_open;
-        if(!any_ovl_w && in_wf_area) handle_new_channel_drag(gx,gw);
+        if(!overlay_blocking() && in_wf_area) handle_new_channel_drag(gx,gw);
     }
-    bool any_ovl_w2 = eid_panel_open || log_panel_open || lwf_modal_open || sig_lib_panel_open || mission_modal_open || demod_panel_open;
-    if(!region.active && !any_ovl_w2) handle_channel_interactions(gx,gw,gy,gh);
+    if(!region.active && !overlay_blocking()) handle_channel_interactions(gx,gw,gy,gh);
 
     // ── Ctrl+우클릭 드래그: 영역 IQ 녹음 선택 ────────────────────────────
     {
         ImGuiIO& mio=ImGui::GetIO();
         ImVec2 mp=mio.MousePos;
         bool ctrl=mio.KeyCtrl;
-        bool in_wf=(mp.x>=gx&&mp.x<=gx+gw&&mp.y>=gy&&mp.y<=gy+gh);
+        // 오버레이 중엔 in_wf 를 부정 — region 신규선택/편집/더블클릭 해제 일괄 차단.
+        bool in_wf=(mp.x>=gx&&mp.x<=gx+gw&&mp.y>=gy&&mp.y<=gy+gh)&&!overlay_blocking();
 
         // ── 신규 선택: Ctrl+우클릭 드래그 ──────────────────────────────
-        if(!eid_panel_open&&!log_panel_open&&!lwf_modal_open&&!mission_modal_open&&!demod_panel_open
+        if(!overlay_blocking()
            &&ctrl&&ImGui::IsMouseClicked(ImGuiMouseButton_Right)&&in_wf&&(tm_iq_file_ready||remote_mode)){
             region.selecting=true; region.active=false;
             region.edit_mode=RegionSel::EDIT_NONE;
@@ -2478,7 +2477,7 @@ void FFTViewer::draw_waterfall_area(ImDrawList* dl, float full_x, float full_y, 
         struct tm lt; KST::to_tm(wt_sec, lt);
         char tbuf[16]; strftime(tbuf, sizeof(tbuf), "%H:%M:%S", &lt);
         ImGui::SetTooltip("%s\n%.3f MHz", tbuf, af);
-        if(!eid_panel_open) handle_zoom_scroll(gx,gw,mm.x);
+        if(!overlay_blocking()) handle_zoom_scroll(gx,gw,mm.x);
     }
 }
 
@@ -3727,6 +3726,10 @@ void run_streaming_viewer(){
         cli->on_mission_file_dl_data = [&](const PktMissionFileDlData& d,
                                            const uint8_t* chunk, uint32_t chunk_len){
             MissionView::on_mission_file_dl_data_recv(d, chunk, chunk_len);
+        };
+        // 다른 station 미션 메타 (Station 드롭다운으로 리모트 열람 시)
+        cli->on_mission_sync_for = [&](const PktMissionSyncFor& p){
+            MissionView::on_mission_sync_for_recv(p);
         };
 
         // 미션 스냅샷 수신 → JOIN 로컬 mission_* 상태 재구성
@@ -6388,8 +6391,7 @@ void run_streaming_viewer(){
         // STATUS(우측패널) 격리: 전체영역 오버레이(SA/LOG/HIST/LIB/MSN/DEMOD) 열려있으면
         // STATUS 토글·드래그·렌더 전부 차단. 내부 상태/백그라운드는 유지, 입력·표시만 막음.
         // 오버레이 닫으면 저장된 right_panel_ratio로 다시 정상 동작.
-        bool fs_overlay_active = v.eid_panel_open || v.log_panel_open || v.lwf_modal_open
-                              || v.sig_lib_panel_open || v.mission_modal_open || v.demod_panel_open;
+        bool fs_overlay_active = v.overlay_blocking();
         // S키: 메인 STATUS 패널 토글. 다른 오버레이 활성 시엔 그쪽이 S 키 소비.
         if(main_kbd_active && !fs_overlay_active
            && ImGui::IsKeyPressed(ImGuiKey_S, false) && !ImGui::GetIO().WantTextInput){
@@ -6906,7 +6908,8 @@ void run_streaming_viewer(){
         {
             ImVec2 mpos = ImGui::GetIO().MousePos;
             bool hdiv_hov = (mpos.x >= 0 && mpos.x <= left_w &&
-                             mpos.y >= div_y && mpos.y <= div_y + div_h);
+                             mpos.y >= div_y && mpos.y <= div_y + div_h)
+                            && !fs_overlay_active;
             static bool hdiv_dragging = false;
             if(hdiv_hov && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
                 hdiv_dragging = true;

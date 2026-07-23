@@ -470,6 +470,10 @@ private:
     void handle_mission_file_dl_req(std::shared_ptr<HostRoom> room,
                                     std::shared_ptr<JoinEntry> requester,
                                     const uint8_t* payload, size_t plen);
+    // v13.4 — 지정 station 의 미션 메타 회신 (missions_by_station_ 캐시 조회).
+    void handle_mission_sync_req(std::shared_ptr<HostRoom> room,
+                                 std::shared_ptr<JoinEntry> requester,
+                                 const uint8_t* payload, size_t plen);
     void handle_mission_file_delete(std::shared_ptr<HostRoom> room,
                                     std::shared_ptr<JoinEntry> requester,
                                     const uint8_t* payload, size_t plen);
