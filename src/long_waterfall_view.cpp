@@ -1264,11 +1264,36 @@ void draw_modal(FFTViewer& v, NetClient* cli){
                 double freq_idx = g_f1 - (mp.y - img_pos.y) / img_sz.y * (g_f1 - g_f0);
                 double t_sec = t / (double)h.row_rate_hz;
                 uint64_t hover_utc = h.start_utc_unix + (uint64_t)t_sec;
-                std::string tstr = fmt_local_time(hover_utc, off_h);
+                // 날짜는 상단 정보란(Start/Stop)에 있으므로 툴팁은 HH:MM:SS 만.
+                struct tm tm_kst; KST::to_tm((time_t)hover_utc, tm_kst);
+                char tbuf[16];
+                strftime(tbuf, sizeof(tbuf), "%H:%M:%S", &tm_kst);
                 double cf_mhz = h.center_freq_hz / 1e6;
                 double sr_mhz = h.sample_rate_hz / 1e6;
                 double fmhz = cf_mhz + (freq_idx / (double)h.fft_size - 0.5) * sr_mhz;
-                ImGui::SetTooltip("%s\n%.4f MHz", tstr.c_str(), fmhz);
+                // SNR = 커서 지점 dB - 파일 전역 노이즈플로어.
+                // scan_file_db_range() 가 하위 15% 분위수를 noise 로 잡고
+                // g_file_db_min = noise - 5 로 저장하므로 +5 로 역산한다.
+                // 실측(v3 파일 6종, 각 12구간): 파일 내 노이즈플로어 변동 평균 0.33dB,
+                // 최대 1.4dB(게인 변경 케이스) — 바이트 양자화(0.17~0.39dB/byte) 수준이라
+                // 행 단위 재계산 없이 전역값으로 충분하다.
+                int  row_i = (int)t;
+                int  bin_i = (int)freq_idx;
+                bool have_snr = false;
+                float snr_db = 0.f;
+                if(row_i >= 0 && (uint64_t)row_i < g_open.num_rows &&
+                   bin_i >= 0 && (uint32_t)bin_i < h.fft_size &&
+                   g_file_db_max > g_file_db_min){
+                    if(const uint8_t* rp = get_row((uint32_t)row_i)){
+                        float d = LongWaterfall::byte_to_db(rp[bin_i], h.db_min, h.db_max);
+                        snr_db   = d - (g_file_db_min + 5.0f);
+                        have_snr = true;
+                    }
+                }
+                if(have_snr)
+                    ImGui::SetTooltip("%s\n%.3fMHz\nSNR %.1fdB", tbuf, fmhz, snr_db);
+                else
+                    ImGui::SetTooltip("%s\n%.3fMHz", tbuf, fmhz);
             }
         }
         ImGui::PopStyleVar(2);   // ItemSpacing + FramePadding
