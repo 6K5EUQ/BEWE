@@ -2231,6 +2231,14 @@ void run_cli_host(){
                         cap = std::thread(&FFTViewer::capture_and_process_rtl, &v);
                     v.mix_stop.store(false);
                     v.mix_thr = std::thread(&FFTViewer::mix_worker, &v);
+                    // RX stop 이 stop_worker() 로 HIST worker 를 죽였으므로 재개한다.
+                    // start_worker 는 idempotent (이미 돌면 뷰어 rebind 만). initialize() 가
+                    // SDR 을 새로 감지하므로 RTL->Pluto 교체 등 fft_size/sr 변경도 반영된다.
+                    // rotate 로 현재 파일을 닫아 새 헤더(sr/fft)로 재생성시킨다.
+                    LongWaterfall::start_worker(&v);
+                    LongWaterfall::request_rotate();
+                    // RX stop 이 죽인 미션 자정 rollover worker 도 재개 (idempotent).
+                    Mission::start_utc0_worker(&v);
                     v.net_srv->broadcast_chat("SYSTEM", "RX start");
                     bewe_log_push(0,"[CLI] RX started\n");
                 } else {
@@ -2263,6 +2271,10 @@ void run_cli_host(){
                 }
                 bewe_mod_ch_retune(v, di);   // SR 변경 → 디코더 decim/filter 재계산 위해 재시작
             }
+            // SR 변경 → HIST 헤더의 sample_rate 가 파일당 고정이므로 현재 파일을 닫고
+            // 새 sr 로 재생성한다. worker 는 g_fp==null 이면 g_v->header.sample_rate 를
+            // 다시 읽어 새 파일을 연다 (long_waterfall.cpp worker_loop).
+            LongWaterfall::request_rotate();
         }
 
         // ── 지연 autoscale 트리거 (SDR 재연결 settling 끝난 후 발동) ──────
