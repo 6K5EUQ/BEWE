@@ -314,6 +314,11 @@ static std::vector<FileItem> list_dir(const std::string& dir, const char* ext){
 // 좌측 트리 선택
 static int         g_sel_year = 0;
 static std::string g_sel_code;
+// ACTIVE 미션 자동선택 — station 전환/최초 오픈마다 arm. 아직 처리 안 한 station 이고
+// 미선택(g_sel_year==0)이며 그 station 에 ACTIVE 미션이 있으면 자동으로 그 미션을 연다.
+// (원격 열람에서 메타가 늦게 도착하는 경우도 커버 — station 문자열이 바뀌기 전까지 대기.)
+static bool        g_autosel_armed   = true;   // 다음 프레임에 자동선택 시도할지
+static std::string g_autosel_station;          // 마지막으로 자동선택 처리한 station
 // Delete 확인 모달 대기 (트리/모달 어디서나 트리거 → 모달이 처리)
 static int         g_del_year = 0;
 static std::string g_del_code;
@@ -2173,6 +2178,7 @@ static void draw_left_tree(FFTViewer& v){
                         // 트리 선택 초기화 — 다른 station 의 (year,code) 는 의미가 다르다.
                         g_sel_year = 0;
                         g_sel_code.clear();
+                        g_autosel_armed = true;             // 새 station 의 ACTIVE 미션 자동선택 재무장
                         g_cf_km_last_req_station.clear();   // 광역 재조회 강제
                     }
                 }
@@ -2250,6 +2256,7 @@ static void draw_left_tree(FFTViewer& v){
             if(ImGui::Selectable(label, sel)){
                 if(sel){ g_sel_year = 0; g_sel_code.clear(); }  // 같은 미션 재클릭 → 토글 해제(미선택)
                 else   { g_sel_year = y; g_sel_code = code; }
+                g_autosel_armed = false;   // 수동 선택 존중 — 자동선택 재개입 금지
             }
             // 우클릭 context menu: Delete Mission
             if(ImGui::BeginPopupContextItem("##mission_ctx")){
@@ -2467,14 +2474,21 @@ void draw_modal(FFTViewer& v, NetClient* cli){
         ImGui::SameLine();
 
         ImGui::BeginChild("##mission_right", ImVec2(0, 0), true);
-        // 기본 선택은 세션 최초 1회만 결정:
-        //   ACTIVE 미션 있으면 자동선택, IDLE 이면 미선택(=LOCAL 로컬 녹음 먼저).
-        // 이후 M 토글로 닫았다 열면 사용자가 마지막에 보던 선택 그대로 유지한다.
-        static bool s_first_open_done = false;
-        if(just_opened && !s_first_open_done){
-            s_first_open_done = true;
-            if(hdr_active){ g_sel_year = hdr_year; g_sel_code = hdr_code; }
-            else          { g_sel_year = 0; g_sel_code.clear(); }
+        // ACTIVE 미션 자동선택:
+        //   창을 새로 열거나 station 을 전환하면 arm 되고, 그 station 에 ACTIVE 미션이
+        //   있으면 자동으로 선택해 미션 창(HIST/IQ/DEMOD)이 바로 뜬다. 원격 열람처럼
+        //   메타(hdr_active)가 늦게 도착하면 ACTIVE 가 잡힐 때까지 arm 을 유지한다.
+        //   사용자가 미션을 수동 토글하면 disarm 되어(트리 클릭 핸들러) 선택을 존중한다.
+        if(just_opened) g_autosel_armed = true;
+        std::string autosel_station = view_station(v);
+        if(g_autosel_station != autosel_station){
+            g_autosel_armed   = true;         // station 바뀜 → 다시 시도
+            g_autosel_station = autosel_station;
+        }
+        if(g_autosel_armed && hdr_active && g_sel_year == 0 && g_sel_code.empty()){
+            g_sel_year = hdr_year;
+            g_sel_code = hdr_code;
+            g_autosel_armed = false;          // 이 station 자동선택 완료
         }
         draw_meta_block(v);
         // (Current Session 영역 제거 — 사용자 요청)
