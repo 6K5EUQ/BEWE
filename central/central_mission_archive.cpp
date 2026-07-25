@@ -28,6 +28,12 @@
 #include <chrono>
 
 namespace {
+// stale -LIVE 판정: mtime 이 이 시간만큼 안 변하면 host stream 이 끊긴 것으로 본다.
+// 30초는 너무 짧아 Wi-Fi 재접속·Central 재시작·HOST 재배포 같은 일시 단절을
+// 종료로 오판했다 (실측: Central 재시작 후 기지 재접속에 15초). 3분이면 그런
+// 일시 단절은 넘기고, 진짜 끊긴 파일만 닫는다.
+constexpr time_t STALE_LIVE_SEC = 180;
+
 // 파일명/경로 컴포넌트 sanitization.
 // 슬래시 '/' 와 ".." 컴포넌트 차단 (디렉토리 escape 방지).
 // 빈 문자열·null 입력 → false.
@@ -445,26 +451,55 @@ void CentralServer::handle_mission_file_list_req(std::shared_ptr<HostRoom> room,
         if(!d) return;
         struct dirent* ent;
         while((ent = readdir(d)) != nullptr){
-            const char* n = ent->d_name;
-            if(!n || n[0] == '.') continue;
+            if(!ent->d_name || ent->d_name[0] == '.') continue;
+            // stale-LIVE finalize 시 이름이 바뀌므로 소유권 있는 문자열로 받는다.
+            std::string nm = ent->d_name;
+            const char* n = nm.c_str();
             // sidecar(.info / .sigmf-meta) 는 list에서 제외
-            size_t nlen = strlen(n);
+            size_t nlen = nm.size();
             if(nlen >= 5  && strcmp(n + nlen - 5,  ".info")       == 0) continue;
             if(nlen >= 11 && strcmp(n + nlen - 11, ".sigmf-meta") == 0) continue;
             std::string full = dir + "/" + n;
             struct stat st;
             if(stat(full.c_str(), &st) != 0) continue;
             if(!S_ISREG(st.st_mode)) continue;
-            // Stale -LIVE.bewehist: mtime 이 30초 이상 안 변경됐으면 host stream 끊긴 것으로 판단.
-            // 자동 unlink + LIST 에서 제외 — 다른 사용자에게 보이지 않게 유지.
+            // Stale -LIVE.bewehist: mtime 이 STALE_LIVE_SEC 이상 안 변경됐으면 host stream
+            // 이 끊긴 것으로 판단. 예전엔 unlink 했으나 HIST 는 Central 이 유일본이라
+            // (HOST 는 업로드 후 로컬을 지운다) 삭제하면 그 시간대 기록이 영구 소실된다.
+            // → HOST 의 finalize_stale_live_in_dir() 과 동일하게 mtime 을 종료시각으로 삼아
+            //   -HHMM 이름으로 rename 한다. 끊긴 시점까지의 데이터는 유효하다.
             if(strstr(n, "-LIVE.bewehist")){
                 time_t now = time(nullptr);
-                if(st.st_mtime + 30 < now){
-                    printf("[Central][Archive] purge stale LIVE %s (mtime=%ld now=%ld)\n",
-                           full.c_str(), (long)st.st_mtime, (long)now);
-                    unlink(full.c_str());
-                    unlink(SigMF::sidecar_path(full).c_str());
-                    continue;
+                if(st.st_mtime + STALE_LIVE_SEC < now){
+                    std::string fin = LongWaterfall::build_hist_filename_finalize(
+                                        std::string(n), (uint64_t)st.st_mtime, 0);
+                    if(fin != n){
+                        std::string fin_full = dir + "/" + fin;
+                        // 충돌 회피: 같은 이름이 이미 있으면 _2, _3 ... (HOST 와 동일 규칙)
+                        std::string try_fin = fin, try_full = fin_full;
+                        for(int k = 2; access(try_full.c_str(), F_OK) == 0 && k < 100; ++k){
+                            auto dot = fin.rfind(".bewehist");
+                            if(dot == std::string::npos) break;
+                            try_fin  = fin.substr(0, dot) + "_" + std::to_string(k) + ".bewehist";
+                            try_full = dir + "/" + try_fin;
+                        }
+                        if(rename(full.c_str(), try_full.c_str()) == 0){
+                            printf("[Central][Archive] stale-LIVE finalize %s -> %s (idle %lds)\n",
+                                   n, try_fin.c_str(), (long)(now - st.st_mtime));
+                            std::string sc_old = SigMF::sidecar_path(full);
+                            std::string sc_new = SigMF::sidecar_path(try_full);
+                            if(access(sc_old.c_str(), F_OK) == 0)
+                                rename(sc_old.c_str(), sc_new.c_str());
+                            // 이번 LIST 응답에 최종 이름으로 싣는다.
+                            nm = try_fin;  n = nm.c_str();  nlen = nm.size();
+                            full = try_full;
+                            if(stat(full.c_str(), &st) != 0) continue;
+                            if(getenv("BEWE_HIST_COMPRESS")) hist_compress_enqueue(full);
+                        } else {
+                            printf("[Central][Archive] stale-LIVE rename FAIL %s -> %s errno=%d\n",
+                                   n, try_fin.c_str(), errno);
+                        }
+                    }
                 }
             }
             MissionFileEntry e{};
