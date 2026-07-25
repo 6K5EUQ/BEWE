@@ -246,11 +246,17 @@ old node (e.g. `raspb2`) to a new one:
 1. Provision the new node through §1–§6 but **do not** point HOSTs at it yet.
 2. Stop writes on the old node so the copy is consistent:
    `sudo systemctl stop bewe-central.service` (on old).
-3. Copy the archive preserving structure (large — production is ~115 GB; run
-   over Tailscale). From the **new** node, pulling from the old (raspb2):
+3. Copy **both** stateful trees preserving structure (large — was ~100 GB at the
+   2026-07-25 move; run over Tailscale). From the **new** node, pulling from the
+   old one (substitute the old node's `user@ip`):
    ```bash
-   rsync -aH --info=progress2 raspb2@100.123.59.3:~/BEWE/DataBase/ ~/BEWE/DataBase/
+   rsync -aH --info=progress2 --exclude '*.zst.tmp' <old>:~/BEWE/DataBase/ ~/BEWE/DataBase/
+   rsync -aH --info=progress2 --exclude '*.zst.tmp' <old>:~/BEWE/modules/   ~/BEWE/modules/
    ```
+   If the two nodes have no direct SSH trust, relay through a workstation that
+   can reach both, or stream with `ssh <old> 'tar -C ~/BEWE/DataBase -cf - .' | ssh <new> 'tar -C ~/BEWE/DataBase -xf -'`.
+   Verify by comparing `find . -type f -printf "%s %p\n" | LC_ALL=C sort` on both
+   sides — path+byte equality, not just `du`.
 4. Start the new node: `sudo systemctl start bewe-central.service` and verify §8.
 5. **Re-point every HOST/JOIN to the new Central's Tailscale IP.** The clients
    are DGS-1 (`ku@100.99.120.110`), DGS-2 (`dsa@100.126.69.82`),
