@@ -1568,6 +1568,45 @@ static void draw_central_list(FFTViewer& v, NetClient* cli, uint8_t subdir){
 
 struct LocalFileEntry { std::string name; uint64_t size; time_t mtime; std::string full; };
 
+// downloads/ 전체(모든 station/year/code + db)에서 특정 sub 폴더를 긁어모은다.
+// IDLE LOCAL 의 HIST 섹션용 — 기지·미션 구분 없이 받아둔 파일을 한 목록에서 본다.
+// 레이아웃: downloads/<station>/<year>/<code>/<sub>/  +  downloads/db/<sub>/
+static void scan_downloads_all(const char* sub, std::vector<LocalFileEntry>& out,
+                               void (*add)(const std::string&, std::vector<LocalFileEntry>&)){
+    const std::string root = BEWEPaths::downloads_dir();
+    DIR* d1 = opendir(root.c_str());
+    if(!d1) return;
+    struct dirent* e1;
+    while((e1 = readdir(d1)) != nullptr){
+        if(!e1->d_name || e1->d_name[0]=='.') continue;
+        const std::string st = root + "/" + e1->d_name;
+        struct stat s1; if(stat(st.c_str(), &s1) != 0 || !S_ISDIR(s1.st_mode)) continue;
+        // downloads/db/<sub>/ — mission-agnostic 캐시
+        add(st + "/" + sub, out);
+        // downloads/<station>/<year>/<code>/<sub>/
+        DIR* d2 = opendir(st.c_str());
+        if(!d2) continue;
+        struct dirent* e2;
+        while((e2 = readdir(d2)) != nullptr){
+            if(!e2->d_name || e2->d_name[0]=='.') continue;
+            const std::string yr = st + "/" + e2->d_name;
+            struct stat s2; if(stat(yr.c_str(), &s2) != 0 || !S_ISDIR(s2.st_mode)) continue;
+            DIR* d3 = opendir(yr.c_str());
+            if(!d3) continue;
+            struct dirent* e3;
+            while((e3 = readdir(d3)) != nullptr){
+                if(!e3->d_name || e3->d_name[0]=='.') continue;
+                const std::string cd = yr + "/" + e3->d_name;
+                struct stat s3; if(stat(cd.c_str(), &s3) != 0 || !S_ISDIR(s3.st_mode)) continue;
+                add(cd + "/" + sub, out);
+            }
+            closedir(d3);
+        }
+        closedir(d2);
+    }
+    closedir(d1);
+}
+
 static void draw_local_list(FFTViewer& v, NetClient* cli){
     g_active_tab_kind  = SelKind::LOCAL;
     g_active_tab_scope = -1;
@@ -1609,7 +1648,7 @@ static void draw_local_list(FFTViewer& v, NetClient* cli){
     static thread_local std::string by_key_station, by_key_code;
     static thread_local double      by_scan_time = -1.0;
     static thread_local uint32_t    by_scan_gen  = 0;
-    int n_sec = mission_mode ? 3 : 2;   // IDLE: IQ/DEMOD 만 (HIST 없음)
+    int n_sec = 3;   // IQ / DEMOD / HIST — IDLE 의 HIST 는 downloads/ 전체를 모아 보여준다
     double   scan_now = ImGui::GetTime();
     uint32_t fs_gen   = g_local_fs_gen.load(std::memory_order_relaxed);
     bool rescan = by_scan_time < 0.0 || (scan_now - by_scan_time) > 1.0 ||
@@ -1627,9 +1666,12 @@ static void draw_local_list(FFTViewer& v, NetClient* cli){
                                     : (s == 1) ? BEWEPaths::mission_audio_dir(station, year, code)
                                     :            BEWEPaths::mission_hist_dir(station, year, code);
                 scan_into(mi_dir, by[s]);
-                // mtime 내림차순 정렬
+                // 최신이 위. 같은 시각이면 이름 오름차순 (DGS-1 이 DGS-2 보다 위).
                 std::sort(by[s].begin(), by[s].end(),
-                    [](const LocalFileEntry& a, const LocalFileEntry& b){ return a.mtime > b.mtime; });
+                    [](const LocalFileEntry& a, const LocalFileEntry& b){
+                        if(a.mtime != b.mtime) return a.mtime > b.mtime;
+                        return a.name < b.name;
+                    });
             }
         } else {
             // 비-미션(IDLE) 로컬 녹음: recordings/record/ (종료해도 보존됨).
@@ -1637,9 +1679,32 @@ static void draw_local_list(FFTViewer& v, NetClient* cli){
             //   DEMOD = recordings/record/audio
             scan_into(BEWEPaths::record_iq_dir(),     by[0]);
             scan_into(BEWEPaths::record_audio_dir(),  by[1]);
-            for(int s = 0; s < 2; s++)
+            // HIST = downloads/ 전체 (모든 기지·미션). 여러 기지에서 받아둔 HIST 를
+            // 한 목록에서 보기 위함 — 기지 구분은 파일명 prefix 로 한다.
+            scan_downloads_all("hist", by[2],
+                +[](const std::string& dir, std::vector<LocalFileEntry>& out){
+                    auto items = list_dir(dir, nullptr);
+                    for(auto& it : items){
+                        if(is_info_file(it.name)) continue;
+                        bool dup = false;
+                        for(auto& ex : out) if(ex.name == it.name){
+                            if(it.mtime > ex.mtime){ ex.size = it.size; ex.mtime = it.mtime; ex.full = dir+"/"+it.name; }
+                            dup = true; break;
+                        }
+                        if(dup) continue;
+                        LocalFileEntry e;
+                        e.name = it.name; e.size = it.size; e.mtime = it.mtime;
+                        e.full = dir + "/" + it.name;
+                        out.push_back(std::move(e));
+                    }
+                });
+            // 최신이 위. 같은 시각이면 이름 오름차순 (DGS-1 이 DGS-2 보다 위).
+            for(int s = 0; s < 3; s++)
                 std::sort(by[s].begin(), by[s].end(),
-                    [](const LocalFileEntry& a, const LocalFileEntry& b){ return a.mtime > b.mtime; });
+                    [](const LocalFileEntry& a, const LocalFileEntry& b){
+                        if(a.mtime != b.mtime) return a.mtime > b.mtime;
+                        return a.name < b.name;
+                    });
         }
         by_key_mission = mission_mode; by_key_year = year;
         by_key_station = station;      by_key_code = code;
