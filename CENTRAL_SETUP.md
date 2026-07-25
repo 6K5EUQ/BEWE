@@ -11,9 +11,11 @@
 > immediately runnable. When a machine is rebuilt its account name may change;
 > always prefer `~`/`$HOME` and the Tailscale IP over hardcoded absolute paths.
 >
-> **Current Central (2026-07-15):** host `raspb2`, user `raspb2`, Tailscale
-> `100.123.59.3`, Ubuntu 24.04 LTS aarch64 (Raspberry Pi 5). Host-agnostic — an
-> x86_64 server works identically.
+> **Current Central (2026-07-25):** host `CENTRAL`, user `central`, Tailscale
+> `100.87.138.109`, Ubuntu 24.04 LTS x86_64 (headless laptop, Wi-Fi only).
+> Host-agnostic — the previous node was aarch64 (Raspberry Pi 5) and worked
+> identically. Former Central `raspb2@100.123.59.3` keeps the pre-migration
+> archive until the new node is proven.
 
 ## Fleet map & SSH strategy (single source: `~/.claude/skills/bewe-fleet/SKILL.md`)
 
@@ -23,7 +25,8 @@ below is the working snapshot as of 2026-07-15.
 
 | Node | Role | Tailscale IP | SSH (`user@ip`) | Build dir | Binary |
 |---|---|---|---|---|---|
-| **Central** | relay + archive (systemd, always on) | `100.123.59.3` | `raspb2@100.123.59.3` | `~/BEWE/central/build` | `bewe_central` |
+| **Central** | relay + archive (systemd, always on) | `100.87.138.109` | `central@100.87.138.109` | `~/BEWE/central/build` | `bewe_central` |
+| *old Central* | decommissioned 2026-07-25 (archive kept) | `100.123.59.3` | `raspb2@100.123.59.3` | `~/BEWE/central/build` | `bewe_central` |
 | **DGS-1** | HOST (dev+HOST, has venv → AI/guard) | `100.99.120.110` | `ku@100.99.120.110` | `~/BEWE/build-cli` | `BEWE` |
 | **DGS-2** | HOST | `100.126.69.82` | `dsa@100.126.69.82` | `~/BEWE/build-cli` | `BEWE` |
 | **DGS-3** | HOST | `100.126.161.1` | `raspb1@100.126.161.1` | `~/BEWE/build-cli` | `BEWE` |
@@ -47,12 +50,17 @@ SSH rules that make this "just work":
   on every node.
 
 Central's connectivity role: every HOST (DGS-1/2/3/7) and every JOIN client
-connects **to Central on `100.123.59.3:7700` over Tailscale**. Moving Central
+connects **to Central on `100.87.138.109:7700` over Tailscale**. Moving Central
 (§7) means re-pointing that address on each client.
 
 Central relays HOST↔JOIN traffic, writes the permanent mission archive
 (including HIST waterfall files), and hosts the cross-station emitter database.
-It binds a **single TCP port, 7700**. It is stateless apart from `~/BEWE/DataBase/`
+It binds a **single TCP port, 7700**. It has **two** stateful trees —
+`~/BEWE/DataBase/` (mission archive) and `~/BEWE/modules/` (decode-module
+archives: `<id>_YYYYMMDD.dat` plus `archive/<station>.jsonl` indexes). Both must
+move together; HOST nodes do **not** re-send module data (`.pushed` markers make
+`module_registry.cpp` skip it), so omitting `modules/` loses that history
+permanently. Otherwise it is stateless apart from `~/BEWE/DataBase/`
 (the archive) — migrating Central = install the binary + service, then move (or
 re-point) that directory.
 
@@ -229,8 +237,11 @@ tail -5 /var/log/bewe-central.log                 # -> [Central] listening on po
 
 ## 7. Migrating from an existing Central (data move)
 
-The archive (`~/BEWE/DataBase/`) is the only stateful part. To move Central from
-the old node (e.g. `raspb2`) to a new one:
+Two trees are stateful: `~/BEWE/DataBase/` (mission archive) and
+`~/BEWE/modules/` (decode-module archives). Copy **both**. Never rsync `~/BEWE`
+wholesale — `central/build/` holds an arch-specific binary and overwriting it
+puts the service into a `Restart=always` crash loop. To move Central from the
+old node (e.g. `raspb2`) to a new one:
 
 1. Provision the new node through §1–§6 but **do not** point HOSTs at it yet.
 2. Stop writes on the old node so the copy is consistent:

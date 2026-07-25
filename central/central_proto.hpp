@@ -20,10 +20,10 @@
 static constexpr uint8_t CENTRAL_MAGIC[4] = {'B','R','L','Y'};
 static constexpr int      CENTRAL_PORT    = 7700;
 
-// 기본 Central 호스트 (raspb2 Tailscale IP). 로그인창 / cli_host 기본값에서 참조.
+// 기본 Central 호스트 (CENTRAL 노트북 Tailscale IP). 로그인창 / cli_host 기본값에서 참조.
 // 운영 서버 이전 시 이 줄만 수정.
 // 매크로 — char[128] 배열 초기화(literal 필요)에도 std::string 생성에도 그대로 쓸 수 있음.
-#define CENTRAL_DEFAULT_HOST "100.123.59.3"
+#define CENTRAL_DEFAULT_HOST "100.87.138.109"
 
 // ── 파이프 핸드셰이크 (7701 포트) ─────────────────────────────────────────
 // HOST가 먼저 연결 후 PIPE_HOST 전송, JOIN이 나중에 PIPE_JOIN 전송
