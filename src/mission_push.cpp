@@ -32,6 +32,7 @@ struct QueueItem {
     int         year;
     std::string code;
     std::string filename;
+    std::string station;    // 경로에서 파싱 — 과거 미션 파일도 올릴 수 있어야 한다
 };
 
 struct AckEntry {
@@ -67,7 +68,8 @@ const char* subdir_name(uint8_t s){
 // path = ~/BEWE/recordings/missions/<station>/<YYYY>/<code>/<sub>/<filename>
 // 위 형식이면 station/year/code/filename 파싱 후 true. 아니면 false.
 bool parse_mission_path(const std::string& full, uint8_t subdir,
-                        int& year_out, std::string& code_out, std::string& fname_out){
+                        int& year_out, std::string& code_out, std::string& fname_out,
+                        std::string& station_out){
     std::string root = BEWEPaths::missions_root() + "/";
     if(full.compare(0, root.size(), root) != 0) return false;
     std::string rest = full.substr(root.size());  // <station>/YYYY/code/<sub>/filename
@@ -86,6 +88,7 @@ bool parse_mission_path(const std::string& full, uint8_t subdir,
     if(year_out < 1970 || year_out > 3000) return false;
     code_out = code;
     fname_out = fn;
+    station_out = station;
     return true;
 }
 
@@ -123,20 +126,12 @@ bool push_one(const QueueItem& it){
     uint64_t total = (uint64_t)ftello(fp);
     fseeko(fp, 0, SEEK_SET);
 
-    // station_name 결정
-    std::string station;
-    if(g_v){
-        // FFTViewer의 mission_station_name (string-like getter 없음 → 직접 접근 필요)
-        // 대안: 활성 미션 entry에서 가져오기
-        // 안전책: 그냥 host_band station_name 캐시 (FFTViewer.station_name).
-        // 일단 viewer에서 추출하는 helper가 필요. 임시로 hostname or empty.
-        // 정확한 station: mission이 시작될 때 set된 mission_station_name.
-        // 여기선 viewer가 active mission entry에서 station_name을 알려주는 가정.
-        // Phase 1 메모리: station[64]는 mission_station_name과 동일.
-        station = g_v->mission_active_station_name();
-    }
+    // station 은 파일 경로(<root>/<station>/<year>/<code>/…)에서 파싱한 값을 쓴다.
+    // 예전엔 mission_active_station_name() 으로 현재 ACTIVE 미션에서 가져왔는데,
+    // 그러면 미션 IDLE 이거나 파일이 지난 미션 소속일 때 station 이 비어 영원히
+    // 실패-재큐잉만 반복했다 (부팅 스캔으로 올린 고아 파일이 전부 여기 걸렸다).
+    const std::string& station = it.station;
     if(station.empty()){
-        // 미션 IDLE 또는 station 미설정 → 조용히 skip + 큐 후미로 재시도.
         fclose(fp);
         return false;
     }
@@ -349,7 +344,7 @@ void enqueue(const std::string& path, uint8_t subdir){
     QueueItem it;
     it.path = path;
     it.subdir = subdir;
-    if(!parse_mission_path(path, subdir, it.year, it.code, it.filename)){
+    if(!parse_mission_path(path, subdir, it.year, it.code, it.filename, it.station)){
         fprintf(stderr, "[MissionPush] enqueue invalid path '%s' subdir=%u (skip)\n",
                 path.c_str(), subdir);
         return;
