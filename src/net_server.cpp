@@ -83,7 +83,11 @@ bool NetServer::start(int port){
 
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    // 루프백 전용. JOIN 은 이 TCP 리스너로 붙지 않는다 — Central 경유가 유일 경로이고
+    // (central_client.cpp:425) 그쪽은 AF_UNIX socketpair 를 inject_fd() 로 주입한다.
+    // NetClient 에는 host/port 로 connect 하는 메서드 자체가 없다(connect_fd(int fd) 뿐).
+    // INADDR_ANY 였을 때 3기지가 무인증 제어 포트를 LAN·공인망에 열어두고 있었다.
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port        = htons((uint16_t)port);
 
     if(bind(server_fd_, (sockaddr*)&addr, sizeof(addr)) < 0){

@@ -85,6 +85,23 @@ static std::string db_base_dir(){
                 : std::string("/tmp/BEWE/DataBase");
 }
 
+// 와이어에서 온 DB 파일명 검증 — 경로 컴포넌트 하나로만 쓰이도록 강제.
+// central_mission_archive.cpp 의 path_component_safe() 와 동일 규칙이지만 그쪽은
+// anonymous namespace 라 여기서 못 쓴다. DB_* 계열은 미션 계열과 달리 sanitize 가
+// 통째로 빠져 있어서 '../../.ssh/id_ed25519' 같은 값이 db_base 에 그대로 붙었다.
+static bool db_filename_safe(const char* s){
+    if(!s || !s[0]) return false;
+    size_t n = strnlen(s, 128);
+    if(n == 0 || n >= 128) return false;
+    if(strcmp(s, ".") == 0 || strcmp(s, "..") == 0) return false;
+    for(size_t i = 0; i < n; i++){
+        unsigned char c = (unsigned char)s[i];
+        if(c == '/' || c == '\\' || c == 0) return false;
+        if(c < 0x20) return false;          // 제어문자 금지
+    }
+    return true;
+}
+
 // mkdirs DataBase/{iq,audio,hist}/ if absent
 static void db_ensure_dirs(){
     std::string base = db_base_dir();
@@ -927,6 +944,10 @@ void CentralServer::dispatch_to_joins(std::shared_ptr<HostRoom> room,
         size_t plen = bewe_len - BEWE_HDR_SIZE;
         if(bewe_type == BEWE_TYPE_DB_SAVE_META && plen >= 128+8+1+32){
             char filename[129]={}; memcpy(filename, payload, 128);
+            if(!db_filename_safe(filename)){
+                printf("[Central] DB_SAVE_META(HOST) REJECT unsafe filename\n");
+                return;
+            }
             uint64_t total_bytes=0; memcpy(&total_bytes, payload+128, 8);
             char op_name[33]={}; memcpy(op_name, payload+128+8+1, 32);
             const char* info = (plen>=128+8+1+32+1)?(const char*)(payload+128+8+1+32):"";
@@ -958,6 +979,10 @@ void CentralServer::dispatch_to_joins(std::shared_ptr<HostRoom> room,
         size_t plen = bewe_len - BEWE_HDR_SIZE;
         if(plen >= 128+32){
             char fn[129]={}; memcpy(fn, payload, 128);
+            if(!db_filename_safe(fn)){
+                printf("[Central] DB_DL_REQ(HOST) REJECT unsafe filename\n");
+                return;
+            }
             char op[33]={}; memcpy(op, payload+128, 32);
             std::string db_base = db_base_dir();
             // subdir-aware lookup: 분류된 곳 → fallback 3개 subdir → flat 루트
@@ -1033,6 +1058,10 @@ void CentralServer::dispatch_to_joins(std::shared_ptr<HostRoom> room,
         size_t plen = bewe_len - BEWE_HDR_SIZE;
         if(plen >= 128+32){
             char fn[129]={}; memcpy(fn, payload, 128);
+            if(!db_filename_safe(fn)){
+                printf("[Central] DB_DELETE(HOST) REJECT unsafe filename\n");
+                return;
+            }
             char op[33]={}; memcpy(op, payload+128, 32);
             (void)op;
             std::string db_base = db_base_dir();
@@ -1146,6 +1175,19 @@ bool CentralServer::intercept_join_cmd(std::shared_ptr<JoinEntry> je,
     if(bewe_len < BEWE_HDR_SIZE) return false;
     uint8_t bewe_type = bewe_pkt[4];
 
+    // ── 인증 게이트 ──────────────────────────────────────────────────
+    // AUTH_REQ 만 인증 전에 통과한다 (그게 인증을 시작하는 패킷이므로).
+    // 그 외 전부는 authed 이후에만. 이전에는 MODULE_PIPE(:1190) 하나만
+    // je->authed 를 봤고 DB_DELETE / MISSION_DELETE / DL_REQ / RENAME 은
+    // 무인증으로 실행됐다 — HIST 는 Central 이 유일본이라(HOST 는 업로드 후
+    // 로컬 삭제) 전 함대 관측기록을 비가역 파괴할 수 있었다.
+    // consumed(true) 로 처리해 HOST 에도 포워드하지 않는다.
+    if(!je->authed && bewe_type != BEWE_TYPE_AUTH_REQ){
+        printf("[Central] REJECT pre-auth packet type=0x%02x conn_id=%u\n",
+               bewe_type, je->conn_id);
+        return true;
+    }
+
     // DB 관련 패킷 진단 로그
     if(bewe_type >= 0x24 && bewe_type <= 0x2F)
         printf("[Central] intercept_join_cmd: bewe_type=0x%02x len=%zu conn_id=%u '%s'\n",
@@ -1237,6 +1279,10 @@ bool CentralServer::intercept_join_cmd(std::shared_ptr<JoinEntry> je,
         // PktDbSaveMeta: filename[128]+total_bytes[8]+transfer_id[1]+operator_name[32]+info_data[512]
         if(plen >= 128+8+1+32){
             char filename[129]={}; memcpy(filename, payload, 128);
+            if(!db_filename_safe(filename)){
+                printf("[Central] DB_SAVE_META(JOIN) REJECT unsafe filename conn_id=%u\n", je->conn_id);
+                return true;
+            }
             uint64_t total_bytes = 0; memcpy(&total_bytes, payload+128, 8);
             char operator_name[33]={}; memcpy(operator_name, payload+128+8+1, 32);
             const char* info_data = (plen >= 128+8+1+32+1) ? (const char*)(payload+128+8+1+32) : "";
@@ -1288,6 +1334,10 @@ bool CentralServer::intercept_join_cmd(std::shared_ptr<JoinEntry> je,
         size_t plen = bewe_len - BEWE_HDR_SIZE;
         if(plen >= 128+32){
             char fn[129]={}; memcpy(fn, payload, 128);
+            if(!db_filename_safe(fn)){
+                printf("[Central] DB_DL_REQ(JOIN) REJECT unsafe filename conn_id=%u\n", je->conn_id);
+                return true;
+            }
             char op[33]={}; memcpy(op, payload+128, 32);
             std::string db_base = db_base_dir();
             const char* primary_sub = db_subdir_for(fn);
@@ -1366,6 +1416,10 @@ bool CentralServer::intercept_join_cmd(std::shared_ptr<JoinEntry> je,
         size_t plen = bewe_len - BEWE_HDR_SIZE;
         if(plen >= 128+32){
             char fn[129]={}; memcpy(fn, payload, 128);
+            if(!db_filename_safe(fn)){
+                printf("[Central] DB_DELETE(JOIN) REJECT unsafe filename conn_id=%u\n", je->conn_id);
+                return true;
+            }
             char op[33]={}; memcpy(op, payload+128, 32);
             (void)op;
             std::string db_base = db_base_dir();
@@ -1402,6 +1456,10 @@ bool CentralServer::intercept_join_cmd(std::shared_ptr<JoinEntry> je,
         if(plen >= sizeof(PktDbSetNote)){
             const auto* r = reinterpret_cast<const PktDbSetNote*>(payload);
             char fn[129]={};  memcpy(fn,   r->filename, 128); fn[128]=0;
+            if(!db_filename_safe(fn)){
+                printf("[Central] DB_SET_NOTE REJECT unsafe filename conn_id=%u\n", je->conn_id);
+                return true;
+            }
             char nt[257]={};  memcpy(nt,   r->note,     256); nt[256]=0;
             std::string db_base = db_base_dir();
             const char* primary_sub = db_subdir_for(fn);
