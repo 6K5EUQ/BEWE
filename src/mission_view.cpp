@@ -970,6 +970,34 @@ static void poll_dl_speed(){
     g_dl_last_sample_bytes = bytes_now;
 }
 
+// FileXfer 의 EWMA 속도 갱신 (200ms 샘플). DB 탭 / LOCAL 탭 렌더에서 호출 —
+// file_xfers 는 렌더가 읽을 때만 갱신되므로 표시하는 쪽이 직접 샘플링해야 한다.
+// 호출부가 v.file_xfer_mtx 를 잡은 상태로 부를 것.
+static void xfer_update_bps(FFTViewer::FileXfer& x){
+    int64_t now_us = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if(x.last_steady_us == 0){
+        x.last_steady_us = now_us; x.last_done_bytes = (int64_t)x.done_bytes;
+        return;
+    }
+    if(now_us - x.last_steady_us < 200000) return;
+    int64_t db = (int64_t)x.done_bytes - x.last_done_bytes;
+    double  dt = (now_us - x.last_steady_us) / 1e6;
+    if(dt > 0){
+        double inst = (db > 0) ? (double)db / dt : 0.0;
+        x.bps_ewma = (x.bps_ewma == 0.0) ? inst : x.bps_ewma * 0.7 + inst * 0.3;
+    }
+    x.last_steady_us  = now_us;
+    x.last_done_bytes = (int64_t)x.done_bytes;
+}
+
+// bytes/sec → "1.2 MB/s" / "340 KB/s". MB/s 고정이면 느린 전송이 0.0 으로 죽는다.
+static void fmt_speed(double bps, char* o, size_t n){
+    if(bps >= 1024.0*1024.0) snprintf(o, n, "%.1f MB/s", bps / (1024.0*1024.0));
+    else if(bps >= 1024.0)   snprintf(o, n, "%.0f KB/s", bps / 1024.0);
+    else                     snprintf(o, n, "%.0f B/s",  bps);
+}
+
 // 업로드 진행률 폴링 + 워커 완료 토스트 (UI 스레드).
 static void poll_ul_speed(){
     // 워커가 남긴 완료 토스트는 UI 스레드에서만 표시 (show_toast는 thread-safe 아님).
@@ -1546,14 +1574,13 @@ static void draw_central_list(FFTViewer& v, NetClient* cli, uint8_t subdir){
             ? ImVec4(0.4f, 0.85f, 1.0f, 1.f)
             : ImVec4(0.6f, 0.6f, 0.6f, 1.f);
         if(downloading){
-            char info[80];
-            double speed_mb = g_dl_speed_bps / 1048576.0;
+            char info[80], sp[24];
+            fmt_speed(g_dl_speed_bps, sp, sizeof(sp));
             if(dl_total_now > 0){
-                snprintf(info, sizeof(info), "%.0f%%  %.1fMB/s",
-                         frac * 100.0, speed_mb);
+                snprintf(info, sizeof(info), "%.0f%%  %s", frac * 100.0, sp);
             } else {
-                snprintf(info, sizeof(info), "%.1fMB  %.1fMB/s",
-                         dl_written_now / 1048576.0, speed_mb);
+                snprintf(info, sizeof(info), "%.1f MB  %s",
+                         dl_written_now / 1048576.0, sp);
             }
             float tw = ImGui::CalcTextSize(info).x;
             ImGui::SameLine(pw - tw - 4.f);
@@ -1765,21 +1792,7 @@ static void draw_local_list(FFTViewer& v, NetClient* cli){
                         if(x.total_bytes > 0)
                             frac = (double)x.done_bytes / (double)x.total_bytes;
                         // EWMA bps 갱신 (DB 탭이 안 열려 있어도 LOCAL 탭에서 직접 계산)
-                        int64_t now_us = (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
-                            std::chrono::steady_clock::now().time_since_epoch()).count();
-                        if(x.last_steady_us == 0){
-                            x.last_steady_us = now_us; x.last_done_bytes = (int64_t)x.done_bytes;
-                        } else if(now_us - x.last_steady_us >= 200000){
-                            int64_t db = (int64_t)x.done_bytes - x.last_done_bytes;
-                            double  dt = (now_us - x.last_steady_us) / 1e6;
-                            if(dt > 0){
-                                double inst = (db > 0) ? (double)db / dt : 0.0;
-                                x.bps_ewma = (x.bps_ewma == 0.0) ? inst
-                                                                 : x.bps_ewma * 0.7 + inst * 0.3;
-                            }
-                            x.last_steady_us  = now_us;
-                            x.last_done_bytes = (int64_t)x.done_bytes;
-                        }
+                        xfer_update_bps(x);
                         xfer_bps = x.bps_ewma;
                         break;
                     }
@@ -1835,14 +1848,13 @@ static void draw_local_list(FFTViewer& v, NetClient* cli){
 
             char info[80];
             if(uploading){
-                double speed_bps = xfer_is_db ? xfer_bps : g_ul_speed_bps;
-                double speed_mb = speed_bps / 1048576.0;
+                char sp[24];
+                fmt_speed(xfer_is_db ? xfer_bps : g_ul_speed_bps, sp, sizeof(sp));
                 if(ul_total_now > 0){
-                    snprintf(info, sizeof(info), "%.0f%%  %.1fMB/s",
-                             frac * 100.0, speed_mb);
+                    snprintf(info, sizeof(info), "%.0f%%  %s", frac * 100.0, sp);
                 } else {
-                    snprintf(info, sizeof(info), "%.1fMB  %.1fMB/s",
-                             ul_written_now / 1048576.0, speed_mb);
+                    snprintf(info, sizeof(info), "%.1f MB  %s",
+                             ul_written_now / 1048576.0, sp);
                 }
             } else {
                 std::string s2 = fmt_size(it.size);
@@ -1963,6 +1975,7 @@ static void draw_db_list(FFTViewer& v, NetClient* cli){
                         done_now = x.done_bytes;
                         total_now = x.total_bytes;
                         if(total_now > 0) frac = (double)done_now / (double)total_now;
+                        xfer_update_bps(x);
                         bps = x.bps_ewma;
                         break;
                     }
@@ -2057,18 +2070,18 @@ static void draw_db_list(FFTViewer& v, NetClient* cli){
             }
 
             // 우측 표시: 진행률 (xfer 중) / [이름]·용량 — 두 컬럼 고정 영역으로 정렬.
-            ImVec4 info_col = xfer_active
-                ? ImVec4(0.4f, 0.85f, 1.0f, 1.f)
-                : ImVec4(0.6f, 0.6f, 0.6f, 1.f);
+            // 방향은 색으로 구분 (업로드=주황 / 다운로드=하늘) — 텍스트 라벨 없음.
+            ImVec4 info_col = !xfer_active     ? ImVec4(0.6f, 0.6f, 0.6f, 1.f)
+                            : xfer_up          ? ImVec4(1.0f, 0.85f, 0.4f, 1.f)
+                                               : ImVec4(0.4f, 0.85f, 1.0f, 1.f);
             if(xfer_active){
-                char info[96];
-                double mb_s = bps / 1048576.0;
+                char info[96], sp[24];
+                fmt_speed(bps, sp, sizeof(sp));
                 if(total_now > 0)
-                    snprintf(info, sizeof(info), "%s  %.0f%%  %.1fMB/s",
-                             xfer_up ? "UL" : "DL", frac * 100.0, mb_s);
+                    snprintf(info, sizeof(info), "%.0f%%  %s", frac * 100.0, sp);
                 else
-                    snprintf(info, sizeof(info), "%s  %.1fMB",
-                             xfer_up ? "UL" : "DL", done_now / 1048576.0);
+                    snprintf(info, sizeof(info), "%.1f MB  %s",
+                             done_now / 1048576.0, sp);
                 float tw = ImGui::CalcTextSize(info).x;
                 ImGui::SameLine(pw - tw - 4.f);
                 ImGui::TextColored(info_col, "%s", info);
