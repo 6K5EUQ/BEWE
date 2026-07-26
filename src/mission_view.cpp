@@ -373,6 +373,11 @@ static double       g_dl_started_at = 0.0;
 static double       g_dl_last_sample_t = 0.0;
 static uint64_t     g_dl_last_sample_bytes = 0;
 static double       g_dl_speed_bps = 0.0;   // EWMA bytes/sec
+// 더블클릭으로 "이어받고 곧바로 열기" 를 요청한 경우의 대상 경로.
+// recv 스레드는 완료 시 g_dl_open_ready 만 세우고(ImGui 호출 금지), 실제 열기는
+// UI 스레드의 poll_dl_speed() 에서 수행한다.
+static std::string  g_dl_open_after_path;
+static std::atomic<bool> g_dl_open_ready{false};
 
 // ── 로컬 파일시스템 변경 세대 — LOCAL by[] 스캔 / already_dl 캐시 무효화용 ──
 // 다운로드 완료 콜백(on_mission_file_dl_data_recv)은 NetClient recv 스레드에서
@@ -1057,7 +1062,8 @@ static void render_name_size_cols(float pw, const char* operator_name,
 
 // Start download: 기존 LOCAL 파일이 있으면 그 크기를 start_offset 으로 resume 다운로드.
 // 없으면 처음부터.
-static bool start_download(NetClient* cli, const CentralFileRow& row){
+static bool start_download(NetClient* cli, const CentralFileRow& row,
+                           bool open_when_done = false){
     if(!cli) return false;
     std::lock_guard<std::mutex> lk(g_dl_mtx);
     if(g_dl_active){
@@ -1127,6 +1133,9 @@ static bool start_download(NetClient* cli, const CentralFileRow& row){
         g_dl_active = false;
         MissionView::show_toast("Download request failed");
     }
+    // 더블클릭 경로: 이어받기가 끝나면 UI 스레드가 이 파일을 자동으로 연다.
+    g_dl_open_after_path = (ok && open_when_done) ? path : std::string();
+    g_dl_open_ready.store(false, std::memory_order_relaxed);
     // 로컬 파일 생성됨 → already_dl 캐시 무효화 (다음 프레임 즉시 초록 표시)
     g_local_fs_gen.fetch_add(1, std::memory_order_relaxed);
     return ok;
@@ -1207,6 +1216,16 @@ static void open_local_in_viewer(FFTViewer& v, const std::string& path){
         return;
     }
     MissionView::show_toast("No viewer for this file type");
+}
+
+// 더블클릭 이어받기가 끝났으면 그 파일을 연다 (UI 스레드 전용).
+// recv 스레드는 g_dl_open_ready 만 세우므로 여기서 소비한다. 렌더 진입부에서
+// 매 프레임 호출 — 조기 return 경로보다 앞에 둬야 놓치지 않는다.
+static void poll_dl_open_after(FFTViewer& v){
+    if(!g_dl_open_ready.exchange(false, std::memory_order_acq_rel)) return;
+    std::string p;
+    { std::lock_guard<std::mutex> lk(g_dl_mtx); p.swap(g_dl_open_after_path); }
+    if(!p.empty()) open_local_in_viewer(v, p);
 }
 
 // LOCAL → Central 미션 archive 로 파일 push.
@@ -1415,6 +1434,8 @@ static void draw_central_list(FFTViewer& v, NetClient* cli, uint8_t subdir){
         }
     }
     ImGui::Separator();
+    // 조기 return 경로보다 앞 — 이어받기 완료 후 자동 열기를 놓치지 않게.
+    poll_dl_open_after(v);
     if(!cli){
         ImGui::TextColored(ImVec4(0.85f, 0.7f, 0.4f, 1.f),
             "Not connected to Central (LOCAL mode) — see LOCAL tab.");
@@ -1563,9 +1584,15 @@ static void draw_central_list(FFTViewer& v, NetClient* cli, uint8_t subdir){
             }
         }
         if(ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)){
-            // 캐시 staleness 대비 — 신선한 access() 1회로 열기/다운로드 결정.
-            if(access(actual_path.c_str(), F_OK) == 0) open_local_in_viewer(v, actual_path);
-            else                                       start_download(cli, r);
+            // 캐시 staleness 대비 — 신선한 stat() 1회로 열기/이어받기 결정.
+            // LIVE 파일은 받아둔 뒤에도 Central 쪽이 계속 커진다. 로컬이 더 작으면
+            // 우클릭 Download 를 따로 누르지 않아도 부족분만 이어받고 끝나면 자동으로 연다.
+            struct stat lst{};
+            bool have = (stat(actual_path.c_str(), &lst) == 0 && S_ISREG(lst.st_mode));
+            if(have && (uint64_t)lst.st_size >= r.size_bytes)
+                open_local_in_viewer(v, actual_path);
+            else
+                start_download(cli, r, /*open_when_done=*/true);
         }
         central_context_menu(cli, r);
 
@@ -2724,6 +2751,10 @@ void on_mission_file_dl_data_recv(const PktMissionFileDlData& d,
             snprintf(msg, sizeof(msg), "Downloaded: %s (%.1f MB)",
                      g_dl_filename.c_str(), g_dl_written / 1048576.0);
             MissionView::show_toast(msg);
+            // 더블클릭 이어받기였으면 열기 요청만 세운다 — 여기는 recv 스레드라
+            // ImGui/뷰어를 직접 건드릴 수 없다 (실제 열기는 poll_dl_speed()).
+            if(!g_dl_open_after_path.empty())
+                g_dl_open_ready.store(true, std::memory_order_release);
         }
         g_dl_active = false;
         g_dl_filename.clear();
