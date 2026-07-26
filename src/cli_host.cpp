@@ -1786,6 +1786,9 @@ void run_cli_host(){
                 // 미션 dir 안 닫힌 IQ/audio/hist 파일을 Central archive로 업로드,
                 // ACK 받으면 로컬 unlink. central_cli mux가 동작해야 ACK 수신 가능.
                 MissionPush::start(&v, &central_cli);
+                // 지난 실행에서 ACK 못 받고 남은 파일 재투입 (큐가 메모리에만 있어
+                // 재시작 때마다 고아가 누적됐다).
+                MissionPush::scan_orphans_enqueue();
                 central_cli.set_state_fn([&v](CentralHostStateFull& st){
                     const char* lid = login_get_id();
                     if(lid) strncpy(st.operator_login, lid, sizeof(st.operator_login)-1);

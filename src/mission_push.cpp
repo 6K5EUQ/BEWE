@@ -368,6 +368,64 @@ void enqueue(const std::string& path, uint8_t subdir){
     q_cv.notify_one();
 }
 
+// 부팅 시 1회: recordings/missions/ 전체를 훑어 남아 있는 파일을 큐에 재투입한다.
+// push 큐는 메모리에만 있어서, enqueue 된 뒤 ACK 전에 프로세스가 죽으면 그 파일은
+// 영영 고아가 됐다 (재시작 때마다 조금씩 누적 — 실제로 DGS-1/2 에 6~7월치가 쌓였다).
+// 파일이 남아 있다는 것 자체가 "아직 Central 에 못 올렸다"는 증거이므로 별도 상태파일
+// 없이 디렉터리만 보면 된다. 중복은 enqueue() 가 걸러내고, 이미 올라간 파일이면
+// Central 이 ACK 로 응답해 그때 unlink 된다.
+void scan_orphans_enqueue(){
+    if(!running.load()) return;
+    const std::string root = BEWEPaths::missions_root();
+    int found = 0;
+    // <root>/<station>/<year>/<code>/<sub>/<file>
+    DIR* d_st = opendir(root.c_str());
+    if(!d_st) return;
+    struct dirent* e_st;
+    while((e_st = readdir(d_st)) != nullptr){
+        if(!e_st->d_name || e_st->d_name[0] == '.') continue;
+        std::string p_st = root + "/" + e_st->d_name;
+        DIR* d_y = opendir(p_st.c_str());
+        if(!d_y) continue;
+        struct dirent* e_y;
+        while((e_y = readdir(d_y)) != nullptr){
+            if(!e_y->d_name || e_y->d_name[0] == '.') continue;
+            std::string p_y = p_st + "/" + e_y->d_name;
+            DIR* d_c = opendir(p_y.c_str());
+            if(!d_c) continue;
+            struct dirent* e_c;
+            while((e_c = readdir(d_c)) != nullptr){
+                if(!e_c->d_name || e_c->d_name[0] == '.') continue;
+                std::string p_c = p_y + "/" + e_c->d_name;
+                for(uint8_t sub : {MFS_IQ, MFS_AUDIO, MFS_HIST}){
+                    std::string p_s = p_c + "/" + subdir_name(sub);
+                    DIR* d_f = opendir(p_s.c_str());
+                    if(!d_f) continue;
+                    struct dirent* e_f;
+                    while((e_f = readdir(d_f)) != nullptr){
+                        const char* n = e_f->d_name;
+                        if(!n || n[0] == '.') continue;
+                        size_t nlen = strlen(n);
+                        if(nlen >= 5  && strcmp(n + nlen - 5,  ".info")       == 0) continue;
+                        if(nlen >= 11 && strcmp(n + nlen - 11, ".sigmf-meta") == 0) continue;
+                        if(strstr(n, "-LIVE.")) continue;   // 아직 기록 중
+                        size_t before;
+                        { std::lock_guard<std::mutex> lk(q_mtx); before = q.size(); }
+                        enqueue(p_s + "/" + n, sub);
+                        { std::lock_guard<std::mutex> lk(q_mtx); if(q.size() > before) found++; }
+                    }
+                    closedir(d_f);
+                }
+            }
+            closedir(d_c);
+        }
+        closedir(d_y);
+    }
+    closedir(d_st);
+    if(found > 0)
+        fprintf(stderr, "[MissionPush] boot scan: re-enqueued %d orphan file(s)\n", found);
+}
+
 void scan_mission_dir_enqueue(int year, const char* code){
     if(!running.load() || !code || !code[0]) return;
     // station 결정: 현재 ACTIVE mission 의 station_name (또는 history lookup)

@@ -47,22 +47,9 @@ void FFTViewer::tm_iq_open(){
     if(stat(TM_IQ_DIR,&st)!=0) mkdir(TM_IQ_DIR,0755);
     uint32_t sr=header.sample_rate;
     if(sr==0){ fprintf(stderr,"TM: sample_rate 0\n"); return; }
-    // 디스크 지속쓰기 예산 초과 시 활성화 거부 — sr×4B/s 가 디스크 실속도를 넘으면
-    // 큐가 영구 적자(전량 drop)라 시작 자체가 무의미. (Pi5 SD + 61.44MSPS 스터터 방지)
-    // budget 0 = 무제한 (GUI 데스크톱 기본 — v11.7.0 동작 유지)
-    {
-        static const uint64_t budget_mbps = []{
-            const char* e = getenv("BEWE_TM_DISK_MBPS");
-            long v = e ? atol(e) : -1;
-            return (uint64_t)(v >= 0 ? v : TM_IQ_DISK_BUDGET_MBPS);
-        }();
-        uint64_t need_bps = (uint64_t)sr * 4ull;
-        if(budget_mbps > 0 && need_bps > budget_mbps*1000000ull){
-            bewe_log_push(0,"TM IQ: refused - need %.1f MB/s (%.2f MSPS x 4B) > disk budget %llu MB/s (env BEWE_TM_DISK_MBPS)\n",
-                          need_bps/1e6, sr/1e6, (unsigned long long)budget_mbps);
-            return;
-        }
-    }
+    // 디스크 속도 사전 거부는 하지 않는다 — 기지마다 저장장치가 달라 상수로 못 박고,
+    // 실측 게이트는 기동을 느리게 한다. 스펙을 넘는 SR 은 drop 로그와 끊긴 녹음으로
+    // 사용자가 즉시 알아챈다 (tm_iq_dropped_bytes / write_failed).
     tm_iq_total_samples=(int64_t)sr*(int64_t)TM_IQ_SECS;
     snprintf(s_iq_path,sizeof(s_iq_path),"%s/iq_rolling_%uMSPS.wav",TM_IQ_DIR,sr/1000000);
     // 기존 파일 항상 삭제 후 새로 생성

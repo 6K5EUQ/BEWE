@@ -30,6 +30,10 @@ void enqueue(const std::string& path, uint8_t subdir);
 // 활성 미션 dir 안 모든 닫힌 파일을 일괄 enqueue (mission_end 직후 호출 권장)
 void scan_mission_dir_enqueue(int year, const char* code);
 
+// 부팅 시 1회: recordings/missions/ 전체를 훑어 ACK 못 받고 남은 고아 파일 재투입.
+// 큐가 메모리에만 있어 재시작 때마다 누적되던 문제 해결 (start() 직후 호출).
+void scan_orphans_enqueue();
+
 // 디버그 / status: 대기 중 transfer 수
 int pending_count();
 

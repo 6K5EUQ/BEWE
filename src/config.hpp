@@ -4,7 +4,7 @@
 
 // ── BEWE version (창 제목 및 About 표시용) ──────────────────────────────────
 // SemVer: vMAJOR.MINOR.PATCH — 자세한 정책은 CLAUDE.md 참조
-#define BEWE_VERSION "v13.7.1"
+#define BEWE_VERSION "v13.8.0"
 
 #ifdef BEWE_HEADLESS
   typedef uint32_t ImU32;
@@ -51,14 +51,6 @@
 // ── IQ Ring ───────────────────────────────────────────────────────────────
 #define IQ_RING_CAPACITY       (1 << 22)
 #define IQ_RING_MASK           (IQ_RING_CAPACITY - 1)
-// TM IQ 롤링 활성화 허용 디스크 지속쓰기 예산 (MB/s). sr×4B/s 가 이를 초과하면
-// 활성화 거부 (SD 실속 시 캡처 블로킹 → USB 오버런 방지). env BEWE_TM_DISK_MBPS 오버라이드.
-// 헤드리스(Pi5 SD)만 기본 제한. GUI 데스크톱(NVMe)은 0 = 무제한 (v11.7.0 동작 유지).
-#ifdef BEWE_HEADLESS
-  #define TM_IQ_DISK_BUDGET_MBPS 40
-#else
-  #define TM_IQ_DISK_BUDGET_MBPS 0
-#endif
 
 // ── Decoder gate (dec_gate) — 디코드 워커 무신호 스킵용 ────────────────────
 // 오디오 스컬치(sq_gate)보다 관대하게 잡는다: 약신호 버스트를 절대 놓치지 않는 게
