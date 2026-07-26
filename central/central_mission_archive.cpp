@@ -1029,6 +1029,53 @@ void CentralServer::archive_hist_on_fft(std::shared_ptr<HostRoom> room,
     // 새 정보가 없으므로 손실이 아니고, max 라 좁은 피크가 살아남는다. HOST 로컬
     // .bewehist 가 쓰는 폴딩(long_waterfall.cpp ingest_new_rows)과 같은 규칙이다.
     // CLI HOST 는 PAD=1 이라 pad=1 → 항등.
+    // ── 양자화 기준 동기화 (v13.8) ────────────────────────────────────────
+    // 디스크에 쓰는 uint8 은 HOST 가 [fh->power_min .. power_max] 로 양자화한 값이다.
+    // 헤더의 db_min/db_max 가 그 값과 달라지면 뷰어가 엉뚱한 dB 로 역산한다.
+    //  · 첫 프레임: 헤더를 프레임 기준으로 덮어쓴다 (LIVE_START 의 고정 눈금 대신).
+    //  · 이후 기준이 바뀌면(오토스케일 재수렴 등): 그 파일을 닫고 새로 열게 한다.
+    //    같은 파일에 두 기준의 행이 섞이면 어느 쪽으로 역산해도 절반이 틀린다.
+    // 주파수·SR·FFT 변경은 HOST 가 이미 rotate 를 걸어 파일이 갈리므로, 여기 걸리는
+    // 것은 사실상 수동 /rx autoscale 과 SDR 재연결 지연 트리거뿐이다.
+    {
+        std::vector<std::string> rotate_keys;
+        for(auto& [fname, st] : room->hist_streams){
+            if(!st.fp) continue;
+            if(!st.q_valid){
+                st.q_db_min = fh->power_min;
+                st.q_db_max = fh->power_max;
+                st.q_valid  = true;
+                // LwfHeader128 packed layout 상 db_min=offset 30, db_max=offset 34.
+                // (magic4 + version2 + fft_size4 + sr8 + cf8 + row_rate4 = 30)
+                static constexpr long OFF_DB_MIN = 30;
+                long cur = ftell(st.fp);
+                if(cur >= 0 && fseek(st.fp, OFF_DB_MIN, SEEK_SET) == 0){
+                    fwrite(&st.q_db_min, 4, 1, st.fp);
+                    fwrite(&st.q_db_max, 4, 1, st.fp);
+                    fseek(st.fp, cur, SEEK_SET);
+                    fflush(st.fp);
+                    printf("[Central][Archive] HIST quant range set %.1f/%.1f dB %s\n",
+                           st.q_db_min, st.q_db_max, st.archive_path.c_str());
+                }
+            } else if(fh->power_min != st.q_db_min || fh->power_max != st.q_db_max){
+                printf("[Central][Archive] HIST quant range changed %.1f/%.1f -> %.1f/%.1f"
+                       " — rotating %s\n",
+                       st.q_db_min, st.q_db_max, fh->power_min, fh->power_max,
+                       st.archive_path.c_str());
+                rotate_keys.push_back(fname);
+            }
+        }
+        // 기준이 바뀐 스트림은 정상 close 경로로 닫는다 (finalize rename + 짧은조각
+        // discard + zstd 압축이 전부 거기 있다). HOST 가 다음 LIVE_START 를 보내면
+        // 새 파일이 열리고, 그때 첫 프레임 기준으로 헤더가 다시 박힌다.
+        for(auto& k : rotate_keys){
+            PktLwfLiveStop stop{};
+            strncpy(stop.filename, k.c_str(), sizeof(stop.filename)-1);
+            archive_hist_on_live_stop(room, stop);
+        }
+        if(room->hist_streams.empty()) return;
+    }
+
     std::vector<uint8_t> folded;
     for(auto& [fname, st] : room->hist_streams){
         if(!st.fp || !st.fft_size) continue;

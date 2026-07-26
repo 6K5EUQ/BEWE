@@ -47,6 +47,14 @@ struct MissionHistStream {
                                     // FFT_FRAME 의 bin 수(padded)와 다를 수 있다 → v13.3 폴딩 참조.
     uint32_t    rows_written = 0;
     uint64_t    start_utc = 0;      // 파일 open 시각(헤더 start_utc_unix) — 짧은-수명 조각 판별용
+    // v13.8: 이 파일에 기록 중인 행들의 실제 양자화 기준.
+    // FFT_FRAME 의 uint8 은 HOST 의 [power_min..power_max] 로 양자화된 값인데, 예전엔
+    // 헤더에 HOST 로컬 .bewehist 용 고정 눈금([-120,0])을 써서 뷰어가 20dB 이상 틀린
+    // dB 를 표시했다(SNR 이 30dB 부풀려짐). 이제 프레임 기준을 그대로 헤더에 쓰고,
+    // 기준이 바뀌면(오토스케일 재수렴 등) 파일을 회전해 파일 내 일관성을 지킨다.
+    float       q_db_min = 0.0f;
+    float       q_db_max = 0.0f;
+    bool        q_valid  = false;   // 첫 프레임을 받아 기준이 확정됐는가
 };
 
 struct JoinEntry {
