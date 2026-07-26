@@ -210,11 +210,33 @@ void NetClient::recv_loop(){
         stats_prev_aud = ab;  stats_prev_file = fi;
     };
     std::vector<uint8_t> payload; // 패킷당 재할당 방지 — capacity 재사용
+
+    // 무응답 워치독 — 소켓은 살아있는데 데이터가 안 오는 상태를 끊김으로 판정.
+    // HOST 가 전원째 사라지거나 Central 이 룸을 축출하면서 JOIN fd 를 안 닫으면
+    // recv 는 에러가 아니라 타임아웃(rc==0)만 돌려준다. 예전엔 그걸 무조건
+    // continue 해서 connected_ 가 영원히 true 로 남았고, ui.cpp 의 자동 재접속이
+    // 발동하지 않아 창이 마지막 화면 그대로 멈춘 채 "연결됨"으로 보였다(좀비 창).
+    // HOST 는 STATUS 를 1초마다 보내므로 15초 무수신이면 실제 단절로 봐도 안전하다.
+    static constexpr double RX_IDLE_TIMEOUT_SEC = 15.0;
+    auto last_rx = std::chrono::steady_clock::now();
+
     while(connected_.load()){
         print_stats();
         PktHdr hdr{};
         int rc = recv_all_ex(fd_, &hdr, PKT_HDR_SIZE, connected_);
-        if(rc == 0) continue;   // timeout → Host 무응답, 소켓 유지하고 재시도
+        if(rc == 0){
+            // 타임아웃 — 소켓은 유지하되 무수신이 길어지면 끊김으로 확정.
+            double idle = std::chrono::duration<double>(
+                              std::chrono::steady_clock::now() - last_rx).count();
+            if(idle > RX_IDLE_TIMEOUT_SEC){
+                bewe_log_push(2,"[NetClient] rx idle %.1fs > %.0fs — treating as disconnect\n",
+                              idle, RX_IDLE_TIMEOUT_SEC);
+                disc_reason = "rx_idle_timeout";
+                break;      // connected_=false 는 루프 탈출 후 공통 경로에서 처리
+            }
+            continue;
+        }
+        last_rx = std::chrono::steady_clock::now();
         if(rc < 0){
             int e = errno;
             if(connected_.load()){
@@ -242,7 +264,20 @@ void NetClient::recv_loop(){
         payload.resize(len);
         if(len > 0){
             int rc2 = recv_all_ex(fd_, payload.data(), len, connected_);
-            if(rc2 == 0) continue;  // timeout mid-packet → retry
+            if(rc2 == 0){
+                // 헤더는 왔는데 페이로드가 안 오는 경우도 같은 워치독을 적용한다.
+                // (여기서 continue 만 하면 헤더를 이미 소비했으므로 스트림이
+                //  어긋나지만, 그 동작은 기존과 동일하게 두고 무한 대기만 막는다.)
+                double idle = std::chrono::duration<double>(
+                                  std::chrono::steady_clock::now() - last_rx).count();
+                if(idle > RX_IDLE_TIMEOUT_SEC){
+                    bewe_log_push(2,"[NetClient] payload rx idle %.1fs — disconnect\n", idle);
+                    disc_reason = "rx_idle_timeout";
+                    break;
+                }
+                continue;
+            }
+            last_rx = std::chrono::steady_clock::now();
             if(rc2 < 0){
                 int e = errno;
                 bewe_log_push(2,"[NetClient] recv payload failed: type=0x%02x len=%u errno=%d(%s)\n",

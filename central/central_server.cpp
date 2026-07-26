@@ -307,12 +307,37 @@ void CentralServer::handshake(int fd){
         room->host_tier = op->host_tier;
 
         {
-            std::lock_guard<std::mutex> lk(rooms_mtx_);
-            rooms_.erase(std::remove_if(rooms_.begin(), rooms_.end(),
-                [&](const std::shared_ptr<HostRoom>& r){
-                    return r->station_id == room->station_id;
-                }), rooms_.end());
-            rooms_.push_back(room);
+            // 같은 station_id 의 기존 룸은 축출한다 (HOST 재기동 시 정상 경로).
+            // 예전엔 rooms_ 에서 빼기만 하고 소켓·JOIN 을 안 닫아서:
+            //  · 축출된 룸의 host_mux_loop 가 계속 돌고 watchdog(rooms_ 순회)에도 안 걸림
+            //  · 그 룸에 붙어 있던 JOIN 들은 fd 가 열린 채 남아 recv 가 타임아웃만 반환
+            //    → JOIN 쪽 connected_ 가 true 로 유지되어 자동 재접속이 안 걸리고
+            //      마지막 화면 그대로 멈춘 "좀비 창" 이 됐다.
+            // 축출 대상을 먼저 모아 두고, 락을 놓은 뒤 정리한다(락 안에서 close 금지).
+            std::vector<std::shared_ptr<HostRoom>> evicted;
+            {
+                std::lock_guard<std::mutex> lk(rooms_mtx_);
+                for(auto& r : rooms_)
+                    if(r->station_id == room->station_id) evicted.push_back(r);
+                rooms_.erase(std::remove_if(rooms_.begin(), rooms_.end(),
+                    [&](const std::shared_ptr<HostRoom>& r){
+                        return r->station_id == room->station_id;
+                    }), rooms_.end());
+                rooms_.push_back(room);
+            }
+            for(auto& old : evicted){
+                printf("[Central] evicting stale room '%s' (fd=%d, joins=%zu)\n",
+                       old->station_id.c_str(), old->fd, old->joins.size());
+                old->alive.store(false);
+                if(old->fd >= 0){ shutdown(old->fd, SHUT_RDWR); close(old->fd); old->fd = -1; }
+                std::lock_guard<std::mutex> jlk(old->joins_mtx);
+                for(auto& je : old->joins){
+                    je->alive.store(false);
+                    if(je->fd >= 0){ shutdown(je->fd, SHUT_RDWR); close(je->fd); je->fd = -1; }
+                    je->stop_send_worker();
+                }
+                old->joins.clear();
+            }
         }
         printf("[Central] HOST room '%s' (%s) opened  fd=%d\n",
                room->station_id.c_str(), room->info.station_name, fd);
