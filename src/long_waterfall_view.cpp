@@ -1278,12 +1278,16 @@ void draw_modal(FFTViewer& v, NetClient* cli){
                 // 최대 1.4dB(게인 변경 케이스) — 바이트 양자화(0.17~0.39dB/byte) 수준이라
                 // 행 단위 재계산 없이 전역값으로 충분하다.
                 int  row_i = (int)t;
-                int  bin_i = (int)freq_idx;
+                int  lin_i = (int)freq_idx;          // 화면 선형 인덱스 (0=최저, fft/2=DC)
                 bool have_snr = false;
                 float snr_db = 0.f;
                 if(row_i >= 0 && (uint64_t)row_i < g_open.num_rows &&
-                   bin_i >= 0 && (uint32_t)bin_i < h.fft_size &&
+                   lin_i >= 0 && (uint32_t)lin_i < h.fft_size &&
                    g_file_db_max > g_file_db_min){
+                    // FFT-shift 해제 — rebuild_texture() 와 동일 규칙.
+                    // linear: 0=lowest, fft_half=DC, fft_sz-1=highest / storage: 0=DC.
+                    const int fft_half = (int)h.fft_size / 2;
+                    const int bin_i = (lin_i < fft_half) ? lin_i + fft_half : lin_i - fft_half;
                     if(const uint8_t* rp = get_row((uint32_t)row_i)){
                         float d = LongWaterfall::byte_to_db(rp[bin_i], h.db_min, h.db_max);
                         snr_db   = d - (g_file_db_min + 5.0f);
