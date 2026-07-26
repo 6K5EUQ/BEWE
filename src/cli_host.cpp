@@ -1399,11 +1399,24 @@ void run_cli_host(){
         // Central MUX adapter
         if(central_host[0] != '\0'){
             std::string sid = v.station_name + "_" + std::string(login_get_id());
+            // 부팅 직후 tailscaled 가 아직 tailnet 로그인을 못 마쳤을 때 open_room 이
+            // 실패하는 경쟁조건이 있다 (2026-07-26 DGS-X 재부팅 실사고 — SDR/서버는
+            // 정상 기동됐는데 Central 만 영구 고립). SDR init 과 같은 스타일로 짧게
+            // 재시도한다 (2초x4회, 총 8초). 그래도 안 되면 콜백 등록은 그대로 진행하고,
+            // 아래에서 reconnect_fn 을 즉시 1회 발동해 백그라운드 무한 재시도로 넘긴다.
             int rfd = central_cli.open_room(
                 central_host, central_port, sid, v.station_name,
                 v.station_lat, v.station_lon,
                 (uint8_t)login_get_tier());
-            if(rfd >= 0){
+            for(int retry = 2; retry <= 5 && rfd < 0; retry++){
+                bewe_log_push(0,"[CLI] Central open_room failed, retry %d/5 in 2s ...\n", retry);
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+                rfd = central_cli.open_room(
+                    central_host, central_port, sid, v.station_name,
+                    v.station_lat, v.station_lon,
+                    (uint8_t)login_get_tier());
+            }
+            {
                 bewe_mod_set_my_station(sid.c_str());
                 central_cli.set_on_central_module_pipe([&v](const uint8_t* pkt, size_t len){
                     if(len > 9) bewe_mod_route(v, true, pkt+9, len-9);   // BEWE 헤더 스킵
@@ -1777,10 +1790,17 @@ void run_cli_host(){
                         }
                     }).detach();
                 };
-                central_cli.start_mux_adapter(rfd,
-                    [&v](int local_fd){ if(v.net_srv) v.net_srv->inject_fd(local_fd); },
-                    [&v](){ return v.net_srv ? (uint8_t)v.net_srv->client_count() : (uint8_t)0; },
-                    *reconnect_fn);
+                if(rfd >= 0){
+                    central_cli.start_mux_adapter(rfd,
+                        [&v](int local_fd){ if(v.net_srv) v.net_srv->inject_fd(local_fd); },
+                        [&v](){ return v.net_srv ? (uint8_t)v.net_srv->client_count() : (uint8_t)0; },
+                        *reconnect_fn);
+                } else {
+                    // 짧은 재시도(위)도 실패 — reconnect_fn 을 그대로 발동시켜 무한
+                    // 백그라운드 재시도로 넘긴다. mark_dirty() 는 여기선 무해(어차피
+                    // 아직 연결된 적이 없으니 HIST 는 처음부터 dirty 로 시작하는 셈).
+                    (*reconnect_fn)();
+                }
 
                 // Mission File Push worker (Phase 2, v3.8.0):
                 // 미션 dir 안 닫힌 IQ/audio/hist 파일을 Central archive로 업로드,
@@ -1812,9 +1832,10 @@ void run_cli_host(){
                     st.channel_count = (uint8_t)cnt;
                     st.bat_pct = v.sysmon_bat.load();
                 });
-                bewe_log_push(0,"[BEWE CLI] Central relay connected\n");
-            } else {
-                bewe_log_push(0,"[BEWE CLI] Central relay unavailable\n");
+                if(rfd >= 0)
+                    bewe_log_push(0,"[BEWE CLI] Central relay connected\n");
+                else
+                    bewe_log_push(0,"[BEWE CLI] Central relay unavailable - retrying in background\n");
             }
         }
 
