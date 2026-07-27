@@ -640,10 +640,13 @@ struct __attribute__((packed)) PktHeartbeat {
     uint8_t host_cpu_pct;    // HOST CPU % (0-100)
     uint8_t host_ram_pct;    // HOST RAM % (0-100)
     uint8_t host_cpu_temp_c; // HOST CPU 온도 °C
-    uint8_t host_bat_pct;    // HOST 배터리 % (255=배터리 없음/데스크탑)
+    uint8_t host_bat_pct;    // HOST 배터리 % (0-100). 254=UPS 는 붙어 있는데 게이지 무응답,
+                             // 255=배터리 자체가 없음(데스크탑). 구 JOIN 은 >100 을 전부 "없음" 취급
     char    antenna[32];     // HOST 안테나 자유텍스트 (JOIN/HOST 모두에 표시)
     char    sdr_kind[16];    // HOST SDR 모델명 (BladeRF/Pluto/RTL-SDR/Unknown)
     uint32_t host_up_x100;   // HOST→Central 업로드 레이트 (0.01 KB/s 단위, 상한 ~41GB/s = 실질 무포화)
+    uint8_t host_bat_ac;     // 0=방전 중, 1=AC 연결, 2=알 수 없음. 말미 추가 필드 —
+                             // 구 JOIN 은 무시하고, 신 JOIN 은 len 게이트로 구 HOST 와도 동작
 };
 
 // ── IQ_CHUNK ──────────────────────────────────────────────────────────────

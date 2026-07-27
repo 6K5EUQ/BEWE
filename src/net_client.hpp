@@ -152,7 +152,8 @@ public:
     std::atomic<uint8_t>  remote_host_cpu{0};          // HOST CPU %
     std::atomic<uint8_t>  remote_host_ram{0};          // HOST RAM %
     std::atomic<uint8_t>  remote_host_cpu_temp{0};     // HOST CPU 온도 °C
-    std::atomic<uint8_t>  remote_host_bat{255};        // HOST 배터리 % (255=없음/데스크탑)
+    std::atomic<uint8_t>  remote_host_bat{255};        // HOST 배터리 % (255=읽을 값 없음)
+    std::atomic<uint8_t>  remote_host_bat_ac{2};       // 0=방전 중, 1=AC 연결, 2=알 수 없음
     std::atomic<uint32_t> remote_host_up_x100{0};      // HOST→Central 업로드 (0.01 KB/s 단위)
     // ── 디스크 여유공간 (DISK_STAT 패킷 수신 시 갱신, JOIN UI 표시용) ──
     std::atomic<uint64_t> remote_host_disk_free{0};

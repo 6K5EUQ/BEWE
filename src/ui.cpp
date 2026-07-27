@@ -5358,10 +5358,10 @@ void run_streaming_viewer(){
         }
         fclose(f); return sum;
     };
-    // sysfs 에 안 뜨는 I2C 연료게이지(Pi + X1200 UPS 등) 폴백: ups-log 데몬이 1행/분 남기는
-    // ~/ups_history.csv 마지막 줄의 SOC. 형식 = timestamp,volt,soc,ac,status
-    // 5분 이상 갱신 없으면 데몬 정지로 보고 무시(=배터리 없음).
-    auto read_bat_pct_csv=[&]()->uint8_t{
+    // sysfs 에 안 뜨는 I2C 연료게이지(Pi + X1200 UPS 등) 폴백: ups-log 데몬이 남기는
+    // ~/ups_history.csv 마지막 줄. 형식 = timestamp,volt,soc,ac,status
+    // 파일이 없거나 5분 이상 갱신이 없으면 UPS 가 없는 것으로 본다(255).
+    auto read_bat_pct_csv=[&](uint8_t* ac_out)->uint8_t{
         const char* home = getenv("HOME"); if(!home) return 255;
         char p[256]; snprintf(p,sizeof(p),"%s/ups_history.csv",home);
         struct stat sb;
@@ -5379,19 +5379,30 @@ void run_streaming_viewer(){
         char* line=strrchr(tail,'\n'); line = line ? line+1 : tail;
         const char* c1=strchr(line,',');   if(!c1) return 255;
         const char* c2=strchr(c1+1,',');   if(!c2) return 255;
+        const char* c3=strchr(c2+1,',');   if(!c3) return 255;
+        *ac_out = (c3[1]=='1') ? 1 : (c3[1]=='0' ? 0 : 2);
+        // 여기까지 왔으면 로거가 살아 있다 = UPS 는 붙어 있다. soc 가 NA/범위밖이면
+        // 게이지(i2c 0x36)가 답을 안 하는 것이므로 "없음"이 아니라 "고장"으로 구분한다.
         double soc=atof(c2+1);
-        if(soc<0.0 || soc>100.0) return 255;
-        int pct=(int)(soc+0.5);
-        return (uint8_t)std::min(100,std::max(1,pct)); // 0 은 프로토콜상 "없음" 이라 1 로 클램프
+        if(soc<=0.0 || soc>100.0) return 254;
+        return (uint8_t)std::min(100,(int)(soc+0.5));
     };
-    auto read_bat_pct=[&]()->uint8_t{
+    // 배터리 % 와 AC 연결 상태를 함께 읽는다.
+    //   반환   = 배터리 % (0-100) / 254 = UPS 있으나 게이지 무응답 / 255 = 배터리 없음
+    //   ac_out = 0 방전 중, 1 AC 연결, 2 알 수 없음
+    auto read_bat_pct=[&](uint8_t* ac_out)->uint8_t{
+        *ac_out = 2;
         for(int i=0; i<4; i++){
             char p[80]; snprintf(p,sizeof(p),"/sys/class/power_supply/BAT%d/capacity",i);
             FILE* f=fopen(p,"r"); if(!f) continue;
-            int cap=0; if(fscanf(f,"%d",&cap)==1){ fclose(f); return (uint8_t)std::min(100,std::max(0,cap)); }
-            fclose(f);
+            int cap=0; bool ok=(fscanf(f,"%d",&cap)==1); fclose(f);
+            if(!ok) continue;
+            snprintf(p,sizeof(p),"/sys/class/power_supply/BAT%d/status",i);
+            FILE* fs=fopen(p,"r");
+            if(fs){ char st[32]={}; if(fgets(st,sizeof(st),fs)) *ac_out=(strncmp(st,"Discharging",11)==0)?0:1; fclose(fs); }
+            return (uint8_t)std::min(100,std::max(0,cap));
         }
-        return read_bat_pct_csv(); // sysfs 없음 → UPS CSV 폴백 (없으면 255)
+        return read_bat_pct_csv(ac_out); // sysfs 없음 → UPS CSV 폴백
     };
     read_cpu(cpu_last_idle,cpu_last_total);
     io_last_ms=read_io_ms();
@@ -5637,7 +5648,7 @@ void run_streaming_viewer(){
                 v.sysmon_ghz=read_ghz();
                 v.sysmon_ram=read_ram();
                 v.sysmon_io =io_pct;
-                v.sysmon_bat.store(read_bat_pct());
+                { uint8_t bac=2; v.sysmon_bat.store(read_bat_pct(&bac)); v.sysmon_bat_ac.store(bac); }
                 // 네트워크 레이트 (1초 창) — HOST: Central 업로드 / JOIN: Central 다운로드.
                 // 누적 카운터를 read-only 로 샘플링 (기존 [HOST]/[JOIN] 통계 로거와 무간섭).
                 {
@@ -5728,7 +5739,7 @@ void run_streaming_viewer(){
                 // 업로드 레이트 → JOIN 의 STATUS 패널 HOST 줄에 표시 (0.01KB/s 단위)
                 uint32_t h_up = kbps_to_x100(v.net_up_kbps.load());
                 v.net_srv->broadcast_heartbeat(hst, sdr_t_hb, sdr_st, iq_st, h_cpu, h_ram, h_ct, v.host_antenna, sk,
-                                               v.sysmon_bat.load(), h_up);
+                                               v.sysmon_bat.load(), h_up, v.sysmon_bat_ac.load());
             }
         }
 
@@ -7295,8 +7306,20 @@ void run_streaming_viewer(){
                     if(kbps >= 1000.f) snprintf(buf, n, "%.2fMB/s", kbps / 1024.f);
                     else               snprintf(buf, n, "%.2fKB/s", kbps);
                 };
-                char rbuf[32];
-                // HOST CPU/RAM/Upload/Bat
+                char rbuf[32], bbuf[24];
+                // 전원 표기: 방전 중이면 "Bat. : n%", AC 연결이면 "AC. : n%".
+                // UPS 는 붙어 있는데 게이지가 무응답(254)이면 "AC. : UPS ERR",
+                // 배터리 자체가 없는 머신(255)이면 접두어만.
+                // ac 를 모를 때(2)는 각 경우의 상식적인 쪽으로: 퍼센트가 있으면 배터리 구동,
+                // 없으면 배터리 없는 AC 머신.
+                auto fmt_bat = [](char* buf, size_t n, int bat, int ac){
+                    const char* tag = (bat <= 100) ? (ac == 1 ? "AC." : "Bat.")
+                                                   : (ac == 0 ? "Bat." : "AC.");
+                    if(bat <= 100)      snprintf(buf, n, "  %s : %d%%",   tag, bat);
+                    else if(bat == 254) snprintf(buf, n, "  %s : UPS ERR", tag);
+                    else                snprintf(buf, n, "  %s",           tag);
+                };
+                // HOST CPU/RAM/Upload/전원
                 // Upload = 그 HOST 가 Central 로 올리는 업로드량.
                 //   HOST 창: 자기 CentralClient tx 레이트(net_up_kbps).
                 //   JOIN 창: 원격 HOST 가 heartbeat 로 보내온 값(remote_host_up_x100).
@@ -7304,24 +7327,17 @@ void run_streaming_viewer(){
                     int h_cpu = vv.net_cli->remote_host_cpu.load();
                     int h_ram = vv.net_cli->remote_host_ram.load();
                     int h_ct  = vv.net_cli->remote_host_cpu_temp.load();
-                    int h_bat = vv.net_cli->remote_host_bat.load();
                     fmt_rate(rbuf, sizeof(rbuf), vv.net_cli->remote_host_up_x100.load() / 100.0f);
-                    if(h_bat <= 100)
-                        ImGui::Text("HOST | CPU : %d%% [%d\xC2\xB0""C]  RAM : %d%%  Upload : %s  Bat. : %d%%",
-                            h_cpu, h_ct, h_ram, rbuf, h_bat);
-                    else
-                        ImGui::Text("HOST | CPU : %d%% [%d\xC2\xB0""C]  RAM : %d%%  Upload : %s",
-                            h_cpu, h_ct, h_ram, rbuf);
+                    fmt_bat(bbuf, sizeof(bbuf), vv.net_cli->remote_host_bat.load(),
+                            vv.net_cli->remote_host_bat_ac.load());
+                    ImGui::Text("HOST | CPU : %d%% [%d\xC2\xB0""C]  RAM : %d%%  Upload : %s%s",
+                        h_cpu, h_ct, h_ram, rbuf, bbuf);
                 } else {
                     int ct  = vv.sysmon_cpu_temp_c.load();
-                    int bat = vv.sysmon_bat.load();
                     fmt_rate(rbuf, sizeof(rbuf), vv.net_up_kbps.load());
-                    if(bat <= 100)
-                        ImGui::Text("HOST | CPU : %d%% [%d\xC2\xB0""C]  RAM : %d%%  Upload : %s  Bat. : %d%%",
-                            (int)vv.sysmon_cpu, ct, (int)vv.sysmon_ram, rbuf, bat);
-                    else
-                        ImGui::Text("HOST | CPU : %d%% [%d\xC2\xB0""C]  RAM : %d%%  Upload : %s",
-                            (int)vv.sysmon_cpu, ct, (int)vv.sysmon_ram, rbuf);
+                    fmt_bat(bbuf, sizeof(bbuf), vv.sysmon_bat.load(), vv.sysmon_bat_ac.load());
+                    ImGui::Text("HOST | CPU : %d%% [%d\xC2\xB0""C]  RAM : %d%%  Upload : %s%s",
+                        (int)vv.sysmon_cpu, ct, (int)vv.sysmon_ram, rbuf, bbuf);
                 }
                 // JOIN Download = 이 창이 접속한 그 기지 하나로부터 받는 양 (창별 독립, 합산 아님)
                 if(vv.net_cli){

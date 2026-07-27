@@ -535,10 +535,10 @@ static int read_cpu_temp_c(){
     if(fv){ int milli=0; if(fscanf(fv,"%d",&milli)==1 && milli>0){ fclose(fv); return milli/1000; } fclose(fv); }
     return 0;
 }
-// sysfs 에 안 뜨는 I2C 연료게이지(Pi + X1200 UPS 등) 폴백: ups-log 데몬이 1행/분 남기는
-// ~/ups_history.csv 마지막 줄의 SOC. 형식 = timestamp,volt,soc,ac,status
-// 5분 이상 갱신 없으면 데몬 정지로 보고 무시(=배터리 없음).
-static uint8_t read_bat_pct_csv(){
+// sysfs 에 안 뜨는 I2C 연료게이지(Pi + X1200 UPS 등) 폴백: ups-log 데몬이 남기는
+// ~/ups_history.csv 마지막 줄. 형식 = timestamp,volt,soc,ac,status
+// 파일이 없거나 5분 이상 갱신이 없으면 UPS 가 없는 것으로 본다(255).
+static uint8_t read_bat_pct_csv(uint8_t* ac_out){
     const char* home = getenv("HOME"); if(!home) return 255;
     char p[256]; snprintf(p,sizeof(p),"%s/ups_history.csv",home);
     struct stat sb;
@@ -556,19 +556,30 @@ static uint8_t read_bat_pct_csv(){
     char* line=strrchr(tail,'\n'); line = line ? line+1 : tail;
     const char* c1=strchr(line,',');   if(!c1) return 255;
     const char* c2=strchr(c1+1,',');   if(!c2) return 255;
+    const char* c3=strchr(c2+1,',');   if(!c3) return 255;
+    *ac_out = (c3[1]=='1') ? 1 : (c3[1]=='0' ? 0 : 2);
+    // 여기까지 왔으면 로거가 살아 있다 = UPS 는 붙어 있다. soc 가 NA/범위밖이면
+    // 게이지(i2c 0x36)가 답을 안 하는 것이므로 "없음"이 아니라 "고장"으로 구분한다.
     double soc=atof(c2+1);
-    if(soc<0.0 || soc>100.0) return 255;
-    int pct=(int)(soc+0.5);
-    return (uint8_t)std::min(100,std::max(1,pct)); // 0 은 프로토콜상 "없음" 이라 1 로 클램프
+    if(soc<=0.0 || soc>100.0) return 254;
+    return (uint8_t)std::min(100,(int)(soc+0.5));
 }
-static uint8_t read_bat_pct(){
+// 배터리 % 와 AC 연결 상태를 함께 읽는다.
+//   반환   = 배터리 % (0-100) / 254 = UPS 있으나 게이지 무응답 / 255 = 배터리 없음
+//   ac_out = 0 방전 중, 1 AC 연결, 2 알 수 없음
+static uint8_t read_bat_pct(uint8_t* ac_out){
+    *ac_out = 2;
     for(int i=0; i<4; i++){
         char p[80]; snprintf(p,sizeof(p),"/sys/class/power_supply/BAT%d/capacity",i);
         FILE* f=fopen(p,"r"); if(!f) continue;
-        int cap=0; if(fscanf(f,"%d",&cap)==1){ fclose(f); return (uint8_t)std::min(100,std::max(0,cap)); }
-        fclose(f);
+        int cap=0; bool ok=(fscanf(f,"%d",&cap)==1); fclose(f);
+        if(!ok) continue;
+        snprintf(p,sizeof(p),"/sys/class/power_supply/BAT%d/status",i);
+        FILE* fs=fopen(p,"r");
+        if(fs){ char st[32]={}; if(fgets(st,sizeof(st),fs)) *ac_out=(strncmp(st,"Discharging",11)==0)?0:1; fclose(fs); }
+        return (uint8_t)std::min(100,std::max(0,cap));
     }
-    return read_bat_pct_csv(); // sysfs 없음 → UPS CSV 폴백 (없으면 255)
+    return read_bat_pct_csv(ac_out); // sysfs 없음 → UPS CSV 폴백
 }
 static long long read_io_ms(){
     FILE* f=fopen("/proc/diskstats","r"); if(!f) return 0;
@@ -1949,7 +1960,7 @@ void run_cli_host(){
                 v.sysmon_ghz=read_ghz();
                 v.sysmon_ram=read_ram();
                 v.sysmon_cpu_temp_c.store(read_cpu_temp_c());
-                v.sysmon_bat.store(read_bat_pct());
+                { uint8_t bac=2; v.sysmon_bat.store(read_bat_pct(&bac)); v.sysmon_bat_ac.store(bac); }
                 long long io_now=read_io_ms();
                 v.sysmon_io=std::min(100.0f,(float)(io_now-io_last_ms)/10.0f);
                 io_last_ms=io_now;
@@ -2126,7 +2137,7 @@ void run_cli_host(){
                 uint32_t up_x100 = kbps_to_x100(v.net_up_kbps.load());
                 v.net_srv->broadcast_heartbeat(hst, sdr_t_hb, sdr_st, iq_st,
                                                cpu_pct, ram_pct, cpu_temp, v.host_antenna, sk,
-                                               v.sysmon_bat.load(), up_x100);
+                                               v.sysmon_bat.load(), up_x100, v.sysmon_bat_ac.load());
             }
         }
 
