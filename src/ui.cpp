@@ -7307,44 +7307,56 @@ void run_streaming_viewer(){
                     else               snprintf(buf, n, "%.2fKB/s", kbps);
                 };
                 char rbuf[32], bbuf[24];
-                // 전원 표기: 방전 중이면 "Bat. : n%", AC 연결이면 "AC. : n%".
-                // UPS 는 붙어 있는데 게이지가 무응답(254)이면 "AC. : UPS ERR",
+                // 전원 표기: 방전 중이면 "Bat : n%", AC 연결이면 "AC : n%".
+                // UPS 는 붙어 있는데 게이지가 무응답(254)이면 "AC : UPS ERR",
                 // 배터리 자체가 없는 머신(255)이면 접두어만.
                 // ac 를 모를 때(2)는 각 경우의 상식적인 쪽으로: 퍼센트가 있으면 배터리 구동,
                 // 없으면 배터리 없는 AC 머신.
                 auto fmt_bat = [](char* buf, size_t n, int bat, int ac){
-                    const char* tag = (bat <= 100) ? (ac == 1 ? "AC." : "Bat.")
-                                                   : (ac == 0 ? "Bat." : "AC.");
-                    if(bat <= 100)      snprintf(buf, n, "  %s : %d%%",   tag, bat);
-                    else if(bat == 254) snprintf(buf, n, "  %s : UPS ERR", tag);
-                    else                snprintf(buf, n, "  %s",           tag);
+                    const char* tag = (bat <= 100) ? (ac == 1 ? "AC" : "Bat")
+                                                   : (ac == 0 ? "Bat" : "AC");
+                    if(bat <= 100)      snprintf(buf, n, "%s : %d%%",    tag, bat);
+                    else if(bat == 254) snprintf(buf, n, "%s : UPS ERR", tag);
+                    else                snprintf(buf, n, "%s",           tag);
+                };
+                // HOST/JOIN 두 줄의 열을 픽셀 위치로 고정한다. 본문 폰트가 가변폭이라
+                // 공백 패딩으로는 자릿수(7% ↔ 26%)가 바뀔 때마다 뒤 항목이 밀린다.
+                // 각 열 폭은 최악 문자열을 CalcTextSize 로 재서 잡는다.
+                const float col_gap = ImGui::CalcTextSize("  ").x;
+                const float col_cpu = ImGui::CalcTextSize("HOST |").x + col_gap;
+                const float col_ram = col_cpu + ImGui::CalcTextSize("CPU : 100% [100\xC2\xB0""C]").x + col_gap;
+                const float col_rte = col_ram + ImGui::CalcTextSize("RAM : 100%").x + col_gap;
+                const float col_bat = col_rte + ImGui::CalcTextSize("Download : 999.99KB/s").x + col_gap;
+                auto status_row = [&](const char* who, int cpu, int ct, int ram,
+                                      const char* rate_label, const char* rate, const char* bat){
+                    ImGui::TextUnformatted(who);
+                    ImGui::SameLine(col_cpu); ImGui::Text("CPU : %d%% [%d\xC2\xB0""C]", cpu, ct);
+                    ImGui::SameLine(col_ram); ImGui::Text("RAM : %d%%", ram);
+                    ImGui::SameLine(col_rte); ImGui::Text("%s : %s", rate_label, rate);
+                    if(bat && bat[0]){ ImGui::SameLine(col_bat); ImGui::TextUnformatted(bat); }
                 };
                 // HOST CPU/RAM/Upload/전원
                 // Upload = 그 HOST 가 Central 로 올리는 업로드량.
                 //   HOST 창: 자기 CentralClient tx 레이트(net_up_kbps).
                 //   JOIN 창: 원격 HOST 가 heartbeat 로 보내온 값(remote_host_up_x100).
                 if(vv.net_cli){
-                    int h_cpu = vv.net_cli->remote_host_cpu.load();
-                    int h_ram = vv.net_cli->remote_host_ram.load();
-                    int h_ct  = vv.net_cli->remote_host_cpu_temp.load();
                     fmt_rate(rbuf, sizeof(rbuf), vv.net_cli->remote_host_up_x100.load() / 100.0f);
                     fmt_bat(bbuf, sizeof(bbuf), vv.net_cli->remote_host_bat.load(),
                             vv.net_cli->remote_host_bat_ac.load());
-                    ImGui::Text("HOST | CPU : %d%% [%d\xC2\xB0""C]  RAM : %d%%  Upload : %s%s",
-                        h_cpu, h_ct, h_ram, rbuf, bbuf);
+                    status_row("HOST |", vv.net_cli->remote_host_cpu.load(),
+                               vv.net_cli->remote_host_cpu_temp.load(),
+                               vv.net_cli->remote_host_ram.load(), "Upload", rbuf, bbuf);
                 } else {
-                    int ct  = vv.sysmon_cpu_temp_c.load();
                     fmt_rate(rbuf, sizeof(rbuf), vv.net_up_kbps.load());
                     fmt_bat(bbuf, sizeof(bbuf), vv.sysmon_bat.load(), vv.sysmon_bat_ac.load());
-                    ImGui::Text("HOST | CPU : %d%% [%d\xC2\xB0""C]  RAM : %d%%  Upload : %s%s",
-                        (int)vv.sysmon_cpu, ct, (int)vv.sysmon_ram, rbuf, bbuf);
+                    status_row("HOST |", (int)vv.sysmon_cpu, vv.sysmon_cpu_temp_c.load(),
+                               (int)vv.sysmon_ram, "Upload", rbuf, bbuf);
                 }
                 // JOIN Download = 이 창이 접속한 그 기지 하나로부터 받는 양 (창별 독립, 합산 아님)
                 if(vv.net_cli){
-                    int jct = vv.sysmon_cpu_temp_c.load();
                     fmt_rate(rbuf, sizeof(rbuf), vv.net_down_kbps.load());
-                    ImGui::Text("JOIN | CPU : %d%% [%d\xC2\xB0""C]  RAM : %d%%  Download : %s",
-                        (int)vv.sysmon_cpu, jct, (int)vv.sysmon_ram, rbuf);
+                    status_row("JOIN |", (int)vv.sysmon_cpu, vv.sysmon_cpu_temp_c.load(),
+                               (int)vv.sysmon_ram, "Download", rbuf, nullptr);
                 }
             };
 
