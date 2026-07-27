@@ -215,6 +215,10 @@ void CentralClient::enqueue_central(const void* hdr, size_t hdr_len,
                 }
             }
             if(!dropped) break; // 드롭 가능한 패킷 없으면 중단
+            // 버린 패킷 카운트. FFT_FRAME 은 droppable 로 보내므로 여기서 버려진 것이
+            // 곧 Central 아카이브에서 빠진 HIST 행이다. LongWaterfall 이 파일 수명 동안
+            // 이 카운터가 늘었는지 보고 "로컬본을 지워도 되는가" 를 판정한다.
+            central_drop_count_.fetch_add(1, std::memory_order_relaxed);
         }
     }
     std::vector<uint8_t> pkt;
@@ -563,6 +567,11 @@ void CentralClient::mux_loop(int central_fd,
                 if(btype == 0x56){  // MISSION_FILE_PUSH_ACK: Central → HOST
                     if(on_central_mf_push_ack_)
                         on_central_mf_push_ack_(buf.data(), mux.len);
+                    continue;
+                }
+                if(btype == 0x5D){  // HIST_STAT: Central → HOST (정합성 조회 응답)
+                    if(on_central_hist_stat_)
+                        on_central_hist_stat_(buf.data(), mux.len);
                     continue;
                 }
             }

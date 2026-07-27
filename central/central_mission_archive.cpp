@@ -923,6 +923,27 @@ void CentralServer::archive_hist_on_live_start(std::shared_ptr<HostRoom> room,
         room->hist_streams.erase(it);
     }
 
+    // 디스크에 같은 이름이 이미 있으면 접미사로 피한다. HOST 가 끊겼다 같은 분·같은 CF
+    // 로 재접속하면 LIVE 파일명이 그대로 겹치는데, 그때 새 room 의 hist_streams 는 비어
+    // 있어 위 close 분기를 안 타고 곧장 fopen("wb") 로 truncate 되어 그 시간대 누적분이
+    // 통째로 날아간다. 접미사는 "-LIVE" 앞에 넣어야 한다 — 뒤에 붙이면
+    // build_hist_filename_finalize 의 rfind("-LIVE.bewehist") 가 실패해 finalize 가
+    // 이름을 그대로 반환하고, 그 파일이 "-LIVE" 인 채로 아카이브에 영구히 남는다.
+    // (map key 는 원래 fname 을 유지한다 — LIVE_STOP 이 그 이름으로 찾아온다.)
+    const std::string fname_s = fname;
+    std::string live_full = full;
+    for(int n = 2; access(live_full.c_str(), F_OK) == 0 && n < 100; ++n){
+        auto pos = fname_s.rfind("-LIVE.bewehist");
+        if(pos == std::string::npos) break;
+        live_full = dir + "/" + fname_s.substr(0, pos) + "_" + std::to_string(n)
+                  + "-LIVE.bewehist";
+    }
+    if(live_full != full){
+        printf("[Central][Archive] HIST live_start collision, using %s\n",
+               live_full.c_str());
+        full = live_full;
+    }
+
     FILE* fp = fopen(full.c_str(), "wb");
     if(!fp){
         printf("[Central][Archive] HIST live_start open FAIL %s errno=%d\n",
@@ -1159,7 +1180,13 @@ void CentralServer::archive_hist_on_live_stop(std::shared_ptr<HostRoom> room,
     }
     // -LIVE → finalize 이름으로 rename. Host long_waterfall.cpp 와 동일 규칙.
     // UTC offset = 0 (Central wall-clock 기준; host 측 offset 도 wallclock 과 매우 가까움).
-    std::string base = fname;
+    // 기준 이름은 stop.filename 이 아니라 실제 열려있던 파일의 basename 이다 —
+    // live_start 충돌회피로 "_n" 이 붙었을 수 있고, stop.filename 을 쓰면 그 접미사가
+    // 사라져 다른 세그먼트의 최종 파일을 덮어쓴다.
+    auto slash0 = it->second.archive_path.find_last_of('/');
+    std::string base = (slash0 == std::string::npos)
+                     ? it->second.archive_path
+                     : it->second.archive_path.substr(slash0 + 1);
     std::string fin  = LongWaterfall::build_hist_filename_finalize(
                         base, (uint64_t)time(nullptr), 0);
     std::string fin_path;   // 압축 대상: 성공적으로 finalize된 최종 파일
@@ -1168,8 +1195,15 @@ void CentralServer::archive_hist_on_live_stop(std::shared_ptr<HostRoom> room,
         std::string dir2 = (slash == std::string::npos) ? ""
                          : it->second.archive_path.substr(0, slash + 1);
         std::string finalp = dir2 + fin;
+        // 최종 이름이 이미 있으면 덮지 않는다 (별개 세그먼트일 수 있다).
+        for(int n = 2; access(finalp.c_str(), F_OK) == 0 && n < 100; ++n){
+            auto p2 = fin.rfind(".bewehist");
+            if(p2 == std::string::npos) break;
+            finalp = dir2 + fin.substr(0, p2) + "_" + std::to_string(n) + ".bewehist";
+        }
         if(rename(it->second.archive_path.c_str(), finalp.c_str()) == 0){
-            printf("[Central][Archive] HIST finalize %s -> %s\n", base.c_str(), fin.c_str());
+            printf("[Central][Archive] HIST finalize %s -> %s\n",
+                   base.c_str(), finalp.c_str());
             fin_path = finalp;
         } else {
             printf("[Central][Archive] HIST finalize rename FAIL %s -> %s errno=%d (%s)\n",
@@ -1218,3 +1252,77 @@ void CentralServer::update_active_mission_shadow(std::shared_ptr<HostRoom> room,
            room->active_mission_station);
 }
 
+
+// ── HIST 정합성 조회 (v13.12) ────────────────────────────────────────────
+// HOST 가 정각 finalize 직후 "그 파일 하나" 가 아카이브에 몇 행으로 들어갔는지 묻는다.
+// 식별 키는 파일명이 아니라 헤더의 start_utc_unix 다 — Central 은 스트림이 일찍 끊기면
+// 끝시각 기준으로 이름을 지어(예: 1800-1820) HOST 의 이름(1800-1847)과 어긋난다.
+// 행수는 반드시 authoritative 값을 써야 한다: v4 는 압축 컨테이너라 (size-128)/fft 산술이
+// 무의미하고 V4Ext.num_rows 만 맞다.
+void CentralServer::handle_hist_stat_req(std::shared_ptr<HostRoom> room,
+                                          const uint8_t* payload, size_t plen){
+    if(plen < sizeof(PktHistStatReq)) return;
+    const auto* q = reinterpret_cast<const PktHistStatReq*>(payload);
+
+    char station[65]={}; memcpy(station, q->station, 64);
+    char code[9]={};     memcpy(code, q->code, 8);
+
+    PktHistStat rep{};
+    memcpy(rep.station, q->station, sizeof(rep.station));
+    rep.year           = q->year;
+    memcpy(rep.code, q->code, sizeof(rep.code));
+    rep.start_utc_unix = q->start_utc_unix;
+    rep.req_id         = q->req_id;
+    rep.found          = 0;
+
+    std::string dir = archive_dir(station, (uint16_t)q->year, code, MFS_HIST);
+    if(!dir.empty()){
+        if(DIR* d = opendir(dir.c_str())){
+            while(struct dirent* e = readdir(d)){
+                const char* n = e->d_name;
+                if(n[0] == '.') continue;
+                const char* dot = strrchr(n, '.');
+                if(!dot || strcmp(dot, ".bewehist") != 0) continue;
+                std::string full = dir + "/" + n;
+                FILE* fp = fopen(full.c_str(), "rb");
+                if(!fp) continue;
+                LongWaterfall::FileHeader h{};
+                size_t rd = fread(&h, 1, sizeof(h), fp);
+                fclose(fp);
+                if(rd != sizeof(h)) continue;
+                if(memcmp(h.magic, "BWWF", 4) != 0) continue;
+                if(h.start_utc_unix != q->start_utc_unix) continue;
+                // 같은 시작시각의 파일이 여러 개면(_2 등) 행수가 가장 많은 것을 답한다.
+                uint64_t rows = 0;
+                struct stat stt{};
+                if(stat(full.c_str(), &stt) != 0) continue;
+                if(h.version == LongWaterfall::FILE_VERSION_ZSTD){
+                    rows = LongWaterfall::v4ext(h).num_rows;
+                } else if(h.version == LongWaterfall::FILE_VERSION){
+                    uint32_t w = h.fft_input_size ? h.fft_input_size : h.fft_size;
+                    if(w) rows = ((uint64_t)stt.st_size - sizeof(h)) / w;
+                } else {
+                    continue;
+                }
+                if(rep.found && rows <= rep.num_rows) continue;
+                rep.found       = 1;
+                rep.num_rows    = rows;
+                rep.size_bytes  = (uint64_t)stt.st_size;
+                rep.fft_size    = h.fft_input_size ? h.fft_input_size : h.fft_size;
+                rep.row_rate_hz = h.row_rate_hz;
+                rep.version     = h.version;
+                snprintf(rep.filename, sizeof(rep.filename), "%s", n);
+            }
+            closedir(d);
+        }
+    }
+
+    printf("[Central][Archive] HIST_STAT %s/%04u/%s start=%llu -> found=%d rows=%llu (%s)\n",
+           station, (unsigned)q->year, code,
+           (unsigned long long)q->start_utc_unix, (int)rep.found,
+           (unsigned long long)rep.num_rows, rep.found ? rep.filename : "-");
+
+    auto pkt = make_bewe_packet(BEWE_TYPE_HIST_STAT, &rep, (uint32_t)sizeof(rep));
+    enqueue_host_send(room, 0xFFFF, CentralMuxType::DATA,
+                      pkt.data(), (uint32_t)pkt.size());
+}

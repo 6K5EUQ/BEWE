@@ -183,6 +183,9 @@ static constexpr uint8_t BEWE_TYPE_MISSION_FILE_SET_NOTE  = 0x57;
 // v13.4 — 크로스 스테이션 미션 메타 조회 (JOIN 이 남의 기지 메타/ACTIVE 를 보기 위함)
 static constexpr uint8_t BEWE_TYPE_MISSION_SYNC_REQ       = 0x5A;
 static constexpr uint8_t BEWE_TYPE_MISSION_SYNC_FOR       = 0x5B;
+// HIST 정합성 조회 (v13.12) — HOST 가 정각 finalize 직후 그 파일 한 개의 행수를 묻는다.
+static constexpr uint8_t BEWE_TYPE_HIST_STAT_REQ          = 0x5C;
+static constexpr uint8_t BEWE_TYPE_HIST_STAT              = 0x5D;
 
 static constexpr uint8_t BEWE_TYPE_CHAT     = 0x07;
 

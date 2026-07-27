@@ -482,6 +482,10 @@ private:
     void handle_mission_sync_req(std::shared_ptr<HostRoom> room,
                                  std::shared_ptr<JoinEntry> requester,
                                  const uint8_t* payload, size_t plen);
+    // v13.12 — HOST 가 정각 finalize 직후 그 파일 한 개의 아카이브 행수를 조회.
+    // 파일명이 아니라 헤더 start_utc 로 찾는다 (Central 이름이 다를 수 있음).
+    void handle_hist_stat_req(std::shared_ptr<HostRoom> room,
+                              const uint8_t* payload, size_t plen);
     // v13.4.1 — missions.json 저장 키: blob 의 station_name (로그인 ID 무관).
     std::string mission_sync_station_key(std::shared_ptr<HostRoom> room,
                                          const uint8_t* bewe_pkt, size_t bewe_len);

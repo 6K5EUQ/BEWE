@@ -130,6 +130,14 @@ enum class PacketType : uint8_t {
     // 구 Central 은 0x5A 를 모르므로 응답이 없고, JOIN 은 메타 없음으로 표시한다 (안전).
     MISSION_SYNC_REQ       = 0x5A,  // JOIN → central: PktMissionSyncReq (station 지정)
     MISSION_SYNC_FOR       = 0x5B,  // central → caller: PktMissionSyncFor (station + PktMissionSync)
+
+    // HIST 정합성 조회 (v13.12). HOST 가 정각 finalize 직후 "그 한 파일" 이 Central 에
+    // 몇 행으로 들어갔는지 묻는다. 파일명이 아니라 헤더의 start_utc 로 식별한다 —
+    // Central 은 스트림이 일찍 끊기면 끝시각 기준으로 이름을 지어(1800-1820) HOST 의
+    // 이름(1800-1847)과 달라지기 때문이다. 구 Central 은 0x5C 를 몰라 응답이 없고,
+    // HOST 는 "확인 불가" 로 보고 로컬본을 그대로 보존한다 (안전 측 실패).
+    HIST_STAT_REQ          = 0x5C,  // host → central: PktHistStatReq
+    HIST_STAT              = 0x5D,  // central → host: PktHistStat
 };
 
 // ── Packet header (9 bytes, packed) ──────────────────────────────────────
@@ -896,6 +904,36 @@ struct __attribute__((packed)) PktMissionSyncFor {
     uint8_t        _pad[3];
     PktMissionSync sync;
 };
+
+// ── HIST 정합성 조회 (v13.12) ────────────────────────────────────────────
+// HOST → Central. 정각 finalize 직후 그 파일 하나만 묻는다 (하루치 일괄 스캔 아님).
+struct __attribute__((packed)) PktHistStatReq {
+    char     station[64];
+    uint32_t year;
+    char     code[8];
+    uint64_t start_utc_unix;   // 조회 키 — 파일 헤더의 start_utc (파일명 아님)
+    uint8_t  req_id;           // 응답 매칭용
+    uint8_t  _pad[7];
+};
+
+// Central → HOST. found=0 이면 그 시작시각의 파일이 아카이브에 아예 없다는 뜻.
+struct __attribute__((packed)) PktHistStat {
+    char     station[64];
+    uint32_t year;
+    char     code[8];
+    uint64_t start_utc_unix;
+    uint64_t num_rows;         // authoritative — v4 는 V4Ext.num_rows, v3 는 (size-128)/fft
+    uint64_t size_bytes;
+    uint32_t fft_size;
+    float    row_rate_hz;
+    uint16_t version;          // 0x0003 raw / 0x0004 zstd
+    uint8_t  found;
+    uint8_t  req_id;
+    char     filename[128];    // Central 이 실제로 갖고 있는 이름 (HOST 와 다를 수 있음)
+    uint8_t  _pad[4];
+};
+static_assert(sizeof(PktHistStatReq) == 92,  "PktHistStatReq size");
+static_assert(sizeof(PktHistStat)    == 244, "PktHistStat size");
 
 // JOIN/HOST → Central → HOST (relay) — v4.0: payload reduced to trigger only.
 // started_by is filled by HOST from op_name; op_index is filled by central.

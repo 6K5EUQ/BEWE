@@ -75,6 +75,10 @@ public:
     bool uplink_backlogged(size_t cap = 2*1024*1024) const {
         return is_central_connected() && queue_bytes() > cap;
     }
+    // 업링크 큐 오버플로로 버린 패킷 누적 수. FFT_FRAME 은 droppable 이라 이 값이 늘면
+    // Central 아카이브에 그만큼 HIST 행이 빠졌다는 뜻이다. LongWaterfall 이 파일 수명
+    // 동안의 증분을 보고 로컬본 삭제 가부를 판정한다 (증분 0 이어야 삭제).
+    uint64_t drop_count() const { return central_drop_count_.load(std::memory_order_relaxed); }
 
     // HOST 주기 STATS 출력용 (3초 평균 전송 바이트/s)
     std::atomic<uint64_t> stat_tx_total_bytes{0};
@@ -162,6 +166,7 @@ private:
     struct QueueEntry { std::vector<uint8_t> data; bool no_drop; };
     std::deque<QueueEntry> central_send_queue_;
     std::atomic<size_t>      central_queue_bytes_{0};  // 뮤텍스 밖(백프레셔 폴링)에서도 읽힘
+    std::atomic<uint64_t>    central_drop_count_{0};   // 큐 오버플로로 버린 패킷 누적
     static constexpr size_t  CENTRAL_QUEUE_MAX_BYTES = 4 * 1024 * 1024; // 4MB (~1초)
 
     // (hdr, hdr_len) + (data, data_len) 을 합쳐 하나의 청크로 enqueue
@@ -196,6 +201,7 @@ private:
     std::function<void(const uint8_t*, size_t)> on_central_mf_push_ack_;
     std::function<void(const uint8_t*, size_t)> on_central_mf_list_;
     std::function<void(const uint8_t*, size_t)> on_central_mf_dl_data_;
+    std::function<void(const uint8_t*, size_t)> on_central_hist_stat_;
 
     void mux_loop(int central_fd,
                   std::function<void(int)> on_new_join,
@@ -240,6 +246,9 @@ public:
     }
     void set_on_central_mf_list(std::function<void(const uint8_t*, size_t)> cb){
         on_central_mf_list_ = std::move(cb);
+    }
+    void set_on_central_hist_stat(std::function<void(const uint8_t*, size_t)> cb){
+        on_central_hist_stat_ = std::move(cb);
     }
     void set_on_central_mf_dl_data(std::function<void(const uint8_t*, size_t)> cb){
         on_central_mf_dl_data_ = std::move(cb);

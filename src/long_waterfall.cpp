@@ -35,6 +35,16 @@ std::atomic<bool>   g_file_dirty{false};
 std::thread         g_thr;
 FFTViewer*          g_v = nullptr;
 
+// 업링크 드롭 카운터 (cli_host 가 CentralClient::drop_count 를 물린다).
+// open_new_file 에서 기준값을 찍고, 파일이 열려 있는 동안 증가하면 dirty 로 승격한다.
+std::mutex               g_drop_fn_mtx;
+std::function<uint64_t()> g_drop_fn;
+uint64_t                 g_drop_base = 0;
+
+// 보존된 파일 finalize 알림 (HistCheck).
+std::mutex                            g_retain_fn_mtx;
+std::function<void(const std::string&)> g_retain_fn;
+
 // Live broadcast callbacks (set by host wiring).
 LiveCallbacks       g_live_cb;
 std::mutex          g_live_cb_mtx;
@@ -50,12 +60,22 @@ std::string         g_cur_path;            // empty when no file open
 FILE*               g_fp = nullptr;
 FileHeader          g_hdr_cur{};
 
-// Max-hold accumulator across capture rows since last flush.
-std::vector<float>  g_acc_db;              // size = current fft_size
-int                 g_acc_count = 0;
+// 캡처 행 → 디스크 행 스테이징 버퍼. 캡처 스레드를 디스크 I/O 로 막지 않으려고
+// data_mtx 안에서는 폴딩+양자화만 하고, fwrite 는 락을 놓은 뒤에 한다.
+std::vector<uint8_t> g_stage;              // rows_staged * dst_fft 바이트
+int                  g_stage_rows = 0;
+// 한 번에 처리할 최대 행 수 — 스테이지 상한(=STAGE_MAX_ROWS*fft) 을 묶어둔다.
+// 밀리면 다음 루프(20ms)에서 이어 처리하므로 6400 rows/s 까지 따라잡는다.
+constexpr int        STAGE_MAX_ROWS = 128;
 
 // Last seen capture index (absolute, not modulo).
 int                 g_last_total_ffts = 0;
+
+// 실측 캡처 행레이트 (1초 창). 헤더 row_rate_hz 는 이 값이어야 뷰어 시간축이 맞는다.
+// FFTViewer::fft_row_rate_hz 를 쓰지 않는 이유: 그건 net_bcast_worker 가 재는데
+// 그 워커는 NetServer 가 있는 HOST 에서만 돈다. LOCAL/GUI-LOCAL 은 0 으로 남아
+// 헤더가 5Hz 라고 거짓말하게 된다. 여기서 직접 재면 모든 모드에서 맞다.
+float               g_meas_row_rate = 0.f;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -101,8 +121,8 @@ void close_file_locked(){
                 unlink(discard_path.c_str());
                 unlink((discard_path + ".info").c_str());
             }
-            g_acc_db.clear();
-            g_acc_count = 0;
+            g_stage.clear();
+            g_stage_rows = 0;
             g_file_dirty.store(false);
             return;
         }
@@ -134,21 +154,28 @@ void close_file_locked(){
         }
         g_cur_path.clear();
     }
-    g_acc_db.clear();
-    g_acc_count = 0;
-    // Mission File Push: LIVE row stream 이 안정적으로 도달했으면 (g_file_dirty==false)
-    //   → push 생략하고 로컬 파일도 즉시 unlink (Central mirror 만 source-of-truth).
-    // 연결이 끊긴 적 있으면 (dirty==true) → 통파일 push (MissionPush 가 ACK 후 unlink 함).
-    // 어느 경로든 HOST 로컬엔 .bewehist 가 남지 않음 → 디스크 누적 방지 (v4.4.0).
+    g_stage.clear();
+    g_stage_rows = 0;
+    // 로컬본 처리 (v13.12) — "증명되면 지우고, 아니면 남긴다".
+    //
+    // CLEAN = 이 파일이 열려 있던 내내 (a) Central 연결이 끊긴 적 없고 (b) 업링크 큐가
+    // 프레임을 버린 적도 없다. 그러면 Central 은 같은 행을 전부 받았다 — 로컬본은 잉여다.
+    //
+    // DIRTY = 둘 중 하나라도 일어났다. 종전엔 여기서 통파일을 곧장 push 했는데, 그건
+    // 두 가지로 틀렸다: ① Central 이 멀쩡히 다 받았어도 무조건 올려 낭비였고
+    // (실측 2026-07-27 DGS-2: 115MB 중복본), ② 올리는 사본이 5Hz max-hold 라 Central
+    // 본보다 품질이 낮았다. 이제는 그냥 로컬에 남겨두고, /hist check 가 Central 의 실제
+    // 행수와 대조해 "빠진 만큼만" 올린 뒤 지운다.
     if(!finalized_path.empty()){
         bool was_dirty = g_file_dirty.exchange(false);
         if(was_dirty){
-            printf("[LongWaterfall] file finalize DIRTY (Central was down) — enqueue push: %s\n",
+            printf("[LongWaterfall] file finalize DIRTY — retain local for /hist check: %s\n",
                    finalized_path.c_str());
-            MissionPush::enqueue(finalized_path, MFS_HIST);
+            std::function<void(const std::string&)> fn;
+            { std::lock_guard<std::mutex> lk(g_retain_fn_mtx); fn = g_retain_fn; }
+            if(fn) fn(finalized_path);
         } else {
-            // LIVE tap 만으로 Central 에 동일 파일이 이미 finalize 됨 → 로컬 사본 불필요.
-            printf("[LongWaterfall] file finalize CLEAN — unlink local (Central has mirror): %s\n",
+            printf("[LongWaterfall] file finalize CLEAN — unlink local (Central has all rows): %s\n",
                    finalized_path.c_str());
             unlink(finalized_path.c_str());
             unlink((finalized_path + ".info").c_str());
@@ -203,9 +230,9 @@ bool open_new_file(uint64_t cf_hz, uint64_t sr_hz, uint32_t fft_size,
     h.fft_size       = fft_size;
     h.sample_rate_hz = sr_hz;
     h.center_freq_hz = cf_hz;
-    // HOST 로컬 파일: 종전대로 5Hz max-hold flush (worker_loop 가 이 값으로 flush 주기를
-    // 잡는다 — 바꾸면 로컬 flush 도 같이 빨라진다).
-    h.row_rate_hz    = DEFAULT_ROW_RATE_HZ;
+    // v13.12: 프레임당 1행 기록 → 헤더 row_rate 도 실측 캡처 행레이트.
+    // (worker_loop 가 g_meas_row_rate 가 잡히기 전에는 파일을 열지 않는다.)
+    h.row_rate_hz    = (g_meas_row_rate > 0.5f) ? g_meas_row_rate : DEFAULT_ROW_RATE_HZ;
     h.db_min         = dmin;
     h.db_max         = dmax;
     h.start_utc_unix = now_utc;
@@ -222,9 +249,11 @@ bool open_new_file(uint64_t cf_hz, uint64_t sr_hz, uint32_t fft_size,
 
     g_fp = fp;
     g_hdr_cur = h;
-    g_acc_db.assign(fft_size, -200.0f);  // very-low init for max-hold
-    g_acc_count = 0;
+    g_stage.assign((size_t)STAGE_MAX_ROWS * fft_size, 0);
+    g_stage_rows = 0;
     g_file_dirty.store(false);  // 새 파일 = LIVE tap 안정 가정으로 시작
+    { std::lock_guard<std::mutex> lk(g_drop_fn_mtx);
+      g_drop_base = g_drop_fn ? g_drop_fn() : 0; }
     {
         std::lock_guard<std::mutex> lk(g_path_mtx);
         g_cur_path = full;
@@ -264,77 +293,91 @@ bool open_new_file(uint64_t cf_hz, uint64_t sr_hz, uint32_t fft_size,
     return true;
 }
 
-// Flush accumulated max-hold row to disk as 1 byte/bin. Resets accumulator.
+// 스테이징된 행들을 디스크에 쓴다. 호출 시점에 data_mtx 를 잡고 있으면 안 된다.
 void flush_row_locked(){
-    if(!g_fp || g_acc_count == 0 || g_acc_db.empty()) return;
-    std::vector<uint8_t> row(g_acc_db.size());
-    float dmin = g_hdr_cur.db_min;
-    float dmax = g_hdr_cur.db_max;
-    for(size_t i=0; i<g_acc_db.size(); i++){
-        row[i] = db_to_byte(g_acc_db[i], dmin, dmax);
-    }
-    fwrite(row.data(), 1, row.size(), g_fp);
+    if(!g_fp || g_stage_rows <= 0) return;
+    const size_t dst_fft = g_hdr_cur.fft_input_size ? g_hdr_cur.fft_input_size
+                                                    : g_hdr_cur.fft_size;
+    if(dst_fft == 0){ g_stage_rows = 0; return; }
+    fwrite(g_stage.data(), 1, (size_t)g_stage_rows * dst_fft, g_fp);
     fflush(g_fp);
 
-    // v13.3: LWF_LIVE_ROW 전송 폐지 — Central 은 FFT_FRAME 스트림을 그대로 아카이브한다
-    // (같은 데이터를 두 번 보내지 않는다). 여기서 쓰는 것은 HOST 로컬 .bewehist 뿐이고,
-    // 로컬 기록은 종전대로 5Hz max-hold 를 유지한다 (HOST 디스크 사용량 불변).
-    // g_live_row_idx 는 LIVE_START/STOP 의 상태 추적용으로만 남는다.
     { std::lock_guard<std::mutex> lk(g_live_state_mtx);
-      if(g_live_state_valid) g_live_row_idx++; }
+      if(g_live_state_valid) g_live_row_idx += (uint32_t)g_stage_rows; }
 
-    std::fill(g_acc_db.begin(), g_acc_db.end(), -200.0f);
-    g_acc_count = 0;
+    g_stage_rows = 0;
 }
 
-// Pull all new capture rows since g_last_total_ffts, max-hold into g_acc_db.
-// Returns true if any rows ingested.
+// 새 캡처 행을 "프레임당 1행" 으로 스테이지에 담는다 (v13.12: 종전 5Hz max-hold 폐지).
+//
+// Central 은 FFT_FRAME 을 받는 족족 1행씩 아카이브한다(archive_hist_on_fft). HOST 로컬이
+// 5Hz 로 접어 쓰면 같은 시간대의 두 파일이 행수도 눈금도 달라져 서로 비교조차 안 된다.
+// 그래서 여기서도 프레임당 1행, 같은 폴딩(pad 묶음 max), 같은 양자화식을 쓴다.
+//
+// 양자화는 broadcast_fft(net_server.cpp) 와 바이트 단위로 같아야 한다 — 그쪽은 절삭
+// 캐스트다. db_to_byte() 는 반올림(+0.5)이라 최대 1 LSB 어긋나므로 여기서 쓰면 안 된다.
+//
+// data_mtx 를 잡은 채 fwrite 하면 캡처 스레드가 디스크에 물린다. 락 안에서는 폴딩과
+// 양자화(순수 연산)만 하고, 쓰기는 호출자가 락을 놓은 뒤 flush_row_locked() 로 한다.
 bool ingest_new_rows(FFTViewer* v){
-    if(!v) return false;
+    if(!v || !g_fp) return false;
+
+    const float dmin = g_hdr_cur.db_min;
+    const float dmax = g_hdr_cur.db_max;
+    float range = dmax - dmin;
+    if(!(range > 0.f)) range = 1.f;
+    const float inv = 255.f / range;
 
     std::lock_guard<std::mutex> lk(v->data_mtx);
     int now = v->total_ffts;
     if(now <= g_last_total_ffts){ return false; }
 
     // v4.5.3 — 소스는 4× padded (fft_size), HIST 저장은 1× (fft_input_size).
-    // 4 bin 묶음 max-hold 로 폴딩 — 좁은 피크 보존.
+    // 4 bin 묶음 max 로 폴딩 — 좁은 피크 보존. Central 은 양자화 후 max 를 취하는데,
+    // db_to_byte 가 단조라 (max 후 양자화) == (양자화 후 max) 로 결과가 같다.
     int src_fft = v->fft_size;
     int dst_fft = v->fft_input_size;
     if(src_fft <= 0 || dst_fft <= 0) return false;
+    if(dst_fft != (int)(g_hdr_cur.fft_input_size ? g_hdr_cur.fft_input_size
+                                                 : g_hdr_cur.fft_size)) return false;
     int pad = src_fft / dst_fft; if(pad < 1) pad = 1;
-    if((int)g_acc_db.size() != dst_fft){
-        // size mismatch — safest: flush whatever we had and resize.
-        // (Worker should have rotated already on fft_size change; handle defensively.)
-        g_acc_db.assign(dst_fft, -200.0f);
-        g_acc_count = 0;
-    }
 
     int new_rows = now - g_last_total_ffts;
     // Clamp: if we fell behind by > FFT_HISTORY_ROWS, only the last ring window is valid.
     if(new_rows > FFT_HISTORY_ROWS) new_rows = FFT_HISTORY_ROWS;
+    // 스테이지 용량 상한 — 남은 건 다음 루프에서 이어 처리.
+    int room = STAGE_MAX_ROWS - g_stage_rows;
+    if(room <= 0) return false;
+    if(new_rows > room) new_rows = room;
+
+    if((int)g_stage.size() < STAGE_MAX_ROWS * dst_fft)
+        g_stage.resize((size_t)STAGE_MAX_ROWS * dst_fft);
 
     // Capture writes rowp at fi=total_ffts, then increments total_ffts (under data_mtx).
     // So after we observe total_ffts==now, valid rows are at fi for abs_idx in [g_last, now-1].
-    int start_abs = now - new_rows;
-    for(int abs_idx = start_abs; abs_idx < now; abs_idx++){
+    int start_abs = g_last_total_ffts;
+    if(now - start_abs > new_rows) start_abs = now - new_rows;
+    for(int abs_idx = start_abs; abs_idx < start_abs + new_rows; abs_idx++){
         int fi = abs_idx % FFT_HISTORY_ROWS;
         const float* rowp = v->fft_data.data() + (size_t)fi * src_fft;
-        if(pad == 1){
-            for(int i=0; i<dst_fft; i++){
-                float d = rowp[i];
-                if(d > g_acc_db[i]) g_acc_db[i] = d;
-            }
-        } else {
-            for(int o=0; o<dst_fft; o++){
+        uint8_t* out = g_stage.data() + (size_t)g_stage_rows * dst_fft;
+        for(int o=0; o<dst_fft; o++){
+            float mx;
+            if(pad == 1){
+                mx = rowp[o];
+            } else {
                 const float* gp = rowp + (size_t)o * pad;
-                float mx = gp[0];
+                mx = gp[0];
                 for(int k=1; k<pad; k++){ if(gp[k] > mx) mx = gp[k]; }
-                if(mx > g_acc_db[o]) g_acc_db[o] = mx;
             }
+            float q = (mx - dmin) * inv;
+            if(q < 0.f) q = 0.f;
+            if(q > 255.f) q = 255.f;
+            out[o] = (uint8_t)q;          // 절삭 — broadcast_fft 와 동일
         }
-        g_acc_count++;
+        g_stage_rows++;
     }
-    g_last_total_ffts = now;
+    g_last_total_ffts = start_abs + new_rows;
     return true;
 }
 
@@ -380,7 +423,28 @@ void worker_loop(){
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             continue;
         }
+        // 캡처 행레이트 실측 (1초 창). 파일이 열려 있든 아니든 계속 잰다.
+        {
+            static clk::time_point rr_last = clk::now();
+            static int             rr_base = -1;
+            int cur_total;
+            { std::lock_guard<std::mutex> lk(g_v->data_mtx); cur_total = g_v->total_ffts; }
+            if(rr_base < 0) rr_base = cur_total;
+            double el = std::chrono::duration<double>(clk::now() - rr_last).count();
+            if(el >= 1.0){
+                int d = cur_total - rr_base;
+                if(d > 0) g_meas_row_rate = (float)(d / el);
+                rr_last = clk::now(); rr_base = cur_total;
+            }
+        }
+
         if(!g_fp){
+            // 행레이트를 아직 모르면 파일을 열지 않는다 — 헤더 row_rate 가 틀리면
+            // 뷰어 시간축 전체가 그 비율로 어긋나고, 나중에 고칠 수단이 없다.
+            if(!(g_meas_row_rate > 0.5f)){
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
             uint64_t cf  = g_v->live_cf_hz.load(std::memory_order_relaxed);
             uint64_t sr  = (uint64_t)g_v->header.sample_rate;
             uint32_t fsz, fis;
@@ -389,13 +453,16 @@ void worker_loop(){
               // v4.5.3 — HIST 파일은 1× FFT (fft_input_size) 로 저장.
               // 4× zero-pad 는 display 전용 — HIST 디스크 소비 4× 절감.
               fis  = (uint32_t)g_v->fft_input_size;
-              fsz  = fis; }
-            // v13.3.2 — 양자화 범위를 화면 슬라이더에서 따오지 않는다.
-            // 슬라이더 상한을 넘는 신호가 db_to_byte() 에서 255 로 포화되어
-            // 스펙트럼 꼭대기가 평평하게 잘려 기록되던 문제 (복구 불가).
-            // 고정 범위 -120..0 dB → 0.47 dB/step, 실사용 전 구간 커버.
-            dmin = DEFAULT_DB_MIN;
-            dmax = DEFAULT_DB_MAX;
+              fsz  = fis;
+              // v13.12 — 양자화 범위를 Central 아카이브와 일치시킨다.
+              // header.power_min/max 는 "캡처 양자화 범위" 이지 화면 슬라이더가
+              // 아니다 (net_stream.cpp 가 broadcast_fft 에 넘기는 바로 그 값). 그래서
+              // v13.3.2 가 고쳤던 "슬라이더 상한 넘는 신호가 255 로 포화" 문제는
+              // 여기서 재발하지 않는다. 고정 -120..0 을 쓰면 Central 본과 눈금이
+              // 달라져 같은 신호의 dB/SNR 이 서로 다르게 읽힌다.
+              dmin = g_v->header.power_min;
+              dmax = g_v->header.power_max; }
+            if(!(dmax > dmin)){ dmin = DEFAULT_DB_MIN; dmax = DEFAULT_DB_MAX; }
             float    lon = g_v->station_lon;
             float    lat = g_v->station_lat;
             std::string sn = g_v->station_name;     // const std::string copy
@@ -418,23 +485,41 @@ void worker_loop(){
             // Initialize last_total_ffts so we don't dump pre-existing buffer.
             { std::lock_guard<std::mutex> lk(g_v->data_mtx);
               g_last_total_ffts = g_v->total_ffts; }
-            next_flush = clk::now() + std::chrono::milliseconds(200);
+            g_stage_rows = 0;
         }
 
-        // Ingest fresh rows (read-only on fft_data; data_mtx briefly).
+        // 프레임당 1행 스테이징 (data_mtx 짧게) → 락 밖에서 디스크 쓰기.
         ingest_new_rows(g_v);
+        flush_row_locked();
 
-        // Flush at row_rate cadence.
-        auto now = clk::now();
-        if(now >= next_flush){
-            flush_row_locked();
-            // Schedule next: 1000ms / row_rate_hz, default 200ms.
-            int period_ms = 200;
-            if(g_hdr_cur.row_rate_hz > 0.5f){
-                period_ms = (int)(1000.0f / g_hdr_cur.row_rate_hz);
-                if(period_ms < 50) period_ms = 50;
+        // 업링크 드롭 감시 — FFT_FRAME 이 큐 오버플로로 버려졌으면 Central 아카이브에
+        // 그만큼 행이 빠진 것이다. 끊김과 동일하게 dirty 로 올려 로컬본을 보존한다.
+        if(g_fp && !g_file_dirty.load(std::memory_order_relaxed)){
+            uint64_t now_drops = 0; bool have = false;
+            { std::lock_guard<std::mutex> lk(g_drop_fn_mtx);
+              if(g_drop_fn){ now_drops = g_drop_fn(); have = true; } }
+            if(have && now_drops != g_drop_base){
+                printf("[LongWaterfall] uplink drops %llu during file — mark dirty\n",
+                       (unsigned long long)(now_drops - g_drop_base));
+                g_file_dirty.store(true);
             }
-            next_flush = now + std::chrono::milliseconds(period_ms);
+        }
+
+        // 양자화 기준이 바뀌면(오토스케일 재수렴, 수동 /rx autoscale) 파일을 가른다.
+        // 한 파일에 두 기준의 행이 섞이면 어느 쪽으로 역산해도 절반이 틀린다 —
+        // Central 이 같은 이유로 스트림을 rotate 한다(central_mission_archive.cpp).
+        if(g_fp){
+            float pmin, pmax;
+            { std::lock_guard<std::mutex> lk(g_v->data_mtx);
+              pmin = g_v->header.power_min; pmax = g_v->header.power_max; }
+            if(pmax > pmin &&
+               (fabsf(pmin - g_hdr_cur.db_min) > 0.01f ||
+                fabsf(pmax - g_hdr_cur.db_max) > 0.01f)){
+                printf("[LongWaterfall] quant range changed %.1f/%.1f -> %.1f/%.1f — rotate\n",
+                       g_hdr_cur.db_min, g_hdr_cur.db_max, pmin, pmax);
+                close_file_locked();
+                continue;
+            }
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -476,6 +561,17 @@ void request_rotate(){
 // finalize 시점에 dirty 면 MissionPush 로 통파일 push (LIVE tap 동안 누락 row 보완).
 void mark_dirty(){
     g_file_dirty.store(true);
+}
+
+void set_on_retained(std::function<void(const std::string&)> fn){
+    std::lock_guard<std::mutex> lk(g_retain_fn_mtx);
+    g_retain_fn = std::move(fn);
+}
+
+void set_drop_counter(std::function<uint64_t()> fn){
+    std::lock_guard<std::mutex> lk(g_drop_fn_mtx);
+    g_drop_fn = std::move(fn);
+    g_drop_base = g_drop_fn ? g_drop_fn() : 0;
 }
 
 std::string current_file_path(){

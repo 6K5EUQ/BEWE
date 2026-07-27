@@ -67,6 +67,7 @@ if(CLI)
         src/sched_record.cpp
         src/mission.cpp
         src/mission_push.cpp
+        src/hist_check.cpp
         src/audio.cpp
         src/audio_playback.cpp
         src/timemachine.cpp
@@ -154,6 +155,7 @@ else()
         src/sched_record.cpp
         src/mission.cpp
         src/mission_push.cpp
+        src/hist_check.cpp
         src/audio.cpp
         src/audio_playback.cpp
         src/ui.cpp

@@ -110,9 +110,18 @@ void stop_worker();
 void request_rotate();
 
 // 현재 열린 HIST 파일을 "dirty" 표시 — Central 연결 끊김이 발생했음을 의미.
-// finalize 시점에 dirty 면 통파일을 MissionPush 로 enqueue (LIVE row 누락분 보완).
-// dirty 아니면 LIVE tap 만으로 도달했다고 가정하고 push skip.
+// finalize 시점에 dirty 면 로컬본을 남긴다 (/hist check 가 Central 과 대조해 복구).
+// dirty 아니면 Central 이 전 행을 받았음이 증명되므로 로컬본을 지운다.
 void mark_dirty();
+
+// 보존된(DIRTY) 파일이 finalize 됐을 때 호출될 콜백 — HistCheck 이 물린다.
+// CLEAN(증명됨) 파일은 여기 안 온다 (이미 삭제됨).
+void set_on_retained(std::function<void(const std::string&)> fn);
+
+// 업링크 드롭 카운터 제공자 등록 (cli_host 가 CentralClient::drop_count 를 물린다).
+// 파일 수명 동안 이 값이 늘면 Central 아카이브에 행이 빠진 것 → dirty 와 동일 취급.
+// 미등록(LOCAL/GUI)이면 드롭 개념 자체가 없으므로 항상 clean 으로 본다.
+void set_drop_counter(std::function<uint64_t()> fn);
 
 // Currently-open file path (empty if worker idle / not recording). Thread-safe snapshot.
 std::string current_file_path();

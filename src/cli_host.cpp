@@ -11,6 +11,7 @@
 #include "bewe_paths.hpp"
 #include "central_client.hpp"
 #include "mission_push.hpp"
+#include "hist_check.hpp"
 #include "net_protocol.hpp"
 #include "host_band_plan.hpp"
 #include <zstd.h>   // Central 릴레이 CHANNEL_SYNC 해제 (v13)
@@ -1755,6 +1756,11 @@ void run_cli_host(){
                     // mission_sync는 on_auth 200ms 스레드에서 AUTH_ACK 이후에 전송 (pre-auth 전송 시 JOIN이 skip함)
                 });
 
+                // 업링크 드롭 카운터를 LWF 에 물린다 — 파일 수명 동안 이 값이 늘면
+                // Central 아카이브에 행이 빠진 것이므로 로컬본을 지우면 안 된다.
+                LongWaterfall::set_drop_counter(
+                    [&central_cli](){ return central_cli.drop_count(); });
+
                 // Worker → NetServer LIVE broadcast 연결.
                 LongWaterfall::LiveCallbacks lcb;
                 lcb.on_start = [&v](const PktLwfLiveStart& s){
@@ -1773,12 +1779,12 @@ void run_cli_host(){
                     central_cli.enqueue_relay_broadcast(pkt, len, no_drop);
                 };
                 // 부팅 시 mission_load_history → broadcast_sync는 net_srv/on_relay_broadcast가
-                // 없을 때 호출돼서 Central 캐시가 비어있다. 여기서 (relay 연결 + net_srv 모두
-                // 준비된 시점) 한 번 더 broadcast해서 신규 JOIN이 ACTIVE 상태를 받게 함.
-                if(v.mission_state == Mission::State::ACTIVE){
-                    bewe_log_push(0, "[CLI-HOST] re-broadcasting mission_sync after relay setup\n");
-                    v.mission_broadcast_sync();
-                }
+                // 없을 때 호출돼서 Central 캐시가 비어있다. 여기서 한 번 더 broadcast해서
+                // 신규 JOIN이 ACTIVE 상태를 받게 함.
+                // 단 Central 로 나가는 몫은 여기서 보내면 버려진다 — enqueue_central 이
+                // central_sender_running_ 를 보고 조용히 drop 하는데, 그 플래그는 아래
+                // start_mux_adapter() 안에서야 true 가 된다. 그래서 실제 Central 전파는
+                // start_mux_adapter() 직후에 다시 한다 (아래 참조).
                 // Auto-reconnect function
                 auto reconnect_fn = std::make_shared<std::function<void()>>();
                 *reconnect_fn = [&v, &central_cli,
@@ -1832,6 +1838,19 @@ void run_cli_host(){
                         [&v](int local_fd){ if(v.net_srv) v.net_srv->inject_fd(local_fd); },
                         [&v](){ return v.net_srv ? (uint8_t)v.net_srv->client_count() : (uint8_t)0; },
                         *reconnect_fn);
+                    // 최초 연결도 재연결과 똑같이 처리해야 한다. start_mux_adapter 가
+                    // central_sender_running_ 를 켠 "뒤"라야 mission_sync 가 Central 에
+                    // 실제로 도달한다. 이게 없으면 Central 의 active_mission_valid 가
+                    // false 로 남아 archive_hist_on_live_start 가 전부 반려되고 —
+                    // 정각 rotate 로 나가는 이후 LIVE_START 까지 계속 반려된다 —
+                    // 그 스테이션 HIST 가 아카이브에 통째로 안 남는다. 그런데 HOST 는
+                    // 끊긴 적이 없어 finalize 를 CLEAN 으로 보고 로컬본까지 지운다.
+                    // (실제 사고: 2026-07-27 DGS-2 19~21시 3시간분 영구 소실.)
+                    if(v.mission_state == Mission::State::ACTIVE){
+                        bewe_log_push(0,"[CLI-HOST] mission_sync + HIST rotate after relay connect\n");
+                        v.mission_broadcast_sync();
+                        LongWaterfall::request_rotate();
+                    }
                 } else {
                     // 짧은 재시도(위)도 실패 — reconnect_fn 을 그대로 발동시켜 무한
                     // 백그라운드 재시도로 넘긴다. mark_dirty() 는 여기선 무해(어차피
@@ -1843,6 +1862,14 @@ void run_cli_host(){
                 // 미션 dir 안 닫힌 IQ/audio/hist 파일을 Central archive로 업로드,
                 // ACK 받으면 로컬 unlink. central_cli mux가 동작해야 ACK 수신 가능.
                 MissionPush::start(&v, &central_cli);
+
+                // HIST 정합성 대조 워커. 정각 finalize 로 보존된 파일이 생기면
+                // 그 미션 dir 을 대조한다 (하루치 일괄 스캔 아님).
+                HistCheck::start(&v, &central_cli);
+                central_cli.set_on_central_hist_stat(
+                    [](const uint8_t* p, size_t n){ HistCheck::on_hist_stat(p, n); });
+                LongWaterfall::set_on_retained(
+                    [](const std::string& path){ HistCheck::notify_finalized(path); });
                 // 지난 실행에서 ACK 못 받고 남은 파일 재투입 (큐가 메모리에만 있어
                 // 재시작 때마다 고아가 누적됐다).
                 MissionPush::scan_orphans_enqueue();
@@ -2615,6 +2642,17 @@ void run_cli_host(){
                     }
                 }
                 fflush(stdout);
+            } else if(line == "/hist" || line.rfind("/hist ", 0) == 0){
+                // /hist check — 보존된 로컬 .bewehist 를 Central 아카이브와 대조해
+                // 빠진 구간만 올리고, 다 있으면 로컬본을 지운다.
+                std::string sub = line.size() > 5 ? line.substr(5) : "";
+                while(!sub.empty() && sub.front() == ' ') sub.erase(sub.begin());
+                if(sub.rfind("check", 0) == 0){
+                    HistCheck::run_command(sub.c_str() + 5);
+                } else {
+                    printf("  Usage: /hist check\n");
+                }
+                fflush(stdout);
             } else if(line == "/ch" || line.rfind("/ch ", 0) == 0){
                 // /ch add <CF_MHz> <BW_kHz> [none|am|fm]  /  /ch list  /  /ch del <n>
                 // 채널 필터 생성/목록/삭제 — 네트워크 CREATE_CH(+SET_CH_MODE)/DELETE_CH 경로와 동일 로직
@@ -2749,6 +2787,7 @@ void run_cli_host(){
                 bewe_log_push(0,"  /clients         - List connected operators\n");
                 bewe_log_push(0,"  /freq <MHz>      - Change center frequency\n");
                 bewe_log_push(0,"  /sr <MSPS>       - Change sample rate\n");
+                bewe_log_push(0,"  /hist check             - Verify local HIST against Central, upload missing rows\n");
                 bewe_log_push(0,"  /ch add <CF> <BW> [mode] - Create channel filter (CF MHz, BW kHz, mode none|am|fm)\n");
                 bewe_log_push(0,"  /ch list         - List active channel filters\n");
                 bewe_log_push(0,"  /ch del <n>      - Delete channel filter n\n");

@@ -392,7 +392,12 @@ void scan_orphans_enqueue(){
             while((e_c = readdir(d_c)) != nullptr){
                 if(!e_c->d_name || e_c->d_name[0] == '.') continue;
                 std::string p_c = p_y + "/" + e_c->d_name;
-                for(uint8_t sub : {MFS_IQ, MFS_AUDIO, MFS_HIST}){
+                // v13.12: HIST 는 여기서 쓸지 않는다. 로컬 .bewehist 는 이제 "Central 이
+                // 다 받았음이 증명될 때까지 보관하는 사본" 이라 부팅마다 남아 있는 게
+                // 정상이다. 그걸 통파일 push 하면 mode=0(truncate) 로 Central 의 같은
+                // 이름 아카이브(이미 v4 압축된 것 포함)를 통째로 덮어쓴다. HIST 복구는
+                // HistCheck(정각 대조 + /hist check) 가 담당한다.
+                for(uint8_t sub : {MFS_IQ, MFS_AUDIO}){
                     std::string p_s = p_c + "/" + subdir_name(sub);
                     DIR* d_f = opendir(p_s.c_str());
                     if(!d_f) continue;

@@ -858,6 +858,10 @@ void CentralServer::dispatch_to_joins(std::shared_ptr<HostRoom> room,
                                    bewe_pkt + BEWE_HDR_SIZE, bewe_len - BEWE_HDR_SIZE);
         return;
     }
+    if(bewe_type == BEWE_TYPE_HIST_STAT_REQ){
+        handle_hist_stat_req(room, bewe_pkt + BEWE_HDR_SIZE, bewe_len - BEWE_HDR_SIZE);
+        return;  // HOST→Central 전용
+    }
     if(bewe_type == BEWE_TYPE_MISSION_SYNC_REQ){
         handle_mission_sync_req(room, nullptr,
                                 bewe_pkt + BEWE_HDR_SIZE, bewe_len - BEWE_HDR_SIZE);

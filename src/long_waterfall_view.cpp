@@ -801,8 +801,10 @@ void draw_info_modal(){
         if(s != std::string::npos) base = base.substr(s+1);
 
         int off_h = header_utc_offset(h);
-        uint32_t row_rate = (uint32_t)std::max(1.0f, h.row_rate_hz);
-        uint64_t dur_sec = hist_rows_from_header(h, sz) / row_rate;
+        // row_rate 를 정수로 자르면 안 된다 — Central 아카이브는 18.78Hz 같은 비정수라
+        // 18 로 잘리면 Duration/Stop 이 4.2% 부풀고, 같은 화면의 float 툴팁과 어긋난다.
+        float row_rate = std::max(1.0f, h.row_rate_hz);
+        uint64_t dur_sec = (uint64_t)(hist_rows_from_header(h, sz) / row_rate);
         uint64_t stop_utc = h.start_utc_unix + dur_sec;
 
         const float L = 110.f;
@@ -926,8 +928,8 @@ void draw_modal(FFTViewer& v, NetClient* cli){
         }
         const auto& h = g_open.hdr;
         int off_h = header_utc_offset(h);
-        uint32_t row_rate = (uint32_t)std::max(1.0f, h.row_rate_hz);
-        uint64_t dur_sec = (uint64_t)g_open.num_rows / row_rate;
+        float row_rate = std::max(1.0f, h.row_rate_hz);
+        uint64_t dur_sec = (uint64_t)((float)g_open.num_rows / row_rate);
         uint64_t stop_utc = h.start_utc_unix + dur_sec;
 
         unsigned fft_disp = h.fft_input_size > 0 ? h.fft_input_size : h.fft_size;
