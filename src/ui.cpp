@@ -5358,6 +5358,32 @@ void run_streaming_viewer(){
         }
         fclose(f); return sum;
     };
+    // sysfs 에 안 뜨는 I2C 연료게이지(Pi + X1200 UPS 등) 폴백: ups-log 데몬이 1행/분 남기는
+    // ~/ups_history.csv 마지막 줄의 SOC. 형식 = timestamp,volt,soc,ac,status
+    // 5분 이상 갱신 없으면 데몬 정지로 보고 무시(=배터리 없음).
+    auto read_bat_pct_csv=[&]()->uint8_t{
+        const char* home = getenv("HOME"); if(!home) return 255;
+        char p[256]; snprintf(p,sizeof(p),"%s/ups_history.csv",home);
+        struct stat sb;
+        if(stat(p,&sb)!=0) return 255;
+        if(time(nullptr) - sb.st_mtime > 300) return 255;
+        FILE* f=fopen(p,"rb"); if(!f) return 255;
+        char tail[512]; long n=(long)sizeof(tail)-1;
+        fseek(f,0,SEEK_END); long sz=ftell(f);
+        if(sz<n) n=sz;
+        fseek(f,-n,SEEK_END);
+        size_t rd=fread(tail,1,(size_t)n,f); fclose(f);
+        tail[rd]='\0';
+        char* end=tail+rd;
+        while(end>tail && (end[-1]=='\n'||end[-1]=='\r')) *--end='\0';
+        char* line=strrchr(tail,'\n'); line = line ? line+1 : tail;
+        const char* c1=strchr(line,',');   if(!c1) return 255;
+        const char* c2=strchr(c1+1,',');   if(!c2) return 255;
+        double soc=atof(c2+1);
+        if(soc<0.0 || soc>100.0) return 255;
+        int pct=(int)(soc+0.5);
+        return (uint8_t)std::min(100,std::max(1,pct)); // 0 은 프로토콜상 "없음" 이라 1 로 클램프
+    };
     auto read_bat_pct=[&]()->uint8_t{
         for(int i=0; i<4; i++){
             char p[80]; snprintf(p,sizeof(p),"/sys/class/power_supply/BAT%d/capacity",i);
@@ -5365,7 +5391,7 @@ void run_streaming_viewer(){
             int cap=0; if(fscanf(f,"%d",&cap)==1){ fclose(f); return (uint8_t)std::min(100,std::max(0,cap)); }
             fclose(f);
         }
-        return 255; // 배터리 없음 (데스크탑 등)
+        return read_bat_pct_csv(); // sysfs 없음 → UPS CSV 폴백 (없으면 255)
     };
     read_cpu(cpu_last_idle,cpu_last_total);
     io_last_ms=read_io_ms();
