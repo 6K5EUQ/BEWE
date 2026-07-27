@@ -2485,6 +2485,109 @@ void FFTViewer::draw_waterfall_area(ImDrawList* dl, float full_x, float full_y, 
 extern std::vector<DbFileEntry> g_db_list;
 extern std::mutex g_db_list_mtx;
 
+// ── 채팅 슬래시 명령 테이블 + 자동완성 팝업 ──────────────────────────────────
+// early chat(로그인/글로브)과 메인 chat 이 같은 목록·같은 팝업을 공유한다.
+// early_ok=false 인 명령은 early chat 에선 회색으로만 보이고 실행되지 않는다.
+struct ChatCmdInfo { const char* cmd; const char* desc; bool early_ok; };
+static const ChatCmdInfo CHAT_CMDS[] = {
+    {"/rx start",        "Start SDR capture",     false},
+    {"/rx stop",         "Stop SDR capture",      false},
+    {"/chassis 1 reset", "Reset SDR hardware",    false},
+    {"/chassis 2 reset", "Reset network link",    false},
+    {"/update_tle",      "Update satellite TLEs", true },
+    {"/logout",          "Return to login",       true },
+    {"/shutdown",        "Exit BEWE",             true },
+};
+static const int CHAT_CMD_N = (int)(sizeof(CHAT_CMDS)/sizeof(CHAT_CMDS[0]));
+
+// 채팅 InputText 콜백 상태.
+// InputText 가 활성(편집 중)일 때는 외부에서 buf 를 직접 써도 화면에 반영되지 않는다
+// (ImGui 가 내부 편집 버퍼를 별도로 들고 있기 때문). 그래서 자동완성은 반드시
+// CallbackAlways 안에서 DeleteChars/InsertChars 로 적용해야 한다.
+struct ChatInputCB {
+    bool        cursor_end = false;  // 다음 프레임에 커서를 끝으로 (기존 '/' 입력 처리)
+    const char* fill = nullptr;      // 이 문자열로 교체 (자동완성). 적용 후 nullptr 로 리셋
+};
+static int chat_input_callback(ImGuiInputTextCallbackData* d){
+    ChatInputCB* st = (ChatInputCB*)d->UserData;
+    if(st->fill){
+        d->DeleteChars(0, d->BufTextLen);
+        d->InsertChars(0, st->fill);
+        d->CursorPos = d->SelectionStart = d->SelectionEnd = d->BufTextLen;
+        st->fill = nullptr;
+        st->cursor_end = false;
+    } else if(st->cursor_end){
+        d->CursorPos = d->BufTextLen;
+        d->SelectionStart = d->SelectionEnd = d->CursorPos;
+        st->cursor_end = false;
+    }
+    return 0;
+}
+
+// InputText 바로 위에 명령 목록을 그린다. **InputText 를 그리기 전에** 호출할 것 —
+// 여기서 정한 완성 문자열이 같은 프레임의 InputText 콜백에서 적용된다.
+//  buf        : 현재 입력 내용 (읽기 전용으로만 사용 — 필터링)
+//  sel        : 선택 인덱스 (호출측 상태, 프레임 간 유지)
+//  early_mode : early chat 이면 true (미지원 명령 회색)
+//  in_pos/in_w: InputText 가 그려질 좌상단 좌표와 폭 (팝업을 그 위에 띄운다)
+//  focused    : 입력칸이 포커스 상태인지 (아니면 팝업 숨김)
+// 반환: 완성할 명령 문자열 (없으면 nullptr) — CHAT_CMDS 정적 문자열이라 수명 안전
+static const char* draw_chat_cmd_popup(const char* buf, int& sel,
+                                       bool early_mode, ImVec2 in_pos, float in_w,
+                                       bool focused)
+{
+    if(!focused || buf[0] != '/') { sel = 0; return nullptr; }
+
+    // prefix 필터 (대소문자 무시)
+    size_t pre_n = strlen(buf);
+    int match[CHAT_CMD_N]; int nm = 0;
+    for(int i=0;i<CHAT_CMD_N;i++){
+        if(strncasecmp(CHAT_CMDS[i].cmd, buf, pre_n) == 0) match[nm++] = i;
+    }
+    if(nm == 0){ sel = 0; return nullptr; }
+    if(sel >= nm) sel = nm-1;
+    if(sel < 0)   sel = 0;
+
+    // 키 이동. InputText 활성 중에도 single-line 이라 위/아래는 안 쓰이므로 가로챈다.
+    if(ImGui::IsKeyPressed(ImGuiKey_DownArrow, true)) sel = (sel+1) % nm;
+    if(ImGui::IsKeyPressed(ImGuiKey_UpArrow,   true)) sel = (sel+nm-1) % nm;
+
+    const char* fill = nullptr;
+    if(ImGui::IsKeyPressed(ImGuiKey_Tab, false)) fill = CHAT_CMDS[match[sel]].cmd;
+
+    // 별도 ImGui 윈도우로 그리면 채팅창이 매 프레임 SetNextWindowFocus() 로 위에 올라와
+    // 반투명 배경에 덮여 흐릿해진다. 그래서 foreground draw list 에 직접 그린다 (항상 최상단).
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    const float row_h = ImGui::GetTextLineHeight() + 4.f;
+    const float pad   = 6.f;
+    const float ph    = row_h*nm + pad*2.f;
+    const ImVec2 p0(in_pos.x, in_pos.y - ph - 4.f);
+    const ImVec2 p1(in_pos.x + in_w, in_pos.y - 4.f);
+
+    dl->AddRectFilled(p0, p1, IM_COL32(22,28,42,255), 6.f);
+    dl->AddRect      (p0, p1, IM_COL32(70,110,170,255), 6.f, 0, 1.5f);
+
+    const float desc_x = p0.x + pad + in_w*0.42f;
+    for(int r=0;r<nm;r++){
+        const ChatCmdInfo& ci = CHAT_CMDS[match[r]];
+        bool usable = !early_mode || ci.early_ok;
+        float ry = p0.y + pad + row_h*r;
+        if(r == sel)
+            dl->AddRectFilled(ImVec2(p0.x+2.f, ry-1.f), ImVec2(p1.x-2.f, ry+row_h-1.f),
+                              IM_COL32(46,96,170,255), 3.f);
+        dl->AddText(ImVec2(p0.x+pad, ry+1.f),
+                    usable ? IM_COL32(255,255,255,255) : IM_COL32(150,155,168,255), ci.cmd);
+        dl->AddText(ImVec2(desc_x, ry+1.f),
+                    usable ? IM_COL32(178,196,225,255) : IM_COL32(110,115,128,255), ci.desc);
+        // 클릭으로도 완성
+        if(ImGui::IsMouseHoveringRect(ImVec2(p0.x, ry), ImVec2(p1.x, ry+row_h), false)){
+            sel = r;
+            if(ImGui::IsMouseClicked(ImGuiMouseButton_Left)) fill = ci.cmd;
+        }
+    }
+    return fill;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 void run_streaming_viewer(){
     float cf=450.0f;
@@ -2585,7 +2688,9 @@ void run_streaming_viewer(){
     bool early_do_shutdown    = false;
     bool early_do_logout      = false;
     bool early_chat_focus_req  = false; // Enter > 입력칸 포커스 요청
-    bool early_chat_cursor_end = false; // 다음 프레임에 커서를 끝으로 이동 (/ 입력 후 선택 방지)
+    ChatInputCB early_chat_cb;          // 커서 끝 이동 / 자동완성 적용 상태
+    bool early_chat_in_was_active = false; // 직전 프레임 입력칸 활성 (팝업 표시 판정)
+    int  early_cmd_sel = 0;             // 슬래시 명령 자동완성 선택 인덱스
 
     auto draw_early_chat = [&](int fw, int fh){
         // RShift 토글
@@ -2605,7 +2710,7 @@ void run_streaming_viewer(){
             if(!early_chat_open){ early_chat_open = true; }
             early_chat_input[0] = '/'; early_chat_input[1] = '\0';
             early_chat_focus_req  = true;
-            early_chat_cursor_end = true; // 커서를 '/' 뒤에 위치
+            early_chat_cb.cursor_end = true; // 커서를 '/' 뒤에 위치
         }
 
         if(!early_chat_open) return;
@@ -2636,20 +2741,31 @@ void run_streaming_viewer(){
         ImGui::EndChild();
 
         ImGui::Separator();
-        ImGui::SetNextItemWidth(CW - 16.f);
+        bool send = false;
+        // 슬래시 명령 자동완성 목록 (입력칸 위). InputText 보다 먼저 그려야 같은 프레임
+        // 콜백에서 완성 문자열이 적용된다. 활성 판정은 직전 프레임의 ID 로.
+        ImVec2 in_pos_e = ImGui::GetCursorScreenPos();
+        bool early_in_active = early_chat_in_was_active || early_chat_focus_req;
+        const char* early_fill = draw_chat_cmd_popup(early_chat_input, early_cmd_sel,
+                                                     /*early_mode=*/true, in_pos_e, CW-16.f,
+                                                     early_in_active);
+        // Tab 완성: 포커스 재설정이 buf 로부터 편집버퍼를 다시 만드므로 buf 도 갱신.
+        if(early_fill){
+            snprintf(early_chat_input, sizeof(early_chat_input), "%s", early_fill);
+            early_chat_cb.fill = early_fill;
+            early_chat_cb.cursor_end = true;
+            early_chat_focus_req = true;
+        }
         if(early_chat_focus_req){
             ImGui::SetKeyboardFocusHere(0);
             early_chat_focus_req = false;
         }
-        bool send = false;
+        ImGui::SetNextItemWidth(CW - 16.f);
         if(ImGui::InputText("##early_chat_in", early_chat_input, sizeof(early_chat_input),
                             ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackAlways,
-                            [](ImGuiInputTextCallbackData* d) -> int {
-                                bool* flag = (bool*)d->UserData;
-                                if(*flag){ d->CursorPos = d->BufTextLen; d->SelectionStart = d->SelectionEnd = d->CursorPos; *flag = false; }
-                                return 0;
-                            }, &early_chat_cursor_end))
+                            chat_input_callback, &early_chat_cb))
             send = true;
+        early_chat_in_was_active = ImGui::IsItemActive(); // 다음 프레임 팝업 표시 판정
 
         if(send && early_chat_input[0]){
             std::string s = early_chat_input;
@@ -5257,8 +5373,10 @@ void run_streaming_viewer(){
     // ── 채팅/오퍼레이터 UI 상태 ──────────────────────────────────────────
     bool  chat_open        = false;
     bool  chat_focus_input = false; // 채팅창 입력 포커스 상태 (외부 키 핸들러에서 접근)
-    bool  chat_cursor_end  = false; // 다음 프레임에 커서를 끝으로 이동 (/ 입력 후 선택 방지)
+    ChatInputCB chat_cb;            // 커서 끝 이동 / 자동완성 적용 상태
+    bool  chat_in_was_active = false; // 직전 프레임 입력칸 활성 (팝업 표시 판정)
     char  chat_input[256] = {};
+    int   chat_cmd_sel     = 0;     // 슬래시 명령 자동완성 선택 인덱스
 
     bool  stat_open    = false;
     int   last_fft_seq = -1;  // CONNECT 모드 FFT 시퀀스 추적
@@ -6414,7 +6532,7 @@ void run_streaming_viewer(){
             if(!chat_open){ chat_open = true; }
             chat_input[0] = '/'; chat_input[1] = '\0';
             chat_focus_input = true;
-            chat_cursor_end  = true;
+            chat_cb.cursor_end = true;
         }
 
         // ── Main window ───────────────────────────────────────────────────
@@ -9290,21 +9408,33 @@ void run_streaming_viewer(){
             ImGui::EndChild();
 
             ImGui::Separator();
-            ImGui::SetNextItemWidth(CW-16.f);
+            bool send_chat_msg=false;
+            // 슬래시 명령 자동완성 목록 (입력칸 위). InputText 보다 먼저 그려야 같은
+            // 프레임 콜백에서 완성 문자열이 적용된다.
+            ImVec2 in_pos_c = ImGui::GetCursorScreenPos();
+            bool chat_in_active = chat_in_was_active || chat_focus_input;
+            const char* chat_fill = draw_chat_cmd_popup(chat_input, chat_cmd_sel,
+                                                        /*early_mode=*/false, in_pos_c, CW-16.f,
+                                                        chat_in_active);
+            // Tab 완성 시 ImGui 기본 nav 가 포커스를 다음 위젯으로 옮기므로 다시 잡아준다.
+            // 포커스 재설정은 buf 로부터 편집버퍼를 다시 초기화하므로 buf 도 같이 갱신.
+            if(chat_fill){
+                snprintf(chat_input, sizeof(chat_input), "%s", chat_fill);
+                chat_cb.fill = chat_fill;
+                chat_cb.cursor_end = true;
+                chat_focus_input = true;
+            }
             // 엔터 또는 외부 포커스 요청 시 InputText 포커스
             if(chat_focus_input){
                 ImGui::SetKeyboardFocusHere(0);
                 chat_focus_input = false;
             }
-            bool send_chat_msg=false;
+            ImGui::SetNextItemWidth(CW-16.f);
             if(ImGui::InputText("##chat_in",chat_input,sizeof(chat_input),
                                ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackAlways,
-                               [](ImGuiInputTextCallbackData* d) -> int {
-                                   bool* flag = (bool*)d->UserData;
-                                   if(*flag){ d->CursorPos = d->BufTextLen; d->SelectionStart = d->SelectionEnd = d->CursorPos; *flag = false; }
-                                   return 0;
-                               }, &chat_cursor_end))
+                               chat_input_callback, &chat_cb))
                 send_chat_msg=true;
+            chat_in_was_active = ImGui::IsItemActive(); // 다음 프레임 팝업 표시 판정
 
             if(send_chat_msg && chat_input[0]){
                 std::string chat_str = chat_input;
