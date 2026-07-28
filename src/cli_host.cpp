@@ -1216,7 +1216,11 @@ void run_cli_host(){
     };
     srv->cb.on_start_rec  = [&](int){ v.start_rec(); };
     srv->cb.on_stop_rec   = [&](){ v.stop_rec(); };
-    srv->cb.on_chat       = [&](const char* from, const char* msg){
+    // 채팅 수신 처리 — 두 경로에서 같이 쓴다.
+    //  ① srv->cb.on_chat        : HOST 에 직접 붙은 JOIN
+    //  ② set_on_central_chat    : Central 릴레이를 거쳐 온 JOIN (평소 운용은 전부 이쪽)
+    // ②를 빼먹으면 Central 경유 채팅이 통째로 버려져 명령이 먹지 않는다.
+    auto chat_handler = [&](const char* from, const char* msg){
         bewe_log_push(0,"[CHAT] %s: %s\n", from, msg);
         // 채팅으로 들어온 /mission 명령 처리 — JOIN 이든 HOST UI 든 동일 경로.
         // 결과는 SYSTEM 이름으로 방송해 모든 참가자가 보게 한다.
@@ -1244,6 +1248,8 @@ void run_cli_host(){
             }
         }
     };
+    srv->cb.on_chat = chat_handler;
+    central_cli.set_on_central_chat(chat_handler);
 
     srv->cb.on_set_fft_size = [&](const char* who, uint32_t size){
         bewe_log_push(0, "[CMD:%s] FFT size > %u\n", who, size);

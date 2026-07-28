@@ -2495,6 +2495,10 @@ static const ChatCmdInfo CHAT_CMDS[] = {
     {"/rx stop",         "Stop SDR capture",      false},
     {"/chassis 1 reset", "Reset SDR hardware",    false},
     {"/chassis 2 reset", "Reset network link",    false},
+    {"/mission start",   "Start mission on HOST", false},
+    {"/mission end",     "End mission on HOST",   false},
+    {"/mission status",  "Show mission state",    false},
+    {"/hist check",      "Verify retained HIST",  false},
     {"/update_tle",      "Update satellite TLEs", true },
     {"/logout",          "Return to login",       true },
     {"/shutdown",        "Exit BEWE",             true },
@@ -5180,7 +5184,14 @@ void run_streaming_viewer(){
                                 };
                                 LongWaterfall::set_live_callbacks(lcb);
                             }
-                            central_cli.set_on_central_chat([_log_mtx, _log](const char* from, const char* msg){
+                            central_cli.set_on_central_chat([_log_mtx, _log, &v](const char* from, const char* msg){
+                                // /명령은 on_chat 이 로그까지 처리하므로 그쪽에 넘긴다.
+                                // (Central 릴레이 채팅은 net_srv->cb.on_chat 이 안 불린다 —
+                                //  그래서 여기서 직접 태워야 /mission·/hist 가 먹는다.)
+                                if(msg[0] == '/' && v.net_srv && v.net_srv->cb.on_chat){
+                                    v.net_srv->cb.on_chat(from, msg);
+                                    return;
+                                }
                                 std::lock_guard<std::mutex> lk(*_log_mtx);
                                 if((int)_log->size() >= 200) _log->erase(_log->begin());
                                 LocalChatMsg m{}; strncpy(m.from,from,31); strncpy(m.msg,msg,255);
