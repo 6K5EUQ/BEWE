@@ -5598,11 +5598,36 @@ void run_streaming_viewer(){
     if(v.net_srv){
         v.net_srv->cb.on_chat = [&](const char* from, const char* msg){
             bewe_log_push(0, "[CHAT] %s: %s\n", from, msg);
-            std::lock_guard<std::mutex> lk(host_chat_mtx);
-            if((int)host_chat_log.size() >= 200) host_chat_log.erase(host_chat_log.begin());
-            LocalChatMsg m{}; strncpy(m.from,from,31); strncpy(m.msg,msg,255);
-            host_chat_log.push_back(m);
-            chat_scroll_bottom = true;
+            {
+                std::lock_guard<std::mutex> lk(host_chat_mtx);
+                if((int)host_chat_log.size() >= 200) host_chat_log.erase(host_chat_log.begin());
+                LocalChatMsg m{}; strncpy(m.from,from,31); strncpy(m.msg,msg,255);
+                host_chat_log.push_back(m);
+                chat_scroll_bottom = true;
+            }
+            // 채팅 /mission 명령 (cli_host 의 handle_mission_cmd 와 같은 동작).
+            // mission_start/end 가 내부에서 broadcast_sync 하므로 전파는 자동.
+            if(strncmp(msg, "/mission", 8) == 0 && (msg[8] == 0 || msg[8] == ' ')){
+                std::string sub(msg + 8);
+                while(!sub.empty() && sub.front() == ' ') sub.erase(sub.begin());
+                char r[256];
+                if(sub.empty() || sub == "status"){
+                    std::lock_guard<std::mutex> lk(v.mission_mtx);
+                    if(v.mission_state == Mission::State::ACTIVE){
+                        long el = (long)(time(nullptr) - v.mission_start_utc);
+                        snprintf(r, sizeof(r), "Mission: ACTIVE %04d/%s by '%s' elapsed=%lds",
+                                 v.mission_year, v.mission_code, v.mission_started_by, el);
+                    } else snprintf(r, sizeof(r), "Mission: IDLE");
+                } else if(sub.rfind("start", 0) == 0){
+                    bool ok = v.mission_start(from ? from : "join", 0, false);
+                    if(ok) snprintf(r, sizeof(r), "Mission started: %04d/%s", v.mission_year, v.mission_code);
+                    else   snprintf(r, sizeof(r), "Mission start failed (already ACTIVE?)");
+                } else if(sub == "end"){
+                    bool ok = v.mission_end();
+                    snprintf(r, sizeof(r), ok ? "Mission ended." : "Mission end failed (none ACTIVE)");
+                } else snprintf(r, sizeof(r), "Usage: /mission [start|end|status]");
+                v.net_srv->broadcast_chat("SYSTEM", r);
+            }
         };
     }
 

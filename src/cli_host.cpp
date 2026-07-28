@@ -633,6 +633,36 @@ static bool read_line_nb(std::string& out){
     return len>0;
 }
 
+// /mission [start|end|status] 공용 처리 — CLI stdin 과 채팅(JOIN/HOST) 양쪽에서 쓴다.
+// who = 미션 시작자로 기록될 이름. reply = 결과 한 줄을 돌려줄 곳(채팅이면 방송, CLI면 로그).
+// mission_start/end 가 내부에서 mission_broadcast_sync() 를 호출하므로 Central·JOIN 전파는 자동.
+static void handle_mission_cmd(FFTViewer& v, const std::string& sub, const char* who,
+                               const std::function<void(const char*)>& reply){
+    char buf[256];
+    if(sub.empty() || sub == "status"){
+        std::lock_guard<std::mutex> lk(v.mission_mtx);
+        if(v.mission_state == Mission::State::ACTIVE){
+            long elapsed = (long)(time(nullptr) - v.mission_start_utc);
+            snprintf(buf, sizeof(buf), "Mission: ACTIVE %04d/%s by '%s' elapsed=%lds",
+                     v.mission_year, v.mission_code, v.mission_started_by, elapsed);
+        } else {
+            snprintf(buf, sizeof(buf), "Mission: IDLE");
+        }
+        reply(buf);
+    } else if(sub.rfind("start", 0) == 0){
+        bool ok = v.mission_start(who ? who : "cli", /*op_index=*/0, /*rollover=*/false);
+        if(ok) snprintf(buf, sizeof(buf), "Mission started: %04d/%s", v.mission_year, v.mission_code);
+        else   snprintf(buf, sizeof(buf), "Mission start failed (already ACTIVE?)");
+        reply(buf);
+    } else if(sub == "end"){
+        bool ok = v.mission_end();
+        snprintf(buf, sizeof(buf), ok ? "Mission ended." : "Mission end failed (none ACTIVE)");
+        reply(buf);
+    } else {
+        reply("Usage: /mission [start|end|status]");
+    }
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 void run_cli_host(){
     // SA_RESTART 없이 등록 → fgets 등 blocking syscall이 Ctrl+C에 EINTR로 중단됨
@@ -1188,6 +1218,16 @@ void run_cli_host(){
     srv->cb.on_stop_rec   = [&](){ v.stop_rec(); };
     srv->cb.on_chat       = [&](const char* from, const char* msg){
         bewe_log_push(0,"[CHAT] %s: %s\n", from, msg);
+        // 채팅으로 들어온 /mission 명령 처리 — JOIN 이든 HOST UI 든 동일 경로.
+        // 결과는 SYSTEM 이름으로 방송해 모든 참가자가 보게 한다.
+        if(strncmp(msg, "/mission", 8) == 0 && (msg[8] == 0 || msg[8] == ' ')){
+            std::string sub(msg + 8);
+            while(!sub.empty() && sub.front() == ' ') sub.erase(sub.begin());
+            handle_mission_cmd(v, sub, from, [&](const char* r){
+                bewe_log_push(0,"[CMD:%s] %s\n", from, r);
+                if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM", r);
+            });
+        }
     };
 
     srv->cb.on_set_fft_size = [&](const char* who, uint32_t size){
@@ -2745,41 +2785,14 @@ void run_cli_host(){
                 fflush(stdout);
             } else if(line.rfind("/mission", 0) == 0){
                 // /mission start [comment]  /  /mission end  /  /mission status
+                // 채팅 경로와 동일한 헬퍼를 쓴다 (동작 어긋남 방지).
                 std::string sub = line.substr(8);
                 while(!sub.empty() && sub.front() == ' ') sub.erase(sub.begin());
-                if(sub == "status" || sub.empty()){
-                    std::lock_guard<std::mutex> lk(v.mission_mtx);
-                    if(v.mission_state == Mission::State::ACTIVE){
-                        time_t now = time(nullptr);
-                        long elapsed = (long)(now - v.mission_start_utc);
-                        bewe_log_push(0,"  Mission: ACTIVE  %04d/%s  started by '%s'  elapsed=%lds\n",
-                                      v.mission_year, v.mission_code, v.mission_started_by, elapsed);
-                    } else {
-                        bewe_log_push(0,"  Mission: IDLE\n");
-                    }
-                } else if(sub.rfind("start", 0) == 0){
-                    // mission_start 가 내부적으로 mission_broadcast_sync 호출
-                    const char* who = login_get_id();
-                    bool ok = v.mission_start(who ? who : "cli", /*op_index=*/0, /*rollover=*/false);
-                    if(ok){
-                        bewe_log_push(0,"[CMD:CLI] Mission started: %04d/%s\n",
-                                      v.mission_year, v.mission_code);
-                        if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM", "Mission started");
-                    } else {
-                        bewe_log_push(0,"  Mission start failed (already ACTIVE? use /mission end)\n");
-                    }
-                } else if(sub == "end"){
-                    // mission_end 도 내부에서 mission_broadcast_sync 호출
-                    bool ok = v.mission_end();
-                    if(ok){
-                        bewe_log_push(0,"[CMD:CLI] Mission ended.\n");
-                        if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM", "Mission ended");
-                    } else {
-                        bewe_log_push(0,"  Mission end failed (none ACTIVE)\n");
-                    }
-                } else {
-                    bewe_log_push(0,"  Usage: /mission [start|end|status]\n");
-                }
+                const char* who = login_get_id();
+                handle_mission_cmd(v, sub, who ? who : "cli", [&](const char* r){
+                    bewe_log_push(0,"  %s\n", r);
+                    if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM", r);
+                });
                 fflush(stdout);
             } else if(line == "/help"){
                 bewe_log_push(0,"Commands:\n");
