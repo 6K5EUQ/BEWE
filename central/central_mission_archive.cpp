@@ -103,6 +103,65 @@ std::deque<std::string>  g_hc_q;      // 압축 대상 파일 절대경로
 std::thread              g_hc_thr;
 std::atomic<bool>        g_hc_running{false};
 
+// v4(블록 zstd + col-delta) → raw v3 로 되돌린다. compress_hist_file 의 정확한 역변환.
+// 병합 때만 쓴다 — 압축본 중간에 행을 끼워 넣을 수 없으므로, 앞부분을 일단 풀어야 한다.
+static bool decompress_hist_file(const std::string& src, const std::string& dst){
+    FILE* in = fopen(src.c_str(), "rb");
+    if(!in) return false;
+    LongWaterfall::FileHeader h{};
+    if(fread(&h, 1, sizeof(h), in) != sizeof(h) ||
+       memcmp(h.magic, "BWWF", 4) != 0 ||
+       h.version != LongWaterfall::FILE_VERSION_ZSTD ||
+       h.fft_size == 0){
+        fclose(in); return false;
+    }
+    const LongWaterfall::V4Ext ext = LongWaterfall::v4ext(h);
+    if(ext.codec != LongWaterfall::HIST_CODEC_ZSTD || ext.num_blocks == 0 ||
+       ext.block_rows == 0 || ext.index_offset == 0){
+        fclose(in); return false;
+    }
+    const uint32_t fft_size = h.fft_size;
+    const bool col_delta = (ext.flags & LongWaterfall::HIST_V4_FLAG_COL_DELTA) != 0;
+
+    std::vector<LongWaterfall::HistBlockIndex> index(ext.num_blocks);
+    if(fseeko(in, (off_t)ext.index_offset, SEEK_SET) != 0 ||
+       fread(index.data(), sizeof(LongWaterfall::HistBlockIndex), ext.num_blocks, in)
+         != ext.num_blocks){
+        fclose(in); return false;
+    }
+
+    FILE* out = fopen(dst.c_str(), "wb");
+    if(!out){ fclose(in); return false; }
+    LongWaterfall::FileHeader oh = h;
+    oh.version = LongWaterfall::FILE_VERSION;
+    memset(oh.reserved_v3, 0, sizeof(oh.reserved_v3));
+    bool ok = (fwrite(&oh, 1, sizeof(oh), out) == sizeof(oh));
+
+    std::vector<uint8_t> comp, raw((size_t)ext.block_rows * fft_size);
+    for(uint32_t b = 0; b < ext.num_blocks && ok; b++){
+        const auto& e = index[b];
+        if(e.raw_rows == 0 || e.raw_rows > ext.block_rows){ ok = false; break; }
+        const size_t want = (size_t)e.raw_rows * fft_size;
+        comp.resize(e.comp_len);
+        if(fseeko(in, (off_t)e.frame_offset, SEEK_SET) != 0 ||
+           fread(comp.data(), 1, e.comp_len, in) != e.comp_len){ ok = false; break; }
+        const size_t d = ZSTD_decompress(raw.data(), raw.size(), comp.data(), e.comp_len);
+        if(ZSTD_isError(d) || d != want){ ok = false; break; }
+        if(col_delta){
+            for(uint32_t rr = 0; rr < e.raw_rows; rr++){
+                uint8_t* r = raw.data() + (size_t)rr * fft_size;
+                uint8_t acc = 0;
+                for(uint32_t i = 0; i < fft_size; i++){ acc = (uint8_t)(acc + r[i]); r[i] = acc; }
+            }
+        }
+        if(fwrite(raw.data(), 1, want, out) != want){ ok = false; break; }
+    }
+    fclose(in);
+    fflush(out); fclose(out);
+    if(!ok){ unlink(dst.c_str()); return false; }
+    return true;
+}
+
 // raw v3 .bewehist → v4 (블록 zstd + index). 성공 시 원자적 rename-over.
 bool compress_hist_file(const std::string& path){
     FILE* in = fopen(path.c_str(), "rb");
@@ -407,7 +466,14 @@ void CentralServer::handle_mission_file_push_data(std::shared_ptr<HostRoom> room
         printf("[Central][Archive] PUSH_DATA last xfer=%u written=%lu disk=%lu → ACK\n",
                d->transfer_id, (unsigned long)xf.written_bytes, (unsigned long)disk_bytes);
         send_push_ack(room, xf.key, d->transfer_id, 0, disk_bytes, "");
+        // HIST 복구 세그먼트면 바로 앞 파일과 이어붙여 한 파일로 되돌린다.
+        // (ACK 뒤에 한다 — 병합이 실패해도 HOST 는 업로드 성공으로 알고, 그 조각은
+        //  독립 파일로 남아 데이터는 보존된다.)
+        const bool is_hist = (xf.key.subdir == MFS_HIST);
+        const std::string merged_src = xf.archive_path;
         room->mission_xfers.erase(it);
+        if(is_hist && !merged_src.empty()) merge_hist_segment(merged_src);
+        return;
     }
 }
 
@@ -1325,4 +1391,159 @@ void CentralServer::handle_hist_stat_req(std::shared_ptr<HostRoom> room,
     auto pkt = make_bewe_packet(BEWE_TYPE_HIST_STAT, &rep, (uint32_t)sizeof(rep));
     enqueue_host_send(room, 0xFFFF, CentralMuxType::DATA,
                       pkt.data(), (uint32_t)pkt.size());
+}
+
+// ── 복구 세그먼트 병합 (v13.13.2) ────────────────────────────────────────
+// HOST 가 빠진 꼬리를 별개 파일로 올리면 한 시간이 두 파일로 갈라져 보인다.
+// 그래서 조각이 도착하면 바로 앞 파일과 이어붙여 하나(0100-0200)로 되돌린다.
+//
+// 압축본 중간에 행을 못 끼우므로, 앞 파일이 v4 면 일단 raw 로 푼 뒤 조각을 붙이고
+// 다시 압축한다. 병합이 성립하려면 두 파일의 눈금이 완전히 같아야 한다 —
+// 양자화 범위(db_min/max)나 행레이트가 다르면 이어붙인 뒤 어느 쪽으로 역산해도
+// 절반이 틀린다. 하나라도 어긋나면 병합하지 않고 두 파일로 둔다 (안전 측).
+static bool hist_geom_match(const LongWaterfall::FileHeader& a,
+                            const LongWaterfall::FileHeader& b){
+    return a.fft_size        == b.fft_size
+        && a.fft_input_size  == b.fft_input_size
+        && a.sample_rate_hz  == b.sample_rate_hz
+        && a.center_freq_hz  == b.center_freq_hz
+        && fabsf(a.row_rate_hz - b.row_rate_hz) < 0.01f
+        && fabsf(a.db_min     - b.db_min)       < 0.01f
+        && fabsf(a.db_max     - b.db_max)       < 0.01f;
+}
+
+static bool hist_read_header(const std::string& p, LongWaterfall::FileHeader& h,
+                             uint64_t& rows){
+    FILE* f = fopen(p.c_str(), "rb");
+    if(!f) return false;
+    if(fread(&h, 1, sizeof(h), f) != sizeof(h) || memcmp(h.magic, "BWWF", 4) != 0){
+        fclose(f); return false;
+    }
+    fclose(f);
+    struct stat st{};
+    if(stat(p.c_str(), &st) != 0) return false;
+    if(h.version == LongWaterfall::FILE_VERSION_ZSTD){
+        rows = LongWaterfall::v4ext(h).num_rows;
+    } else if(h.version == LongWaterfall::FILE_VERSION){
+        uint32_t w = h.fft_size ? h.fft_size : h.fft_input_size;
+        if(!w) return false;
+        rows = ((uint64_t)st.st_size - sizeof(h)) / w;
+    } else return false;
+    return rows > 0;
+}
+
+void CentralServer::merge_hist_segment(const std::string& seg_path){
+    LongWaterfall::FileHeader sh{}; uint64_t srows = 0;
+    if(!hist_read_header(seg_path, sh, srows)) return;
+    if(sh.version != LongWaterfall::FILE_VERSION) return;   // 조각은 raw 로 온다
+
+    auto slash = seg_path.find_last_of('/');
+    if(slash == std::string::npos) return;
+    const std::string dir = seg_path.substr(0, slash);
+
+    // 조각 바로 앞에서 끝나는 파일 찾기 (행수 기준 시각으로 판정)
+    std::string best; LongWaterfall::FileHeader bh{}; uint64_t brows = 0;
+    DIR* d = opendir(dir.c_str());
+    if(!d) return;
+    while(struct dirent* e = readdir(d)){
+        const char* n = e->d_name;
+        if(n[0] == '.') continue;
+        const char* dot = strrchr(n, '.');
+        if(!dot || strcmp(dot, ".bewehist") != 0) continue;
+        if(strstr(n, "-LIVE.bewehist")) continue;
+        std::string p = dir + "/" + n;
+        if(p == seg_path) continue;
+        LongWaterfall::FileHeader h{}; uint64_t rows = 0;
+        if(!hist_read_header(p, h, rows)) continue;
+        if(!hist_geom_match(h, sh)) continue;
+        if(h.start_utc_unix >= sh.start_utc_unix) continue;
+        // 이 파일이 끝나는 시각 == 조각이 시작하는 시각 이어야 한다.
+        const float rr = (h.row_rate_hz > 0.5f) ? h.row_rate_hz : 5.0f;
+        const int64_t end_utc = (int64_t)h.start_utc_unix + (int64_t)(rows / rr);
+        const int64_t gap = (int64_t)sh.start_utc_unix - end_utc;
+        if(gap < -2 || gap > 2) continue;          // 겹치거나 벌어지면 병합 불가
+        if(best.empty() || h.start_utc_unix > bh.start_utc_unix){
+            best = p; bh = h; brows = rows;
+        }
+    }
+    closedir(d);
+    if(best.empty()) return;
+
+    // 앞 파일을 raw 로 확보 (v4 면 해제)
+    const std::string tmp = dir + "/.merge.tmp";
+    unlink(tmp.c_str());
+    bool have_raw = false;
+    if(bh.version == LongWaterfall::FILE_VERSION_ZSTD){
+        have_raw = decompress_hist_file(best, tmp);
+    } else {
+        FILE* i = fopen(best.c_str(), "rb"); FILE* o = fopen(tmp.c_str(), "wb");
+        if(i && o){
+            std::vector<uint8_t> b(1<<20); size_t r;
+            have_raw = true;
+            while((r = fread(b.data(), 1, b.size(), i)) > 0)
+                if(fwrite(b.data(), 1, r, o) != r){ have_raw = false; break; }
+        }
+        if(i) fclose(i);
+        if(o) fclose(o);
+    }
+    if(!have_raw){
+        unlink(tmp.c_str());
+        printf("[Central][Archive] HIST merge: %s 준비 실패 — 두 파일 유지\n", best.c_str());
+        return;
+    }
+
+    // 조각 body 를 뒤에 붙인다 (헤더 128B 건너뛰고)
+    const uint32_t w = sh.fft_size ? sh.fft_size : sh.fft_input_size;
+    bool ok = false;
+    { FILE* o = fopen(tmp.c_str(), "ab");
+      FILE* i = fopen(seg_path.c_str(), "rb");
+      if(o && i && fseeko(i, (off_t)sizeof(sh), SEEK_SET) == 0){
+          std::vector<uint8_t> b(1<<20); size_t r; ok = true;
+          uint64_t remain = srows * w;
+          while(remain > 0){
+              size_t want = (size_t)std::min<uint64_t>(remain, b.size());
+              r = fread(b.data(), 1, want, i);
+              if(r == 0){ ok = false; break; }
+              if(fwrite(b.data(), 1, r, o) != r){ ok = false; break; }
+              remain -= r;
+          }
+      }
+      if(o) fclose(o);
+      if(i) fclose(i);
+    }
+    if(!ok){ unlink(tmp.c_str());
+             printf("[Central][Archive] HIST merge append 실패 — 두 파일 유지\n"); return; }
+
+    // 최종 이름 = 앞 파일의 시작 ~ 합쳐진 끝 (예: ..._0100-0200.bewehist)
+    const uint64_t total_rows = brows + srows;
+    const float rr = (bh.row_rate_hz > 0.5f) ? bh.row_rate_hz : 5.0f;
+    const uint64_t end_utc = bh.start_utc_unix + (uint64_t)(total_rows / rr);
+    std::string bbase = best.substr(best.find_last_of('/')+1);
+    // "-HHMM.bewehist" 꼬리를 새 끝시각으로 교체
+    std::string merged_name = bbase;
+    {
+        auto p2 = bbase.rfind('-');
+        if(p2 != std::string::npos && bbase.size() >= p2 + 5){
+            struct tm tmx; KST::to_tm((time_t)end_utc, tmx);
+            char tail[24];
+            snprintf(tail, sizeof(tail), "-%02d%02d.bewehist", tmx.tm_hour, tmx.tm_min);
+            merged_name = bbase.substr(0, p2) + tail;
+        }
+    }
+    std::string merged = dir + "/" + merged_name;
+
+    if(rename(tmp.c_str(), merged.c_str()) != 0){
+        unlink(tmp.c_str());
+        printf("[Central][Archive] HIST merge rename 실패 errno=%d — 두 파일 유지\n", errno);
+        return;
+    }
+    // 원본 두 개 제거 (병합본이 같은 이름이면 이미 대체된 것)
+    if(best != merged)     unlink(best.c_str());
+    if(seg_path != merged) unlink(seg_path.c_str());
+
+    printf("[Central][Archive] HIST merge OK: %llu + %llu = %llu rows -> %s\n",
+           (unsigned long long)brows, (unsigned long long)srows,
+           (unsigned long long)total_rows, merged_name.c_str());
+
+    if(getenv("BEWE_HIST_COMPRESS")) hist_compress_enqueue(merged);
 }

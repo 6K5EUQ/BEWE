@@ -486,6 +486,8 @@ private:
     // 파일명이 아니라 헤더 start_utc 로 찾는다 (Central 이름이 다를 수 있음).
     void handle_hist_stat_req(std::shared_ptr<HostRoom> room,
                               const uint8_t* payload, size_t plen);
+    // v13.13.2 — 복구 세그먼트가 도착하면 바로 앞 파일과 이어붙여 한 파일로 되돌린다.
+    void merge_hist_segment(const std::string& seg_path);
     // v13.4.1 — missions.json 저장 키: blob 의 station_name (로그인 ID 무관).
     std::string mission_sync_station_key(std::shared_ptr<HostRoom> room,
                                          const uint8_t* bewe_pkt, size_t bewe_len);
