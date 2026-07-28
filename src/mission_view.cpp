@@ -1424,6 +1424,63 @@ static void local_context_menu(FFTViewer& v, NetClient* cli,
     (void)v;
 }
 
+// 파일명에서 "녹화 시각" 정렬키를 뽑는다 (날짜*10000 + HHMM).
+// mtime 으로 정렬하면 /hist check 복구가 과거 구간 파일을 새로 쓰면서 mtime 이
+// 현재 시각이 되어 목록이 뒤섞인다 (2026-07-28: 16시 파일이 22시 파일 위로 올라옴).
+// 운용자가 찾는 건 "언제 녹화됐나" 이므로 파일명 시각으로 정렬한다.
+//
+//   HIST : <station>_<Code><DD>_<Mon><DD>.<year>_<F.F>MHz_<HHMM>-<HHMM|LIVE>.bewehist
+//   IQ/DE: <station>_<prefix>_<code>_<year>_<freq>MHz_<HHMMSS>[-<HHMMSS>].<ext>
+//
+// 파싱 실패 시 0 을 돌려 호출측이 mtime 폴백을 쓰게 한다.
+static uint64_t file_time_key(const char* fn){
+    if(!fn || !*fn) return 0;
+    std::string s(fn);
+
+    // ── HIST: "_<HHMM>-<HHMM|LIVE>.bewehist" + "_<Mon><DD>.<year>_" 날짜 ──
+    if(s.size() >= 9 && s.compare(s.size()-9, 9, ".bewehist") == 0){
+        // 끝에서 "_HHMM-HHMM.bewehist" / "_HHMM-LIVE.bewehist" 의 시작 HHMM 을 찾는다.
+        size_t dash = s.rfind('-');
+        if(dash == std::string::npos || dash < 4) return 0;
+        size_t us = s.rfind('_', dash);
+        if(us == std::string::npos || dash - us != 5) return 0;
+        int hh = 0, mm = 0;
+        if(sscanf(s.c_str() + us + 1, "%2d%2d", &hh, &mm) != 2) return 0;
+
+        // 날짜: "_<Mon><DD>.<year>_" (예: _Jul28.2026_)
+        int day = 0, year = 0; char mon[4] = {};
+        uint64_t datek = 0;
+        size_t dot = s.find('.');
+        if(dot != std::string::npos && dot >= 5){
+            size_t dus = s.rfind('_', dot);
+            if(dus != std::string::npos &&
+               sscanf(s.c_str() + dus + 1, "%3s%2d.%4d", mon, &day, &year) == 3){
+                static const char* MON[12] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                              "Jul","Aug","Sep","Oct","Nov","Dec"};
+                int mi = 0;
+                for(int i = 0; i < 12; i++) if(strncmp(mon, MON[i], 3) == 0){ mi = i + 1; break; }
+                if(mi) datek = (uint64_t)year * 10000 + (uint64_t)mi * 100 + (uint64_t)day;
+            }
+        }
+        return datek * 10000ull + (uint64_t)(hh * 100 + mm);
+    }
+
+    // ── IQ / DEMOD: 끝쪽 "_<HHMMSS>" (뒤에 "-<HHMMSS>" 가 붙기도 함) ──
+    {
+        size_t dot = s.rfind('.');
+        std::string stem = (dot == std::string::npos) ? s : s.substr(0, dot);
+        size_t dash = stem.rfind('-');
+        if(dash != std::string::npos) stem = stem.substr(0, dash);   // 끝시각 제거
+        size_t us = stem.rfind('_');
+        if(us == std::string::npos || stem.size() - us - 1 != 6) return 0;
+        int hh = 0, mm = 0, ss = 0;
+        if(sscanf(stem.c_str() + us + 1, "%2d%2d%2d", &hh, &mm, &ss) != 3) return 0;
+        // 날짜는 포맷이 갈려(년도만 / MonDD_YYYY) 신뢰하기 어렵다.
+        // 같은 미션 폴더 안에서만 비교하므로 시각만으로 충분하다.
+        return (uint64_t)(hh * 10000 + mm * 100 + ss);
+    }
+}
+
 static void draw_central_list(FFTViewer& v, NetClient* cli, uint8_t subdir){
     g_active_tab_kind  = SelKind::CENTRAL;
     g_active_tab_scope = (int)subdir;
@@ -1442,10 +1499,18 @@ static void draw_central_list(FFTViewer& v, NetClient* cli, uint8_t subdir){
             rows.push_back(r);
         }
     }
-    // 최신순 정렬 (mtime DESC) — 주파수 무관, 최신 파일이 위로.
+    // 녹화 시각 최신순 (파일명 기준 DESC) — 주파수 무관, 최근 구간이 위로.
+    // mtime 이 아니라 파일명 시각을 쓴다: /hist check 복구가 과거 구간 파일을
+    // 새로 쓰면 mtime 이 현재 시각이 되어 목록이 뒤섞이기 때문 (file_time_key 주석 참조).
+    // 파일명 파싱이 안 되는 파일만 mtime 으로 비교한다.
     std::sort(rows.begin(), rows.end(),
         [](const CentralFileRow& a, const CentralFileRow& b){
-            return a.mtime_unix > b.mtime_unix;
+            uint64_t ka = file_time_key(a.filename), kb = file_time_key(b.filename);
+            if(ka && kb && ka != kb) return ka > kb;
+            if(ka && !kb) return true;      // 파싱된 쪽을 위로
+            if(!ka && kb) return false;
+            if(a.mtime_unix != b.mtime_unix) return a.mtime_unix > b.mtime_unix;
+            return strcmp(a.filename, b.filename) > 0;   // 완전 동률 → 안정적 순서
         });
     ImGui::TextDisabled("Central: %s/%04d/%s/%s",
         g_cf_req_station, g_sel_year, g_sel_code.c_str(), subdir_label(subdir));
