@@ -764,6 +764,30 @@ void CentralServer::handle_mission_sync_req(std::shared_ptr<HostRoom> room,
                 push_hist(s->active);
         }
 
+        // ACTIVE 후보가 실제로는 이미 끝난 미션일 수 있다. 한 station 이 host_name 을
+        // 바꿔 접속하면 blob 키가 새로 생기는데, 옛 키의 blob 은 그 뒤로 갱신되지 않아
+        // state=1 인 채 영원히 남는다. 그래서 기지에서 미션을 끝내도 원격 조회는 옛
+        // blob 을 집어 ACTIVE 로 오판했다 (HIST LIVE 는 없는데 ACTIVE 로 보이던 증상).
+        // → 같은 (year, code, start_utc) 가 종료 기록으로도 존재하면 ACTIVE 를 취소한다.
+        if(have_active){
+            for(const auto& h : hist){
+                if(h.year == out.sync.active.year &&
+                   strncmp(h.code, out.sync.active.code, sizeof(h.code)) == 0 &&
+                   h.start_utc == out.sync.active.start_utc &&
+                   h.end_utc != 0){
+                    printf("[Central][Mission] '%s' %04d/%s start=%llu — stale ACTIVE blob "
+                           "(ended at %llu), treating as IDLE\n",
+                           st, h.year, h.code,
+                           (unsigned long long)h.start_utc,
+                           (unsigned long long)h.end_utc);
+                    out.sync.active = MissionSyncEntry{};
+                    out.sync.active_valid = 0;
+                    have_active = false;
+                    break;
+                }
+            }
+        }
+
         std::sort(hist.begin(), hist.end(),
                   [](const MissionSyncEntry& a, const MissionSyncEntry& b){
                       return a.start_utc > b.start_utc;
