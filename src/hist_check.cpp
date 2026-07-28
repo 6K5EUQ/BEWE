@@ -345,20 +345,41 @@ void on_hist_stat(const uint8_t* bewe_pkt, size_t len){
 }
 
 void notify_finalized(const std::string& path){
+    // 자동으로 대조·업로드하지 않는다. 정각마다 조각을 올리면 업링크가 좁은 기지
+    // (DGS-X 는 드론 탑재라 상행 대역이 빠듯하다)에서 FFT 실시간 스트림과 경쟁한다.
+    // 여기서는 보존됐다는 사실과 누적량만 로컬에 남기고, 실제 대조·업로드는
+    // 운용자가 /hist check 를 칠 때만 한다.
     if(!g_running.load()) return;
     auto slash = path.find_last_of('/');
     if(slash == std::string::npos) return;
-    std::string dir = path.substr(0, slash);
-    std::lock_guard<std::mutex> lk(g_q_mtx);
-    for(const auto& q : g_queue) if(q == dir) return;   // 같은 dir 중복 큐잉 방지
-    g_queue.push_back(dir);
-    g_q_cv.notify_one();
+    const std::string dir = path.substr(0, slash);
+
+    uint64_t total = 0; int n = 0;
+    if(DIR* d = opendir(dir.c_str())){
+        while(struct dirent* e = readdir(d)){
+            const char* nm = e->d_name;
+            if(nm[0] == '.') continue;
+            const char* dot = strrchr(nm, '.');
+            if(!dot || strcmp(dot, ".bewehist") != 0) continue;
+            if(strstr(nm, "-LIVE.bewehist")) continue;
+            struct stat st{};
+            if(stat((dir + "/" + nm).c_str(), &st) != 0) continue;
+            total += (uint64_t)st.st_size; n++;
+        }
+        closedir(d);
+    }
+    double gb = (double)total / (1024.0*1024.0*1024.0);
+    bewe_log_push(gb >= RETAIN_WARN_GB ? 1 : 0,
+                  "[HIST] retained %s — 미검증 %d개 %.2fGB. 복구하려면 /hist check%s\n",
+                  path.substr(slash+1).c_str(), n, gb,
+                  gb >= RETAIN_WARN_GB ? " (용량 주의)" : "");
 }
 
 void run_command(const char* args){
-    // "/hist check [station] [code]" — 인자는 현재 무시하고 활성 미션 dir 을 대조한다.
-    // (station 은 자기 기지 것만 로컬에 있으므로 실질 의미가 없다.)
+    // 접속(로그인)한 기지의 활성 미션 dir 만 대상으로 한다. 다른 기지 아카이브는
+    // 애초에 여기 로컬에 없고, Central 도 요청한 룸의 기지 것만 답한다.
     (void)args;
+    if(!g_running.load()){ printf("[HIST] worker 미가동\n"); return; }
     if(!g_v){ printf("[HIST] viewer 없음\n"); return; }
     std::string dir = g_v->active_hist_dir();
     if(dir.empty()){
@@ -370,9 +391,20 @@ void run_command(const char* args){
         printf("[HIST] 미션 경로 파싱 실패: %s\n", dir.c_str());
         return;
     }
-    printf("[HIST] check %04d/%s — %s\n", year, code.c_str(), dir.c_str());
-    int n = check_dir(dir, year, code, /*log=*/false);
-    if(n == 0) printf("[HIST] 보존된 파일 없음 (전부 Central 도달 증명됨)\n");
+    if(!g_cli || !g_cli->is_central_connected()){
+        printf("[HIST] Central 미연결 — 나중에 다시 시도하십시오\n");
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_q_mtx);
+        for(const auto& q : g_queue)
+            if(q == dir){ printf("[HIST] 이미 진행 중입니다\n"); return; }
+        g_queue.push_back(dir);
+    }
+    g_q_cv.notify_one();
+    // 파일당 최대 8초(Central 응답 대기) 걸리므로 stdin 을 잡고 있지 않는다.
+    // 결과는 워커가 로그로 출력한다.
+    printf("[HIST] check %04d/%s 시작 — 결과는 로그에 출력됩니다\n", year, code.c_str());
 }
 
 } // namespace HistCheck

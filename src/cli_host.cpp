@@ -1228,6 +1228,21 @@ void run_cli_host(){
                 if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM", r);
             });
         }
+        // "/hist check" — JOIN 이나 HOST UI 에서도 칠 수 있게 한다. 대상은 언제나
+        // 이 기지(명령을 받은 HOST)의 로컬 HIST 뿐이다. 남의 기지 것은 애초에 여기
+        // 없고 Central 도 요청한 룸의 기지 것만 답한다.
+        else if(strncmp(msg, "/hist", 5) == 0 && (msg[5] == 0 || msg[5] == ' ')){
+            std::string sub(msg + 5);
+            while(!sub.empty() && sub.front() == ' ') sub.erase(sub.begin());
+            if(sub.rfind("check", 0) == 0){
+                bewe_log_push(0,"[CMD:%s] /hist check\n", from);
+                HistCheck::run_command(sub.c_str() + 5);
+                if(v.net_srv)
+                    v.net_srv->broadcast_chat("SYSTEM", "HIST check started (see host log)");
+            } else if(v.net_srv){
+                v.net_srv->broadcast_chat("SYSTEM", "Usage: /hist check");
+            }
+        }
     };
 
     srv->cb.on_set_fft_size = [&](const char* who, uint32_t size){

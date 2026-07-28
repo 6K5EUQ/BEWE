@@ -1330,11 +1330,18 @@ void CentralServer::handle_hist_stat_req(std::shared_ptr<HostRoom> room,
     if(plen < sizeof(PktHistStatReq)) return;
     const auto* q = reinterpret_cast<const PktHistStatReq*>(payload);
 
-    char station[65]={}; memcpy(station, q->station, 64);
+    // 조회 대상 기지는 요청 payload 가 아니라 "이 룸의 기지" 로 고정한다.
+    // payload 의 station 을 그대로 믿으면 한 HOST 가 남의 기지 아카이브를 들여다볼 수
+    // 있고(HOST 디스패치 경로엔 패킷별 권한 검사가 없다), 운용상으로도 자기가 접속한
+    // 기지 것만 대조하면 된다.
+    char station[65]={};
+    snprintf(station, sizeof(station), "%s",
+             room->active_mission_valid ? room->active_mission_station
+                                        : room->station_id.c_str());
     char code[9]={};     memcpy(code, q->code, 8);
 
     PktHistStat rep{};
-    memcpy(rep.station, q->station, sizeof(rep.station));
+    snprintf(rep.station, sizeof(rep.station), "%s", station);
     rep.year           = q->year;
     memcpy(rep.code, q->code, sizeof(rep.code));
     rep.start_utc_unix = q->start_utc_unix;
