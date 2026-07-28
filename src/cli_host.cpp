@@ -652,7 +652,7 @@ static void handle_mission_cmd(FFTViewer& v, const std::string& sub, const char*
     } else if(sub.rfind("start", 0) == 0){
         bool ok = v.mission_start(who ? who : "cli", /*op_index=*/0, /*rollover=*/false);
         if(ok) snprintf(buf, sizeof(buf), "Mission started: %04d/%s", v.mission_year, v.mission_code);
-        else   snprintf(buf, sizeof(buf), "Mission start failed (already ACTIVE?)");
+        else   snprintf(buf, sizeof(buf), "Mission already ACTIVE: %04d/%s", v.mission_year, v.mission_code);
         reply(buf);
     } else if(sub == "end"){
         bool ok = v.mission_end();
@@ -1221,6 +1221,21 @@ void run_cli_host(){
     //  ② set_on_central_chat    : Central 릴레이를 거쳐 온 JOIN (평소 운용은 전부 이쪽)
     // ②를 빼먹으면 Central 경유 채팅이 통째로 버려져 명령이 먹지 않는다.
     auto chat_handler = [&](const char* from, const char* msg){
+        // 같은 한 줄이 ①②로 두 번 들어온다 — Central 이 소스 룸 HOST 에 포워드하면서
+        // 전역 방송에도 실어 보내기 때문이다. 여기서 걸러내지 않으면 명령이 두 번
+        // 실행되고(/hist check 가 2회 대조) 응답도 두 번 방송된다.
+        // 같은 (from,msg) 가 1초 안에 또 오면 릴레이 중복으로 본다. 사람이 같은 줄을
+        // 1초 안에 두 번 치는 경우는 실질적으로 없고, 있어도 잃는 건 채팅 한 줄이다.
+        {
+            static std::mutex dup_mtx;
+            static std::string last_key;
+            static std::chrono::steady_clock::time_point last_t{};
+            std::string key = std::string(from ? from : "") + "\x01" + (msg ? msg : "");
+            auto now = std::chrono::steady_clock::now();
+            std::lock_guard<std::mutex> lk(dup_mtx);
+            if(key == last_key && now - last_t < std::chrono::seconds(1)) return;
+            last_key = key; last_t = now;
+        }
         bewe_log_push(0,"[CHAT] %s: %s\n", from, msg);
         // 채팅으로 들어온 /mission 명령 처리 — JOIN 이든 HOST UI 든 동일 경로.
         // 결과는 SYSTEM 이름으로 방송해 모든 참가자가 보게 한다.
@@ -1240,9 +1255,9 @@ void run_cli_host(){
             while(!sub.empty() && sub.front() == ' ') sub.erase(sub.begin());
             if(sub.rfind("check", 0) == 0){
                 bewe_log_push(0,"[CMD:%s] /hist check\n", from);
+                // 결과는 대조가 끝난 뒤 HistCheck 워커가 직접 방송한다 (Fix/Del 줄).
+                // 여기서 "started" 를 또 쏘면 채팅이 두 배로 시끄럽다.
                 HistCheck::run_command(sub.c_str() + 5);
-                if(v.net_srv)
-                    v.net_srv->broadcast_chat("SYSTEM", "HIST check started (see host log)");
             } else if(v.net_srv){
                 v.net_srv->broadcast_chat("SYSTEM", "Usage: /hist check");
             }

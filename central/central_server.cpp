@@ -1611,8 +1611,10 @@ bool CentralServer::intercept_join_cmd(std::shared_ptr<JoinEntry> je,
     }
 
     // ── CHAT: 전역 브로드캐스트 (모든 방 JOIN + 다른 방 HOST) ────────
+    // 보낸 JOIN 본인은 뺀다 — 소스 방 HOST 가 이 줄을 그대로 재방송하므로, 여기서도
+    // 보내면 자기가 친 한 줄이 화면에 두 번 뜬다.
     if(bewe_type == BEWE_TYPE_CHAT){
-        broadcast_global_chat(bewe_pkt, bewe_len, room.get());
+        broadcast_global_chat(bewe_pkt, bewe_len, room.get(), je.get());
         return false;  // 소스 방 HOST에도 포워드
     }
 
@@ -2604,7 +2606,7 @@ void CentralServer::watchdog_loop(){
 
 // ── 전역 채팅 브로드캐스트 ───────────────────────────────────────────────
 void CentralServer::broadcast_global_chat(const uint8_t* bewe_pkt, size_t bewe_len,
-                                          HostRoom* skip_host_room){
+                                          HostRoom* skip_host_room, JoinEntry* skip_join){
     struct Target {
         std::shared_ptr<HostRoom> room;
         bool send_to_host;
@@ -2621,7 +2623,7 @@ void CentralServer::broadcast_global_chat(const uint8_t* bewe_pkt, size_t bewe_l
             {
                 std::lock_guard<std::mutex> jlk(room->joins_mtx);
                 for(auto& je : room->joins)
-                    if(je->alive.load() && je->authed && je->fd >= 0)
+                    if(je->alive.load() && je->authed && je->fd >= 0 && je.get() != skip_join)
                         t.joins.push_back(je);
             }
             targets.push_back(std::move(t));

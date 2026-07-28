@@ -3,6 +3,7 @@
 #include "central_client.hpp"
 #include "long_waterfall.hpp"
 #include "mission_push.hpp"
+#include "net_server.hpp"
 #include "net_protocol.hpp"
 #include "bewe_paths.hpp"
 
@@ -186,16 +187,44 @@ bool export_segment(const std::string& src, const LocalInfo& li,
     return true;
 }
 
-// 파일 하나 대조. 반환: 로그용 한 줄.
-std::string check_one(const std::string& path, int year, const std::string& code){
+// 파일 하나 대조의 결과. msg 는 상세 로그용 한 줄, report 는 채팅 보고용 한 줄
+// ("Fix : ..." / "Del : ...", 보고할 게 없으면 빈 문자열).
+struct OneResult {
+    std::string msg;
+    std::string report;
+    bool        uploaded = false;   // 이번에 업로드를 걸었나 (2-pass 재대조 대상)
+};
+
+// 채팅 보고 한 줄. ASCII 만 쓴다 — CLI/JOIN 글꼴이 한글 기호를 '?' 로 깨뜨린다.
+// 형식: "Fix : DGS-3 G26 0200-0300" / "Del : DGS-3 G26 0200-0239"
+std::string report_line(const char* verb, const char* station,
+                        const std::string& code, const std::string& base){
+    // 파일명 꼬리의 "_HHMM-HHMM.bewehist" 에서 시각 구간만 뽑는다.
+    std::string span;
+    auto dot = base.rfind(".bewehist");
+    auto us  = base.rfind('_');
+    if(dot != std::string::npos && us != std::string::npos && us < dot)
+        span = base.substr(us + 1, dot - us - 1);
+    else
+        span = base;
+    char b[256];
+    snprintf(b, sizeof(b), "%s : %s %s %s", verb, station, code.c_str(), span.c_str());
+    return b;
+}
+
+// 파일 하나 대조.
+OneResult check_one(const std::string& path, int year, const std::string& code){
+    OneResult r;
     LocalInfo li;
-    if(!read_local(path, li)) return path + ": (헤더 불량/빈 파일 — 건너뜀)";
+    if(!read_local(path, li)){ r.msg = path + ": (헤더 불량/빈 파일 — 건너뜀)"; return r; }
 
     char station[33]={}; memcpy(station, li.h.station_name, 32);
 
     PktHistStat st{};
-    if(!query_central(station, year, code.c_str(), li.h.start_utc_unix, st))
-        return path + ": Central 무응답 — 보존";
+    if(!query_central(station, year, code.c_str(), li.h.start_utc_unix, st)){
+        r.msg = path + ": Central 무응답 — 보존";
+        return r;
+    }
 
     auto base = path.substr(path.find_last_of('/')+1);
     char buf[512];
@@ -205,7 +234,10 @@ std::string check_one(const std::string& path, int year, const std::string& code
         MissionPush::enqueue(path, MFS_HIST);
         snprintf(buf, sizeof(buf), "%s: Central 에 없음 → 통파일 업로드 (%llu행)",
                  base.c_str(), (unsigned long long)li.rows);
-        return buf;
+        r.msg = buf;
+        r.report = report_line("Fix", station, code, base);
+        r.uploaded = true;
+        return r;
     }
     const uint64_t crows = st.num_rows;   // packed 필드 → 로컬 복사 (참조 바인딩 불가)
     if(crows >= li.rows){
@@ -214,23 +246,27 @@ std::string check_one(const std::string& path, int year, const std::string& code
         snprintf(buf, sizeof(buf), "%s: OK (Central %llu >= 로컬 %llu행) → 로컬 삭제",
                  base.c_str(), (unsigned long long)crows,
                  (unsigned long long)li.rows);
-        return buf;
+        r.msg = buf;
+        r.report = report_line("Del", station, code, base);
+        return r;
     }
 
-    // 빠진 꼬리만 떼어 올린다. 원본은 다음 대조에서 커버가 증명될 때 지운다 —
-    // 세그먼트 ACK 하나만 보고 지우면 업로드가 실패했을 때 유일본이 사라진다.
+    // 빠진 꼬리만 떼어 올린다. 원본 삭제는 업로드 ACK 후 2-pass 재대조가 커버를
+    // 증명했을 때만 한다 — ACK 하나만 보고 지우면 업로드 실패 시 유일본이 사라진다.
     {
         std::lock_guard<std::mutex> lk(g_done_mtx);
         if(g_exported.count({path, crows})){
             snprintf(buf, sizeof(buf), "%s: 세그먼트 업로드 진행 중 (%llu행부터) — 대기",
                      base.c_str(), (unsigned long long)crows);
-            return buf;
+            r.msg = buf;
+            return r;
         }
     }
     std::string seg;
     if(!export_segment(path, li, crows, seg)){
         snprintf(buf, sizeof(buf), "%s: 세그먼트 추출 실패 — 보존", base.c_str());
-        return buf;
+        r.msg = buf;
+        return r;
     }
     { std::lock_guard<std::mutex> lk(g_done_mtx); g_exported.insert({path, crows}); }
     MissionPush::enqueue(seg, MFS_HIST);
@@ -239,7 +275,10 @@ std::string check_one(const std::string& path, int year, const std::string& code
              base.c_str(), (unsigned long long)(li.rows - crows),
              (unsigned long long)crows, (unsigned long long)li.rows,
              seg.substr(seg.find_last_of('/')+1).c_str());
-    return buf;
+    r.msg = buf;
+    r.report = report_line("Fix", station, code, base);
+    r.uploaded = true;
+    return r;
 }
 
 // 한 미션 hist dir 안의 보존된 .bewehist 전부 대조 (-LIVE 는 제외).
@@ -260,12 +299,50 @@ int check_dir(const std::string& dir, int year, const std::string& code, bool lo
     // 현재 열려 있는 파일은 절대 제외 (rotate 직후 경합 방지)
     std::string cur = LongWaterfall::current_file_path();
     int n_done = 0;
+    std::vector<std::string> report;          // 채팅 보고용 (Fix/Del 줄)
+    std::vector<std::string> uploaded;        // 2-pass 재대조 대상
+
+    auto emit = [&](const OneResult& r){
+        if(log) bewe_log_push(0, "[HIST] %s\n", r.msg.c_str());
+        else    printf("[HIST] %s\n", r.msg.c_str());
+        if(!r.report.empty()) report.push_back(r.report);
+    };
+
     for(const auto& f : files){
         if(!cur.empty() && f == cur) continue;
-        std::string msg = check_one(f, year, code);
-        if(log) bewe_log_push(0, "[HIST] %s\n", msg.c_str());
-        else    printf("[HIST] %s\n", msg.c_str());
+        OneResult r = check_one(f, year, code);
+        emit(r);
+        if(r.uploaded) uploaded.push_back(f);
         n_done++;
+    }
+
+    // 2-pass — 업로드를 건 원본은 ACK 를 기다렸다가 다시 대조한다. 그래야 운용자가
+    // /hist check 를 한 번만 쳐도 세그먼트 업로드와 원본 삭제가 같이 끝난다.
+    // (1-pass 만 하면 원본이 남아 다음 회차를 또 쳐야 했다.)
+    // 기다림은 유한하다 — 업링크가 좁은 기지에서 무한 대기하면 워커가 묶인다.
+    if(!uploaded.empty()){
+        const int WAIT_MAX_S = 180;
+        for(int i = 0; i < WAIT_MAX_S * 4 && g_running.load(); ++i){
+            if(MissionPush::pending_count() == 0) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+        for(const auto& f : uploaded){
+            struct stat st{};
+            if(stat(f.c_str(), &st) != 0) continue;   // 통파일 업로드분은 이미 사라짐
+            OneResult r = check_one(f, year, code);
+            emit(r);
+        }
+    }
+
+    // 결과를 채팅으로 보고한다. 로그는 HOST 에만 남으므로 JOIN 운용자는 이걸 본다.
+    // ASCII 만 쓴다 — 한글 기호는 글꼴이 못 그려 '?' 로 깨진다.
+    if(log && g_v && g_v->net_srv){
+        if(report.empty()){
+            g_v->net_srv->broadcast_chat("SYSTEM", "HIST: nothing to do");
+        } else {
+            for(const auto& line : report)
+                g_v->net_srv->broadcast_chat("SYSTEM", line.c_str());
+        }
     }
 
     // 대조 후에도 남아 있는 보존분 용량 감시.
@@ -380,31 +457,32 @@ void run_command(const char* args){
     // 접속(로그인)한 기지의 활성 미션 dir 만 대상으로 한다. 다른 기지 아카이브는
     // 애초에 여기 로컬에 없고, Central 도 요청한 룸의 기지 것만 답한다.
     (void)args;
-    if(!g_running.load()){ printf("[HIST] worker 미가동\n"); return; }
+    // 시작하지 못한 이유는 JOIN 에게도 알린다 — 채팅에 아무 반응이 없으면 명령이
+    // 먹었는지 알 길이 없다. 문구는 ASCII (글꼴이 한글 기호를 '?' 로 깨뜨린다).
+    auto fail = [](const char* line){
+        printf("[HIST] %s\n", line);
+        if(g_v && g_v->net_srv) g_v->net_srv->broadcast_chat("SYSTEM", line);
+    };
+    if(!g_running.load()){ fail("HIST: worker not running"); return; }
     if(!g_v){ printf("[HIST] viewer 없음\n"); return; }
     std::string dir = g_v->active_hist_dir();
-    if(dir.empty()){
-        printf("[HIST] 활성 미션 없음 — 대조할 대상 없음\n");
-        return;
-    }
+    if(dir.empty()){ fail("HIST: no active mission"); return; }
     int year = 0; std::string code;
     if(!parse_mission_path(dir + "/x", year, code)){
         printf("[HIST] 미션 경로 파싱 실패: %s\n", dir.c_str());
+        fail("HIST: bad mission path");
         return;
     }
-    if(!g_cli || !g_cli->is_central_connected()){
-        printf("[HIST] Central 미연결 — 나중에 다시 시도하십시오\n");
-        return;
-    }
+    if(!g_cli || !g_cli->is_central_connected()){ fail("HIST: Central not connected"); return; }
     {
         std::lock_guard<std::mutex> lk(g_q_mtx);
         for(const auto& q : g_queue)
-            if(q == dir){ printf("[HIST] 이미 진행 중입니다\n"); return; }
+            if(q == dir){ fail("HIST: already running"); return; }
         g_queue.push_back(dir);
     }
     g_q_cv.notify_one();
-    // 파일당 최대 8초(Central 응답 대기) 걸리므로 stdin 을 잡고 있지 않는다.
-    // 결과는 워커가 로그로 출력한다.
+    // 파일당 최대 8초(Central 응답 대기) + 업로드 ACK 대기가 걸리므로 stdin 을 잡고
+    // 있지 않는다. 결과(Fix/Del)는 워커가 끝난 뒤 로그와 채팅에 낸다.
     printf("[HIST] check %04d/%s 시작 — 결과는 로그에 출력됩니다\n", year, code.c_str());
 }
 

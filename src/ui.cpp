@@ -5633,7 +5633,7 @@ void run_streaming_viewer(){
                 } else if(sub.rfind("start", 0) == 0){
                     bool ok = v.mission_start(from ? from : "join", 0, false);
                     if(ok) snprintf(r, sizeof(r), "Mission started: %04d/%s", v.mission_year, v.mission_code);
-                    else   snprintf(r, sizeof(r), "Mission start failed (already ACTIVE?)");
+                    else   snprintf(r, sizeof(r), "Mission already ACTIVE: %04d/%s", v.mission_year, v.mission_code);
                 } else if(sub == "end"){
                     bool ok = v.mission_end();
                     snprintf(r, sizeof(r), ok ? "Mission ended." : "Mission end failed (none ACTIVE)");
@@ -5645,8 +5645,8 @@ void run_streaming_viewer(){
                 std::string sub(msg + 5);
                 while(!sub.empty() && sub.front() == ' ') sub.erase(sub.begin());
                 if(sub.rfind("check", 0) == 0){
+                    // 결과(Fix/Del)는 HistCheck 워커가 끝난 뒤 직접 방송한다.
                     HistCheck::run_command(sub.c_str() + 5);
-                    v.net_srv->broadcast_chat("SYSTEM", "HIST check started (see host log)");
                 } else {
                     v.net_srv->broadcast_chat("SYSTEM", "Usage: /hist check");
                 }

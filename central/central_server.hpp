@@ -449,8 +449,11 @@ private:
 
     // 전역 채팅: 중앙서버에 접속한 모든 JOIN + 다른 방의 HOST에게 CHAT BEWE 패킷 전달
     // skip_host_room: 소스 방의 HOST는 제외 (이미 알고 있음)
+    // skip_join:      메시지를 보낸 JOIN 본인은 제외 — 안 그러면 자기가 친 줄이
+    //                 되돌아와 화면에 두 번 뜬다 (HOST 재방송분이 별도로 온다).
     void broadcast_global_chat(const uint8_t* bewe_pkt, size_t bewe_len,
-                               HostRoom* skip_host_room = nullptr);
+                               HostRoom* skip_host_room = nullptr,
+                               JoinEntry* skip_join = nullptr);
 
     // ── Mission File Archive (Phase 1, v3.8.0) ──────────────────────────────
     // Archive root: ~/BEWE/DataBase/missions/  (Central 머신의 $HOME/BEWE/...)
