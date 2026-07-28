@@ -62,16 +62,17 @@ double retain_warn_gb(){
 }
 #define RETAIN_WARN_GB retain_warn_gb()
 
-// ── 경로 파싱: .../missions/<year>/<code>/hist/<file> ─────────────────────
+// ── 경로 파싱: .../missions/<station>/<year>/<code>/hist/<file> ───────────
 bool parse_mission_path(const std::string& full, int& year, std::string& code){
     const std::string root = BEWEPaths::missions_root();
     if(full.compare(0, root.size(), root) != 0) return false;
-    std::string rest = full.substr(root.size());       // /<year>/<code>/hist/<file>
+    std::string rest = full.substr(root.size());       // /<station>/<year>/<code>/hist/<file>
     if(!rest.empty() && rest[0] == '/') rest.erase(0,1);
     size_t s1 = rest.find('/'); if(s1 == std::string::npos) return false;
     size_t s2 = rest.find('/', s1+1); if(s2 == std::string::npos) return false;
-    year = atoi(rest.substr(0, s1).c_str());
-    code = rest.substr(s1+1, s2-s1-1);
+    size_t s3 = rest.find('/', s2+1); if(s3 == std::string::npos) return false;
+    year = atoi(rest.substr(s1+1, s2-s1-1).c_str());
+    code = rest.substr(s2+1, s3-s2-1);
     return year > 1970 && !code.empty() && code.size() < 8;
 }
 
