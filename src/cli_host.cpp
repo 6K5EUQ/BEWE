@@ -2883,6 +2883,10 @@ void run_cli_host(){
     Mission::stop_utc0_worker();
     LongWaterfall::stop_worker();
     MissionPush::stop();
+    // HistCheck 워커도 여기서 join. 빠뜨리면 살아있는 스레드가 정적 소멸 단계에서
+    // condvar/mutex 전역과 엉켜 futex 에 고착 → systemd 가 90초 타임아웃 후
+    // SIGKILL 할 때까지 프로세스가 안 죽는다 (2026-07-28 DGS-X 사례).
+    HistCheck::stop();
 
     // 2) Central 쪽을 먼저 완전히 끊어서 auto-reconnect 스레드가 더 이상
     //    mux_adapter를 살리지 못하게 함 (g_shutdown 체크로 reconnect도 자가 종료)
