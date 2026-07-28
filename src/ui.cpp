@@ -19,6 +19,7 @@
 #include "session_args.hpp"
 #include "session_spawn.hpp"
 #include "module_api.hpp"
+#include <imgui_internal.h>   // GetCurrentContext()->HoveredWindow (float_win_capturing_mouse)
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include <algorithm>
@@ -53,6 +54,15 @@ void bewe_log(const char* fmt, ...){
 
 // Open flag for the band category management modal (toggled from band Add/Edit modal).
 bool g_band_cat_modal_open = false;
+
+// 메인창(##main) 위에 얹힌 별도 ImGui 창(MSN 모달·서브모달·팝업 등)이 마우스를
+// 먹고 있는가. 메인페이지의 직접 좌표 검사 입력 경로들이 이걸 보고 스스로 물러난다.
+bool FFTViewer::float_win_capturing_mouse(){
+    ImGuiContext* g = ImGui::GetCurrentContext();
+    if(!g || !g->HoveredWindow) return false;
+    ImGuiWindow* root = g->HoveredWindow->RootWindow;
+    return root && strcmp(root->Name, "##main") != 0;
+}
 
 // ── 파일 크기 포맷 ────────────────────────────────────────────────────────
 // Status page v2 — register periodic HOST_STATE producer on a CentralClient.
@@ -1549,7 +1559,7 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
         // 띠 위 hover/click — 별도 InvisibleButton
         ImGui::SetCursorScreenPos(ImVec2(gx, band_bar_y));
         ImGui::InvisibleButton("##band_bar", ImVec2(gw, BAND_BAR_H));
-        bool bar_hov = ImGui::IsItemHovered() && !overlay_blocking();
+        bool bar_hov = ImGui::IsItemHovered() && !main_mouse_blocked();
         if(bar_hov){
             ImVec2 mp = ImGui::GetIO().MousePos;
             float mhz_at = vis_lo + (mp.x - gx) / gw * (vis_hi - vis_lo);
@@ -1923,14 +1933,14 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
     ImGui::SetCursorScreenPos(ImVec2(gx,gy));
     ImGui::InvisibleButton("sp_graph",ImVec2(gw,gh));
     // 오버레이 열려있으면 hover 자체를 부정 — max hold/툴팁/줌휠/노치 더블클릭 일괄 차단.
-    bool hov=ImGui::IsItemHovered() && !overlay_blocking();
+    bool hov=ImGui::IsItemHovered() && !main_mouse_blocked();
 
     // ── Ctrl+우클릭 드래그: 노치필터 생성 (파워스펙트럼 전용, 채널 생성보다 우선) ─
     {
         ImVec2 mp = ImGui::GetIO().MousePos;
         bool ctrl = ImGui::GetIO().KeyCtrl;
         bool in_sp = (mp.x>=gx && mp.x<=gx+gw && mp.y>=gy && mp.y<=gy+gh);
-        if(!overlay_blocking() && ctrl && in_sp &&
+        if(!main_mouse_blocked() && ctrl && in_sp &&
            ImGui::IsMouseClicked(ImGuiMouseButton_Right)){
             notch_drag.selecting = true;
             notch_drag.drag_x0 = notch_drag.drag_x1 = mp.x;
@@ -1994,10 +2004,10 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
         ImVec2 _mp = ImGui::GetIO().MousePos;
         bool in_band_bar = band_bar_active &&
                            _mp.y >= band_bar_y && _mp.y <= band_bar_y + BAND_BAR_H;
-        if(!overlay_blocking() && !in_band_bar) handle_new_channel_drag(gx,gw);
+        if(!main_mouse_blocked() && !in_band_bar) handle_new_channel_drag(gx,gw);
     }
     int sel_before = selected_ch;
-    if(!region.active && !overlay_blocking()) handle_channel_interactions(gx,gw,gy,gh);
+    if(!region.active && !main_mouse_blocked()) handle_channel_interactions(gx,gw,gy,gh);
 
     // ── 좌클릭 토글 > Max Hold (채널 위가 아닌 빈 영역 클릭에서만) ──────
     // NOTE: 더블클릭 제거보다 먼저 실행해야 함 - 더블클릭 두 번째 클릭에서
@@ -2063,7 +2073,7 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
         dl->AddRectFilled(ImVec2(tx-2,ty),ImVec2(tx+ts.x+2,ty+ts.y+4),IM_COL32(20,20,20,220));
         dl->AddRect(ImVec2(tx-2,ty),ImVec2(tx+ts.x+2,ty+ts.y+4),IM_COL32(100,100,100,255));
         dl->AddText(ImVec2(tx,ty+2),IM_COL32(0,255,0,255),info);
-        if(!overlay_blocking()) handle_zoom_scroll(gx,gw,mm.x);
+        if(!main_mouse_blocked()) handle_zoom_scroll(gx,gw,mm.x);
     }
     // 파워 축 드래그 (클릭 편집 제거됨; 드래그만 유지)
     // 드래그 방향: 위로 > 값 증가, 아래로 > 값 감소
@@ -2073,7 +2083,7 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
         ImGui::InvisibleButton("pax",ImVec2(AXIS_LABEL_WIDTH,gh));
         static float drag_start_y=0, drag_start_val=0;
         static bool  drag_is_max=false;
-        if(ImGui::IsItemActive() && !overlay_blocking()){
+        if(ImGui::IsItemActive() && !main_mouse_blocked()){
             if(ImGui::IsMouseClicked(ImGuiMouseButton_Left)){
                 ImVec2 m2=ImGui::GetMousePos();
                 float mid_y=gy+gh*0.5f;
@@ -2107,7 +2117,7 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
         ImGui::SetCursorScreenPos(ImVec2(gx, fax_y));
         ImGui::InvisibleButton("freq_axis_drag", ImVec2(gw, fax_h));
         // 오버레이 중엔 hover 부정 — 창 밖 클릭이 SDR 재튜닝시키던 문제 차단.
-        bool fax_hov = ImGui::IsItemHovered() && !overlay_blocking();
+        bool fax_hov = ImGui::IsItemHovered() && !main_mouse_blocked();
         if(fax_hov) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
 
         if(fax_hov && ImGui::IsMouseClicked(ImGuiMouseButton_Left)){
@@ -2220,14 +2230,14 @@ void FFTViewer::draw_waterfall_area(ImDrawList* dl, float full_x, float full_y, 
     ImGui::SetCursorScreenPos(ImVec2(gx,gy));
     ImGui::InvisibleButton("wf_graph",ImVec2(gw,gh));
     // 오버레이 열려있으면 hover 부정 — 툴팁/줌휠/region 편집 일괄 차단.
-    bool hov=ImGui::IsItemHovered() && !overlay_blocking();
+    bool hov=ImGui::IsItemHovered() && !main_mouse_blocked();
     {
         // 마우스가 워터폴 영역 안에 있을 때만 채널 드래그 시작 허용 (band bar 우클릭 보호)
         ImVec2 _mp = ImGui::GetIO().MousePos;
         bool in_wf_area = (_mp.y >= gy && _mp.y <= gy + gh);
-        if(!overlay_blocking() && in_wf_area) handle_new_channel_drag(gx,gw);
+        if(!main_mouse_blocked() && in_wf_area) handle_new_channel_drag(gx,gw);
     }
-    if(!region.active && !overlay_blocking()) handle_channel_interactions(gx,gw,gy,gh);
+    if(!region.active && !main_mouse_blocked()) handle_channel_interactions(gx,gw,gy,gh);
 
     // ── Ctrl+우클릭 드래그: 영역 IQ 녹음 선택 ────────────────────────────
     {
@@ -2235,10 +2245,10 @@ void FFTViewer::draw_waterfall_area(ImDrawList* dl, float full_x, float full_y, 
         ImVec2 mp=mio.MousePos;
         bool ctrl=mio.KeyCtrl;
         // 오버레이 중엔 in_wf 를 부정 — region 신규선택/편집/더블클릭 해제 일괄 차단.
-        bool in_wf=(mp.x>=gx&&mp.x<=gx+gw&&mp.y>=gy&&mp.y<=gy+gh)&&!overlay_blocking();
+        bool in_wf=(mp.x>=gx&&mp.x<=gx+gw&&mp.y>=gy&&mp.y<=gy+gh)&&!main_mouse_blocked();
 
         // ── 신규 선택: Ctrl+우클릭 드래그 ──────────────────────────────
-        if(!overlay_blocking()
+        if(!main_mouse_blocked()
            &&ctrl&&ImGui::IsMouseClicked(ImGuiMouseButton_Right)&&in_wf&&(tm_iq_file_ready||remote_mode)){
             region.selecting=true; region.active=false;
             region.edit_mode=RegionSel::EDIT_NONE;
@@ -2478,7 +2488,7 @@ void FFTViewer::draw_waterfall_area(ImDrawList* dl, float full_x, float full_y, 
         struct tm lt; KST::to_tm(wt_sec, lt);
         char tbuf[16]; strftime(tbuf, sizeof(tbuf), "%H:%M:%S", &lt);
         ImGui::SetTooltip("%s\n%.3f MHz", tbuf, af);
-        if(!overlay_blocking()) handle_zoom_scroll(gx,gw,mm.x);
+        if(!main_mouse_blocked()) handle_zoom_scroll(gx,gw,mm.x);
     }
 }
 
@@ -6591,10 +6601,13 @@ void run_streaming_viewer(){
             if(v.mission_modal_open != prev_mission){ v.mission_modal_open ? push_ov(6) : pop_ov(6); prev_mission=v.mission_modal_open; }
             if(v.demod_panel_open != prev_demod){ v.demod_panel_open ? push_ov(7) : pop_ov(7); prev_demod=v.demod_panel_open; }
         }
-        // STATUS(우측패널) 격리: 전체영역 오버레이(SA/LOG/HIST/LIB/MSN/DEMOD) 열려있으면
+        // STATUS(우측패널) 격리: 전체영역 오버레이(SA/LOG/HIST/LIB/DEMOD) 열려있으면
         // STATUS 토글·드래그·렌더 전부 차단. 내부 상태/백그라운드는 유지, 입력·표시만 막음.
         // 오버레이 닫으면 저장된 right_panel_ratio로 다시 정상 동작.
+        // MSN 은 제외 — 화면을 다 덮지 않는 얹힌 창이라 STATUS 는 계속 보이고 조작된다.
         bool fs_overlay_active = v.overlay_blocking();
+        // 마우스 입력 차단 조건: 위 오버레이 + MSN 같은 얹힌 창 위에 마우스가 있을 때.
+        bool mouse_blocked = v.main_mouse_blocked();
         // S키: 메인 STATUS 패널 토글. 다른 오버레이 활성 시엔 그쪽이 S 키 소비.
         if(main_kbd_active && !fs_overlay_active
            && ImGui::IsKeyPressed(ImGuiKey_S, false) && !ImGui::GetIO().WantTextInput){
@@ -7112,7 +7125,7 @@ void run_streaming_viewer(){
             ImVec2 mpos = ImGui::GetIO().MousePos;
             bool hdiv_hov = (mpos.x >= 0 && mpos.x <= left_w &&
                              mpos.y >= div_y && mpos.y <= div_y + div_h)
-                            && !fs_overlay_active;
+                            && !mouse_blocked;
             static bool hdiv_dragging = false;
             if(hdiv_hov && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
                 hdiv_dragging = true;
@@ -7143,11 +7156,12 @@ void run_streaming_viewer(){
         {
             ImVec2 mpos2 = io.MousePos;
             bool vdiv_hov = (mpos2.x >= vdiv_x && mpos2.x <= vdiv_x + vdiv_w &&
-                             mpos2.y >= content_y && mpos2.y <= content_y + content_h);
+                             mpos2.y >= content_y && mpos2.y <= content_y + content_h)
+                            && !mouse_blocked;
             static bool vdiv_dragging = false;
-            if(vdiv_hov && !fs_overlay_active && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+            if(vdiv_hov && !mouse_blocked && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
                 vdiv_dragging = true;
-            if(!ImGui::IsMouseDown(ImGuiMouseButton_Left) || fs_overlay_active)
+            if(!ImGui::IsMouseDown(ImGuiMouseButton_Left) || mouse_blocked)
                 vdiv_dragging = false;
             if(vdiv_dragging){
                 v.right_panel_ratio -= io.MouseDelta.x / disp_w;
@@ -7195,7 +7209,8 @@ void run_streaming_viewer(){
             auto subbar_btn = [&](float bx, const char* lbl, bool active, ImU32 col_on) -> bool {
                 ImVec2 tsz = ImGui::CalcTextSize(lbl);
                 bool hov = io.MousePos.x>=bx && io.MousePos.x<=bx+tsz.x+2 &&
-                           io.MousePos.y>=content_y && io.MousePos.y<rp_content_y;
+                           io.MousePos.y>=content_y && io.MousePos.y<rp_content_y
+                           && !mouse_blocked;
                 ImU32 col = active ? col_on
                           : (hov ? IM_COL32(160,160,180,255) : IM_COL32(110,110,130,255));
                 dl->AddText(ImVec2(bx, btn_y), col, lbl);
@@ -8947,7 +8962,7 @@ void run_streaming_viewer(){
                           :              IM_COL32(220,60,60,255);
                 if(state>0) dl->AddText(ImVec2(x+1,ty_b),col,txt);
                 dl->AddText(ImVec2(x,ty_b),col,txt);
-                bool clicked=ImGui::IsMouseClicked(ImGuiMouseButton_Left)&&
+                bool clicked=ImGui::IsMouseClicked(ImGuiMouseButton_Left)&&!mouse_blocked&&
                     io.MousePos.x>=x&&io.MousePos.x<=x+sz.x&&
                     io.MousePos.y>=ty_b&&io.MousePos.y<=ty_b+sz.y;
                 rx2=x-14.0f;
@@ -8968,7 +8983,7 @@ void run_streaming_viewer(){
                           :              IM_COL32(220,60,60,255);
                 if(state>0) dl->AddText(ImVec2(lx+1,ty_b),col,txt);
                 dl->AddText(ImVec2(lx,ty_b),col,txt);
-                bool clicked=ImGui::IsMouseClicked(ImGuiMouseButton_Left)&&
+                bool clicked=ImGui::IsMouseClicked(ImGuiMouseButton_Left)&&!mouse_blocked&&
                     io.MousePos.x>=lx&&io.MousePos.x<=lx+sz.x&&
                     io.MousePos.y>=ty_b&&io.MousePos.y<=ty_b+sz.y;
                 lx += sz.x + 14.0f;
@@ -9053,7 +9068,7 @@ void run_streaming_viewer(){
             {
                 ImVec2 lsz=ImGui::CalcTextSize("LINK");
                 float lx=rx+14.0f; // draw_ind가 이미 이동시킴, 실제 그려진 위치 복원
-                bool lclicked=ImGui::IsMouseClicked(ImGuiMouseButton_Left)&&
+                bool lclicked=ImGui::IsMouseClicked(ImGuiMouseButton_Left)&&!mouse_blocked&&
                     io.MousePos.x>=lx&&io.MousePos.x<=lx+lsz.x&&
                     io.MousePos.y>=ty_b&&io.MousePos.y<=ty_b+lsz.y;
                 if(lclicked){

@@ -1010,12 +1010,28 @@ public:
     int   freq_sorted_display_num(int arr_idx) const;
 
 #ifndef BEWE_HEADLESS
-    // 전체영역 오버레이(SA/LOG/HIST/LIB/MSN/DEMOD) 가 하나라도 열려 있는가.
+    // 전체영역 오버레이(SA/LOG/HIST/LIB/DEMOD) 가 하나라도 열려 있는가.
     // 열려 있으면 메인페이지 입력(마우스/키보드)은 전부 격리 차단한다 — 렌더와
     // 내부 상태는 그대로 유지해서, 오버레이를 닫으면 즉시 정상 동작.
+    //
+    // MSN(mission) 은 여기 안 들어간다. 화면을 다 덮지 않는 78% floating 창이라
+    // 뒤의 메인페이지·STATUS 는 계속 보이고 조작도 된다. MSN 창 위 클릭이 뒤로
+    // 새는 것만 막으면 되고, 그건 float_win_capturing_mouse() 가 담당한다.
     bool overlay_blocking() const {
         return eid_panel_open || log_panel_open || lwf_modal_open
-            || sig_lib_panel_open || mission_modal_open || demod_panel_open;
+            || sig_lib_panel_open || demod_panel_open;
+    }
+
+    // 마우스가 메인창(##main) 이 아닌 별도 ImGui 창(MSN 모달·서브모달·팝업 등)
+    // 위에 있는가. 메인페이지의 "직접 좌표 검사" 입력 경로들은 ImGui 의 창 우선순위를
+    // 모르므로, 이 검사로 창 위 클릭이 뒤로 새는 걸 막는다.
+    // (ImGui 위젯 기반 경로는 IsItemHovered() 가 이미 처리해준다.)
+    static bool float_win_capturing_mouse();
+
+    // 메인페이지 마우스 입력을 지금 받아도 되는가의 반대 — 입력 경로는 이걸 쓴다.
+    // 풀스크린 오버레이가 떠 있거나, 마우스가 얹힌 창(MSN 등) 위에 있으면 차단.
+    bool main_mouse_blocked() const {
+        return overlay_blocking() || float_win_capturing_mouse();
     }
 
     // ── ui.cpp (rendering — GUI only) ────────────────────────────────────
