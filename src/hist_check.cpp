@@ -16,6 +16,7 @@
 #include <string>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <ctime>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -45,6 +46,21 @@ uint8_t                 g_req_id    = 0;
 // 이미 세그먼트를 떼어 올린 (원본경로, 시작행) — 같은 구간 반복 export 방지.
 std::mutex                          g_done_mtx;
 std::set<std::pair<std::string,uint64_t>> g_exported;
+
+// 미검증 보존분이 이만큼 쌓이면 경고. 프레임당 1행이라 한 시간이 ~0.5GB —
+// 5GB ≈ 10시간치. Pi5(DGS-3/DGS-X) SD 카드를 염두에 둔 값.
+// BEWE_HIST_RETAIN_WARN_GB 로 조정 가능.
+double retain_warn_gb(){
+    static double v = [](){
+        if(const char* e = getenv("BEWE_HIST_RETAIN_WARN_GB")){
+            double d = atof(e);
+            if(d > 0.0) return d;
+        }
+        return 5.0;
+    }();
+    return v;
+}
+#define RETAIN_WARN_GB retain_warn_gb()
 
 // ── 경로 파싱: .../missions/<year>/<code>/hist/<file> ─────────────────────
 bool parse_mission_path(const std::string& full, int& year, std::string& code){
@@ -249,6 +265,40 @@ int check_dir(const std::string& dir, int year, const std::string& code, bool lo
         if(log) bewe_log_push(0, "[HIST] %s\n", msg.c_str());
         else    printf("[HIST] %s\n", msg.c_str());
         n_done++;
+    }
+
+    // 대조 후에도 남아 있는 보존분 용량 감시.
+    // 프레임당 1행 기록이라 한 시간이 ~540MB 다. Central 이 오래 죽어 있으면 Pi5 의
+    // SD 카드가 찬다 — 디스크가 차면 HIST 뿐 아니라 IQ/오디오/미션 DB 쓰기까지 같이
+    // 실패하므로 미리 경고해야 한다.
+    //
+    // 넘쳐도 지우지는 않는다. 여기 남아 있는 건 정의상 "Central 도달이 증명되지 않은"
+    // 파일이라 유일본일 수 있다. 자동 삭제는 이 기능이 지키려던 데이터를 없애는 짓이다.
+    // 운용자가 보고 판단하도록 경고만 낸다.
+    {
+        uint64_t total = 0; int n_left = 0;
+        std::string oldest; uint64_t oldest_mtime = 0;
+        for(const auto& f : files){
+            struct stat st{};
+            if(stat(f.c_str(), &st) != 0) continue;   // 위에서 삭제됐으면 여기서 빠짐
+            total += (uint64_t)st.st_size; n_left++;
+            if(oldest_mtime == 0 || (uint64_t)st.st_mtime < oldest_mtime){
+                oldest_mtime = (uint64_t)st.st_mtime;
+                oldest = f.substr(f.find_last_of('/')+1);
+            }
+        }
+        if(n_left > 0){
+            double gb = (double)total / (1024.0*1024.0*1024.0);
+            const char* lvl = (gb >= RETAIN_WARN_GB) ? "WARN" : "info";
+            char b[512];
+            snprintf(b, sizeof(b),
+                     "[HIST] %s: 미검증 보존 %d개 %.2fGB (가장 오래된 것 %s)%s",
+                     lvl, n_left, gb, oldest.c_str(),
+                     (gb >= RETAIN_WARN_GB)
+                       ? " — Central 도달 미확인. 디스크 확인 요망 (자동 삭제 안 함)" : "");
+            if(log) bewe_log_push((gb >= RETAIN_WARN_GB) ? 1 : 0, "%s\n", b);
+            else    printf("%s\n", b);
+        }
     }
     return n_done;
 }
