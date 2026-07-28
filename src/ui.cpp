@@ -14,6 +14,7 @@
 #include "host_band_plan.hpp"
 #include "host_band_categories.hpp"
 #include "long_waterfall.hpp"
+#include "hist_check.hpp"
 #include "sig_lib_view.hpp"
 #include "session_args.hpp"
 #include "session_spawn.hpp"
@@ -5628,6 +5629,17 @@ void run_streaming_viewer(){
                 } else snprintf(r, sizeof(r), "Usage: /mission [start|end|status]");
                 v.net_srv->broadcast_chat("SYSTEM", r);
             }
+            // "/hist check" — cli_host 와 같은 경로. 대상은 이 기지의 로컬 HIST 뿐.
+            else if(strncmp(msg, "/hist", 5) == 0 && (msg[5] == 0 || msg[5] == ' ')){
+                std::string sub(msg + 5);
+                while(!sub.empty() && sub.front() == ' ') sub.erase(sub.begin());
+                if(sub.rfind("check", 0) == 0){
+                    HistCheck::run_command(sub.c_str() + 5);
+                    v.net_srv->broadcast_chat("SYSTEM", "HIST check started (see host log)");
+                } else {
+                    v.net_srv->broadcast_chat("SYSTEM", "Usage: /hist check");
+                }
+            }
         };
     }
 
@@ -9708,6 +9720,20 @@ void run_streaming_viewer(){
                             }
                         }
 
+                    } else if(chat_str.rfind("/mission", 0) == 0 || chat_str.rfind("/hist", 0) == 0){
+                        // HOST 가 실행해야 하는 명령 — 채팅 그대로 넘긴다.
+                        // (/rx·/chassis 처럼 전용 패킷을 새로 만들지 않고 on_chat 경로 재사용.
+                        //  HOST/LOCAL 이면 자기 on_chat 이 바로 받으므로 broadcast 한 번이면 된다.)
+                        bewe_log_push(0, "[CMD:%s] %s\n", login_get_id(), chat_str.c_str());
+                        if(v.net_cli){
+                            v.net_cli->send_chat(chat_str.c_str());
+                        } else if(v.net_srv){
+                            // broadcast_chat 은 자기 on_chat 을 부르지 않으므로 직접 실행한다.
+                            if(v.net_srv->cb.on_chat)
+                                v.net_srv->cb.on_chat(login_get_id(), chat_str.c_str());
+                        } else {
+                            push_local("System", "Not connected — command needs a HOST.", true);
+                        }
                     } else {
                         char errmsg[280];
                         snprintf(errmsg, sizeof(errmsg), "Unknown command: %s", chat_str.c_str());
