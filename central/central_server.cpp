@@ -960,8 +960,17 @@ void CentralServer::dispatch_to_joins(std::shared_ptr<HostRoom> room,
     }
 
     // ── CHAT: 전역 브로드캐스트 (모든 방의 JOIN + 다른 방 HOST) ─────────
+    // 단 명령 응답(SYSTEM)은 그 명령이 실행된 룸에만 보낸다 — 남의 기지에서 친
+    // 명령의 결과가 이 기지 운용자 화면에 뜨면 자기 기지 상태로 오해한다.
+    // 사람끼리 주고받는 일반 채팅은 종전대로 전역이다.
     if(bewe_type == BEWE_TYPE_CHAT){
-        broadcast_global_chat(bewe_pkt, bewe_len, room.get());
+        bool is_sys = false;
+        if(bewe_len >= BEWE_HDR_SIZE + sizeof(PktChat)){
+            const auto* c = reinterpret_cast<const PktChat*>(bewe_pkt + BEWE_HDR_SIZE);
+            is_sys = (strncmp(c->from, "SYSTEM", 6) == 0);
+        }
+        if(is_sys) broadcast_room_chat(room.get(), nullptr, bewe_pkt, bewe_len);
+        else       broadcast_global_chat(bewe_pkt, bewe_len, room.get());
         return;
     }
 
@@ -1614,7 +1623,19 @@ bool CentralServer::intercept_join_cmd(std::shared_ptr<JoinEntry> je,
     // 보낸 JOIN 본인은 뺀다 — 소스 방 HOST 가 이 줄을 그대로 재방송하므로, 여기서도
     // 보내면 자기가 친 한 줄이 화면에 두 번 뜬다.
     if(bewe_type == BEWE_TYPE_CHAT){
-        broadcast_global_chat(bewe_pkt, bewe_len, room.get(), je.get());
+        // 명령("/...")은 전역 방송하지 않는다. 전역으로 뿌리면 모든 기지의 HOST 가
+        // 같은 명령을 각자 실행한다 — 기지가 4대면 /hist check 한 번에 4대가 대조를
+        // 돌고 응답도 4줄 온다(실측). HOST 쪽 중복 가드는 프로세스 안 static 이라
+        // "다른 HOST 가 각자 한 번씩" 은 못 막는다. JOIN 이 친 명령은 그 JOIN 이
+        // 접속한 기지에서만 실행돼야 하므로, 명령은 소스 룸 안에서만 돌린다.
+        // (전 기지에 방송돼야 하는 명령은 없다.)
+        bool is_cmd = false;
+        if(bewe_len >= BEWE_HDR_SIZE + sizeof(PktChat)){
+            const auto* c = reinterpret_cast<const PktChat*>(bewe_pkt + BEWE_HDR_SIZE);
+            is_cmd = (c->msg[0] == '/');
+        }
+        if(is_cmd) broadcast_room_chat(room.get(), je.get(), bewe_pkt, bewe_len);
+        else       broadcast_global_chat(bewe_pkt, bewe_len, room.get(), je.get());
         return false;  // 소스 방 HOST에도 포워드
     }
 
@@ -2605,6 +2626,21 @@ void CentralServer::watchdog_loop(){
 }
 
 // ── 전역 채팅 브로드캐스트 ───────────────────────────────────────────────
+// 한 룸 안에서만 채팅 전달 (그 룸의 JOIN 들에게만; HOST 는 호출부가 따로 포워드).
+// 명령성 채팅("/..." )에 쓴다 — 명령은 그 JOIN 이 접속한 기지에서만 실행돼야 한다.
+void CentralServer::broadcast_room_chat(HostRoom* room, JoinEntry* skip_join,
+                                        const uint8_t* bewe_pkt, size_t bewe_len){
+    if(!room) return;
+    std::vector<std::shared_ptr<JoinEntry>> joins;
+    {
+        std::lock_guard<std::mutex> jlk(room->joins_mtx);
+        for(auto& je : room->joins)
+            if(je->alive.load() && je->authed && je->fd >= 0 && je.get() != skip_join)
+                joins.push_back(je);
+    }
+    for(auto& je : joins) je->enqueue_data(bewe_pkt, bewe_len);
+}
+
 void CentralServer::broadcast_global_chat(const uint8_t* bewe_pkt, size_t bewe_len,
                                           HostRoom* skip_host_room, JoinEntry* skip_join){
     struct Target {

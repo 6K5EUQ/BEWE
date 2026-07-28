@@ -451,6 +451,9 @@ private:
     // skip_host_room: 소스 방의 HOST는 제외 (이미 알고 있음)
     // skip_join:      메시지를 보낸 JOIN 본인은 제외 — 안 그러면 자기가 친 줄이
     //                 되돌아와 화면에 두 번 뜬다 (HOST 재방송분이 별도로 온다).
+    // 한 룸 안에서만 채팅 전달 (명령/명령응답 스코프 제한용).
+    void broadcast_room_chat(HostRoom* room, JoinEntry* skip_join,
+                             const uint8_t* bewe_pkt, size_t bewe_len);
     void broadcast_global_chat(const uint8_t* bewe_pkt, size_t bewe_len,
                                HostRoom* skip_host_room = nullptr,
                                JoinEntry* skip_join = nullptr);
