@@ -96,6 +96,8 @@ BEAE/ais/data/aicap_*.bin
 BEAE/ais/data/ai.sock
 BEAE/ais/data/ai_status.json
 BEAE/ais/data/ai_daemon.log
+# 논문용 차트는 제외 (584KB, 로컬 산출물). 운용용 training_trend.png 는 계속 추적.
+BEAE/ais/data/ai_history/charts/training_trend_paper.png
 # 모델 스냅샷 — 학습마다 2.5MB .pt 가 새로 쌓여 리포가 비대해짐. 머신 로컬에만 둔다.
 BEAE/ais/data/ai_model/
 # few-shot 프로토타입 모듈 — 아직 실험 단계라 스냅샷·로그 전부 제외 (리포엔 코드만)
