@@ -2511,7 +2511,8 @@ static const ChatCmdInfo CHAT_CMDS[] = {
     {"/mission status",  "Show mission state",    false},
     {"/hist check",      "Verify retained HIST",  false},
     {"/update_tle",      "Update satellite TLEs", true },
-    {"/logout",          "Return to login",       true },
+    // /logout 제거 — 로그인 후 사용자 변경은 보안상 불가. 계정을 바꾸려면
+    // BEWE 를 완전히 종료하고 다시 실행해 로그인해야 한다.
     {"/shutdown",        "Exit BEWE",             true },
 };
 static const int CHAT_CMD_N = (int)(sizeof(CHAT_CMDS)/sizeof(CHAT_CMDS[0]));
@@ -2702,7 +2703,6 @@ void run_streaming_viewer(){
 
     // early loop 명령 플래그
     bool early_do_shutdown    = false;
-    bool early_do_logout      = false;
     bool early_chat_focus_req  = false; // Enter > 입력칸 포커스 요청
     ChatInputCB early_chat_cb;          // 커서 끝 이동 / 자동완성 적용 상태
     bool early_chat_in_was_active = false; // 직전 프레임 입력칸 활성 (팝업 표시 판정)
@@ -2794,8 +2794,6 @@ void run_streaming_viewer(){
             if(s[0] == '/'){
                 if(s == "/shutdown"){
                     early_do_shutdown = true;
-                } else if(s == "/logout"){
-                    early_do_logout = true;
                 } else if(s == "/Update TLEs" || s == "/update_tle" || s == "/UpdateTLEs"){
                     push("System", "TLE update started ...", false);
                     sat_view_update_tle();
@@ -2833,7 +2831,6 @@ void run_streaming_viewer(){
             logged_in = draw_login_screen(fw,fh);
             draw_early_chat(fw, fh);
             if(early_do_shutdown){ glfwSetWindowShouldClose(win, GLFW_TRUE); }
-            if(early_do_logout){ early_do_logout = false; /* login창에서 logout = 이미 로그아웃 상태, 무시 */ }
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
             glfwSwapBuffers(win);
@@ -2850,7 +2847,9 @@ void run_streaming_viewer(){
     // ── 모드선택 outer 루프 (do_main_menu 시 재진입) ─────────────────────
     static std::atomic<bool> reconn_busy{false};
     bool do_main_menu = false;
-    bool do_logout = false;
+    // 항상 false — /logout 은 보안상 제거됐다 (로그인 후 사용자 변경 불가, 계정을
+    // 바꾸려면 BEWE 를 끄고 다시 켠다). 아래 재시작 분기는 도달하지 않는 잔여 경로다.
+    const bool do_logout = false;
     bool do_chassis_reset = false;
     int  chassis_reset_mode = 0; // 0=LOCAL, 1=HOST
     bool usb_reset_pending = false; // chassis 1 reset 시 USB reset 수행 플래그
@@ -3680,11 +3679,6 @@ void run_streaming_viewer(){
 
         draw_early_chat(fw, fh);
         if(early_do_shutdown){ glfwSetWindowShouldClose(win, GLFW_TRUE); }
-        if(early_do_logout){
-            early_do_logout = false;
-            do_logout = true;
-            mode_done = true;
-        }
 
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -7611,10 +7605,13 @@ void run_streaming_viewer(){
                 ImGui::SetNextWindowBgAlpha(0.0f);
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8,8));
                 ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0,0,0,0));
+                // MSN 이 떠 있으면 NoInputs — 클릭이 여기 먹지 않고, ImGui 가 focus 를
+                // 주지 않으므로 이 패널이 MSN 위로 튀어오르지 않는다 (보이기만 한다).
                 ImGui::Begin("##stat_panel", nullptr,
                     ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|
                     ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar|
-                    ImGuiWindowFlags_NoDecoration);
+                    ImGuiWindowFlags_NoDecoration|
+                    (v.mission_input_lock() ? ImGuiWindowFlags_NoInputs : 0));
 
                 // ── 탭 바 ─────────────────────────────────────────────────
                 ImGui::PushStyleColor(ImGuiCol_Tab,            ImVec4(0.12f,0.12f,0.16f,1.f));
@@ -8373,10 +8370,12 @@ void run_streaming_viewer(){
                 ImGui::SetNextWindowBgAlpha(0.0f);
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8,8));
                 ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0,0,0,0));
+                // MSN 활성 중엔 NoInputs (##stat_panel 과 같은 이유).
                 ImGui::Begin("##sched_panel", nullptr,
                     ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|
                     ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar|
-                    ImGuiWindowFlags_NoDecoration);
+                    ImGuiWindowFlags_NoDecoration|
+                    (v.mission_input_lock() ? ImGuiWindowFlags_NoInputs : 0));
 
                 ImGui::PushStyleColor(ImGuiCol_Tab,       ImVec4(0.12f,0.12f,0.16f,1.f));
                 ImGui::PushStyleColor(ImGuiCol_TabHovered,ImVec4(0.20f,0.30f,0.45f,1.f));
@@ -9550,7 +9549,9 @@ void run_streaming_viewer(){
                                            io.DisplaySize.y-CH-TOPBAR_H-10));
             ImGui::SetNextWindowSize(ImVec2(CW,CH));
             ImGui::SetNextWindowBgAlpha(0.92f);
-            ImGui::SetNextWindowFocus();
+            // MSN 활성 중엔 강제 포커스 금지 — 매 프레임 focus 를 뺏으면 채팅창이
+            // MSN 위를 덮어버린다. MSN 이 항상 최상단이어야 한다.
+            if(!v.mission_input_lock()) ImGui::SetNextWindowFocus();
             ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,8.f);
             ImGui::PushStyleColor(ImGuiCol_WindowBg,ImVec4(0.05f,0.07f,0.12f,1.f));
             ImGui::PushStyleColor(ImGuiCol_FrameBg,ImVec4(0.10f,0.12f,0.20f,1.f));
@@ -9646,12 +9647,6 @@ void run_streaming_viewer(){
                     } else if(chat_str == "/shutdown"){
                         // 프로그램 완전 종료
                         glfwSetWindowShouldClose(win, GLFW_TRUE);
-
-                    } else if(chat_str == "/logout"){
-                        // SDR 종료 > 로그인 화면으로 (세션 삭제, 프로세스 재시작)
-                        do_logout = true;
-                        // glfwSetWindowShouldClose 없이 do_logout만으로 inner while 탈출
-                        // outer do-while은 !do_main_menu이므로 탈출 > if(do_logout) execv
 
                     } else if(chat_str == "/chassis 1 reset"){
                         bewe_log_push(0, "[CMD:%s] /chassis 1 reset\n", login_get_id());
