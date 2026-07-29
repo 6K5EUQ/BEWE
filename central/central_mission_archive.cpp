@@ -741,13 +741,28 @@ void CentralServer::handle_mission_sync_req(std::shared_ptr<HostRoom> room,
             hist.push_back(e);
         };
 
+        // 그 기지 자신의 blob 이 있으면 그게 ACTIVE 여부의 유일한 근거다.
+        // 남의 blob 에도 이 기지 항목이 섞여 들어오는데(다른 기지에 붙은 JOIN 이
+        // 본 스냅샷), 그건 그 JOIN 이 마지막으로 본 시점의 사본이라 얼마든지
+        // 낡을 수 있다. 자기 blob 은 그 기지 HOST 가 직접 갱신하므로 최신이다.
+        // 이걸 구분하지 않으면 기지가 미션을 끝내도 남의 낡은 사본이 ACTIVE 를
+        // 되살려, 정작 그 기지에 접속해야만 IDLE 로 정정되는 증상이 난다.
+        auto own = missions_by_station_.find(st);
+        const PktMissionSync* own_s = nullptr;
+        if(own != missions_by_station_.end() &&
+           own->second.size() >= BEWE_HDR_SIZE + sizeof(PktMissionSync))
+            own_s = reinterpret_cast<const PktMissionSync*>(
+                        own->second.data() + BEWE_HDR_SIZE);
+
         for(const auto& kv : missions_by_station_){
             if(kv.second.size() < BEWE_HDR_SIZE + sizeof(PktMissionSync)) continue;
             const auto* s = reinterpret_cast<const PktMissionSync*>(
                                 kv.second.data() + BEWE_HDR_SIZE);
             scanned++;
             // ACTIVE 는 가장 늦게 시작된 것 하나만 (여러 blob 이 각자 옛 ACTIVE 를 들고 있다).
-            if(s->active_valid && match(s->active) &&
+            // own_s 가 있으면 그 blob 에서만 ACTIVE 를 인정한다.
+            bool active_authoritative = (own_s == nullptr) || (s == own_s);
+            if(active_authoritative && s->active_valid && match(s->active) &&
                s->active.state == 1 /* Mission::State::ACTIVE */){
                 if(!have_active || s->active.start_utc > out.sync.active.start_utc){
                     out.sync.active = s->active;

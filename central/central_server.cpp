@@ -2986,8 +2986,12 @@ void CentralServer::load_missions_from_json(){
                 while(*p && (*p == ' ' || *p == '\t' || *p == '\n')) p++;
             }
             if(*p == '}') p++;
-            // active (end_utc=0)인 경우 active 슬롯에 배치, 그 외엔 history
-            if(e.end_utc == 0 && first_active){
+            // active 슬롯 배치 기준은 state 다. end_utc==0 만 보면 안 된다 — HOST 가
+            // 미션 종료를 기록하기 전에 죽으면 state=0(종료) 인데 end_utc 는 0 인
+            // 항목이 남고, 그게 Central 재시작마다 ACTIVE 로 되살아난다. 그러면
+            // 원격 조회(MISSION_SYNC_FOR)가 그 기지를 계속 ACTIVE 로 답해서,
+            // 정작 그 기지에 붙어야만 IDLE 로 정정되는 증상이 난다.
+            if(e.state == 1 /* Mission::State::ACTIVE */ && e.end_utc == 0 && first_active){
                 pkt.active = e;
                 pkt.active_valid = 1;
                 first_active = false;
