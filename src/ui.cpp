@@ -2503,9 +2503,10 @@ struct ChatCmdInfo { const char* cmd; const char* desc; bool early_ok; };
 static const ChatCmdInfo CHAT_CMDS[] = {
     {"/rx start",        "Start SDR capture",     false},
     {"/rx stop",         "Stop SDR capture",      false},
-    {"/chassis 1 reset", "Reset SDR hardware",    false},
+    {"/chassis 1 reset", "Re-enumerate SDR USB",  false},
     {"/chassis 2 reset", "Reset network link",    false},
-    {"/powercycle",      "Deep USB reset of SDR", false},
+    {"/powercycle partial", "Station: restart BEWE",  false},
+    {"/powercycle full", "Station: reboot machine",   false},
     {"/mission start",   "Start mission on HOST", false},
     {"/mission end",     "End mission on HOST",   false},
     {"/mission status",  "Show mission state",    false},
@@ -2852,14 +2853,11 @@ void run_streaming_viewer(){
     const bool do_logout = false;
     bool do_chassis_reset = false;
     int  chassis_reset_mode = 0; // 0=LOCAL, 1=HOST
-    bool usb_reset_pending = false; // chassis 1 reset 시 USB reset 수행 플래그
-    // /powercycle: 위 USB reset 슬롯을 ioctl 대신 sysfs 딥 재열거로 승격시킨다.
-    // 재연결 경로(fft plan 재생성·dem 재기동·autoscale)는 그대로 재사용한다.
-    bool deep_powercycle_req = false;
+    // chassis 1 reset 시 USB 딥 재열거 수행 플래그. 재연결 경로(fft plan 재생성·
+    // dem 재기동·autoscale)는 그대로 재사용한다.
+    bool usb_reset_pending = false;
     std::atomic<bool> pending_chassis1_reset{false}; // 네트워크 스레드 > 메인 루프 전달
     std::atomic<bool> pending_chassis2_reset{false}; // 네트워크 스레드 > 메인 루프 전달
-    // /powercycle — chassis 1 로 안 풀리는 SDR 사망 시 USB 재열거까지 가는 상위 복구
-    std::atomic<bool> pending_powercycle{false};     // 네트워크 스레드 > 메인 루프 전달
     std::atomic<bool> pending_rx_stop{false};        // JOIN > HOST: /rx stop
     std::atomic<bool> pending_rx_start{false};       // JOIN > HOST: /rx start
     // HOST 모드 로컬 채팅 로그 (do-while 외부에서 선언해야 콜백 람다에서 접근 가능)
@@ -5661,11 +5659,15 @@ void run_streaming_viewer(){
                     v.net_srv->broadcast_chat("SYSTEM", "Usage: /hist check");
                 }
             }
-            // "/powercycle" — chassis 1 reset 이 안 먹을 때의 상위 복구.
-            // 실제 동작은 메인 루프가 한다 (SDR 재초기화는 캡처 스레드 수명을 건드린다).
+            // "/powercycle partial|full" — 프로세스 재시작 / 머신 재부팅.
+            // GUI 빌드에선 지원하지 않는다. 이 명령은 무인 기지(cli_host)가 systemd
+            // 아래에서 자동 재기동되는 것을 전제로 하는데, GUI 는 사람이 앞에 앉아
+            // 띄운 창이라 죽으면 아무도 다시 안 띄운다. SDR 복구는 chassis 1 reset
+            // 이 이미 같은 USB 재열거를 한다.
             else if(strncmp(msg, "/powercycle", 11) == 0 && (msg[11] == 0 || msg[11] == ' ')){
-                bewe_log_push(0,"[CMD:%s] /powercycle\n", from ? from : "join");
-                pending_powercycle.store(true);
+                bewe_log_push(2,"[CMD:%s] /powercycle rejected (GUI build)\n", from ? from : "join");
+                if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM",
+                    "/powercycle is station-only - use /chassis 1 reset here");
             }
         };
     }
@@ -5860,29 +5862,6 @@ void run_streaming_viewer(){
             v.tm_iq_on.store(false);
             v.spectrum_pause.store(true);
             usb_reset_pending = true;
-        }
-        // ── /powercycle ──────────────────────────────────────────────────
-        // chassis 1 reset 은 USBDEVFS_RESET 을 장치 핸들로 쏜다. 펌웨어 링크가 죽어
-        // 있으면(BladeRF NIOS II timeout) 그 리셋조차 장치에 안 닿아 몇 번을 쳐도
-        // 안 살아난다. 여기서는 커널에게 unbind/재열거를 시켜(authorized 0>1)
-        // 케이블을 뽑았다 꽂은 것과 같은 상태로 만든다.
-        // 아래 재연결 블록의 USB reset 슬롯을 딥 모드로 승격시키는 방식이라
-        // 재초기화 경로는 chassis 1 과 100% 공유한다.
-        if(v.net_srv && pending_powercycle.load()){
-            pending_powercycle.store(false);
-            { std::lock_guard<std::mutex> lk(host_chat_mtx);
-              LocalChatMsg lm{}; strncpy(lm.from,"SYSTEM",31);
-              strncpy(lm.msg,"Power cycle: deep USB reset ...",255);
-              if((int)host_chat_log.size()>=200) host_chat_log.erase(host_chat_log.begin());
-              host_chat_log.push_back(lm); }
-            v.net_srv->broadcast_chat("SYSTEM", "Power cycle: deep USB reset ...");
-            v.net_srv->broadcast_heartbeat(1);
-            v.is_running = false;
-            v.sdr_stream_error.store(true);
-            v.tm_iq_on.store(false);
-            v.spectrum_pause.store(true);
-            usb_reset_pending   = true;
-            deep_powercycle_req = true;
         }
         if(v.net_srv && pending_chassis2_reset.load()){
             pending_chassis2_reset.store(false);
@@ -6079,65 +6058,43 @@ void run_streaming_viewer(){
                 cap_joined.store(true);
             }
 
-            // cap 종료 확인 후 USB reset (BladeRF만 해당, chassis reset 요청 시 한 번만)
+            // cap 종료 확인 후 USB 재열거 (chassis 1 reset 요청 시 한 번만).
+            // SDR 종류를 가리지 않는다 — 예전엔 BladeRF 만 리셋하고 Pluto/RTL 은
+            // "불필요"로 건너뛰었는데, USB 가 굳으면 재초기화만 반복하며 안 풀렸다
+            // (2026-07-29 DGS-2). cli_host.cpp 의 같은 이름 명령과 동작을 맞춘다.
             if(cap_joined.load() && usb_reset_pending && !usb_reset_done){
                 usb_reset_done = true;
                 usb_reset_pending = false;
-                bool deep = deep_powercycle_req;
-                deep_powercycle_req = false;
-                // 딥 파워사이클은 BladeRF 외 장치에도 적용된다 (RTL/Pluto 모두 USB).
-                // 반면 기존 chassis 1 의 ioctl 리셋은 BladeRF 전용 경로 그대로 둔다.
-                if(deep){
-                    uint16_t vid = 0, pid = 0;
-                    switch(v.hw.type){
-                        case HWType::BLADERF: vid = 0x2cf0; pid = 0x5250; break;
-                        case HWType::RTLSDR:  vid = 0x0bda; pid = 0x2838; break;
-                        case HWType::PLUTO:   vid = 0x0456; pid = 0xb673; break;
-                        default: break;
-                    }
+                uint16_t vid = 0, pid = 0; const char* rlabel = "SDR";
+                if(sdr_usb_ids(v.hw.type, &vid, &pid, &rlabel)){
                     usb_reset_in_progress.store(true);
                     // 핸들이 열려 있으면 커널이 deauthorize 할 때 걸린다.
                     if(v.dev_blade){ bladerf_close(v.dev_blade); v.dev_blade = nullptr; }
                     if(v.dev_rtl)  { rtlsdr_close(v.dev_rtl);    v.dev_rtl   = nullptr; }
+                    v.pluto_release();
                     NetServer* pc_srv = v.net_srv;
-                    std::thread([&usb_reset_in_progress = usb_reset_in_progress, vid, pid, pc_srv](){
-                        int rc = 1;
-                        if(vid) rc = usb_deep_powercycle(vid, pid, 2000);
+                    std::thread([&usb_reset_in_progress = usb_reset_in_progress,
+                                 vid, pid, rlabel, pc_srv](){
+                        int rc = usb_deep_powercycle(vid, pid, 2000);
                         if(rc == 2){
-                            bewe_log_push(2,"[UI] Power cycle: no permission - falling back to "
+                            bewe_log_push(2,"[UI] Chassis 1 reset: no permission - falling back to "
                                             "USB reset (deploy 99-bewe-usb-powercycle.rules)\n");
                             if(pc_srv) pc_srv->broadcast_chat("SYSTEM",
-                                "Power cycle: no permission - udev rule missing, using plain USB reset");
-                            bladerf_usb_reset();
+                                "Chassis 1 reset: no permission - udev rule missing, using plain USB reset");
+                            usb_reset_vidpid(vid, pid, rlabel);
                         } else if(rc != 0){
-                            bewe_log_push(2,"[UI] Power cycle FAILED (rc=%d)\n", rc);
-                            if(pc_srv) pc_srv->broadcast_chat("SYSTEM", "Power cycle FAILED - check log");
+                            bewe_log_push(2,"[UI] Chassis 1 reset FAILED (rc=%d)\n", rc);
+                            if(pc_srv) pc_srv->broadcast_chat("SYSTEM", "Chassis 1 reset FAILED - check log");
                         } else {
-                            bewe_log_push(2,"[UI] Power cycle done - reconnecting\n");
-                            if(pc_srv) pc_srv->broadcast_chat("SYSTEM", "Power cycle done - reconnecting ...");
+                            bewe_log_push(2,"[UI] Chassis 1 reset done - reconnecting\n");
+                            if(pc_srv) pc_srv->broadcast_chat("SYSTEM", "Chassis 1 reset done - reconnecting ...");
                         }
                         // 재열거 + udev 권한 재부여 대기. 너무 빨리 open 하면 장치는
                         // 보이는데 권한이 없어 실패한다.
                         std::this_thread::sleep_for(std::chrono::milliseconds(3000));
                         usb_reset_in_progress.store(false);
                     }).detach();
-                } else if(v.hw.type == HWType::BLADERF){
-                    usb_reset_in_progress.store(true);
-                    // capture_and_process 종료 시 dev_blade가 nullptr로 세팅됨
-                    // (혹시 남아있으면 닫기)
-                    if(v.dev_blade){
-                        bladerf_close(v.dev_blade);
-                        v.dev_blade = nullptr;
-                    }
-                    std::thread([&usb_reset_in_progress = usb_reset_in_progress](){
-                        bewe_log_push(2,"[UI] chassis 1 reset: USB reset BladeRF...\n");
-                        bladerf_usb_reset();
-                        std::this_thread::sleep_for(std::chrono::milliseconds(3000));
-                        bewe_log_push(2,"[UI] USB re-enumeration wait done\n");
-                        usb_reset_in_progress.store(false);
-                    }).detach();
                 }
-                // Pluto/RTL-SDR: USB reset 불필요, 재시도 타이머로 즉시 진행
             }
 
             static float sdr_retry_timer = 0.f;
@@ -9820,19 +9777,11 @@ void run_streaming_viewer(){
                             if(v.net_srv->cb.on_chat)
                                 v.net_srv->cb.on_chat(login_get_id(), chat_str.c_str());
                         } else if(chat_str.rfind("/powercycle", 0) == 0){
-                            // LOCAL: HOST 가 없어도 SDR 은 이 프로세스가 직접 쥐고 있다.
-                            // net_srv 게이트를 타는 위 경로 대신 여기서 바로 건다.
-                            if(v.is_running || cap.joinable()){
-                                push_local("SYSTEM", "Power cycle: deep USB reset ...", false);
-                                v.is_running = false;
-                                v.sdr_stream_error.store(true);
-                                v.tm_iq_on.store(false);
-                                v.spectrum_pause.store(true);
-                                usb_reset_pending   = true;
-                                deep_powercycle_req = true;
-                            } else {
-                                push_local("SYSTEM", "No SDR connected - skip power cycle", false);
-                            }
+                            // LOCAL: 프로세스 재시작·재부팅은 지원 안 한다 (GUI 는 사람이
+                            // 띄운 창이라 죽으면 아무도 다시 안 띄운다). SDR 복구는
+                            // /chassis 1 reset 이 같은 USB 재열거를 한다.
+                            push_local("SYSTEM",
+                                "/powercycle is station-only - use /chassis 1 reset here", false);
                         } else {
                             push_local("System", "Not connected — command needs a HOST.", true);
                         }

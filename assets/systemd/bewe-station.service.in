@@ -1,0 +1,63 @@
+# BEWE HOST CLI — station unit template.
+#
+# 왜 systemd 인가
+# ---------------
+# 기지는 무인이다. screen 으로 띄우면 프로세스가 죽었을 때, 그리고 머신이 재부팅
+# 됐을 때 사람이 SSH 로 붙어 다시 띄워야 한다. /powercycle partial(프로세스 재시작)
+# 과 /powercycle full(머신 재부팅)은 "죽은 뒤 누가 다시 띄우는가"가 보장돼야
+# 성립하는 명령이라, systemd 없이는 기지를 죽이는 명령이 되어 버린다.
+#
+# 설치 (기지당 1회)
+# -----------------
+#   scripts/install-station-unit.sh <STATION> <TIER> <PRESET>
+#
+# 수동으로 하려면 아래 @STATION@ 등을 치환해 /etc/systemd/system/bewe-station.service
+# 로 복사한 뒤 `systemctl daemon-reload && systemctl enable --now bewe-station`.
+#
+# 치환 변수:
+#   @STATION@   로그인 ID(= 기지 이름).  예: DGS-2
+#   @TIER@      로그인 tier.             예: 1
+#   @PRESET@    위치번호 (cli_host.cpp presets[]). 프리셋을 추가/제거하면 바뀐다.
+#   @USER@      실행 계정.               예: dsa
+#   @HOME@      그 계정의 홈.            예: /home/dsa
+#   @FIFO@      명령 주입용 FIFO 경로.   예: /run/bewe-dgs2.cmd
+
+[Unit]
+Description=BEWE HOST CLI - @STATION@
+# tailscaled 는 ordering-only. Central 접속은 tailnet 경유지만 tailscaled 장애가
+# 기동 자체를 막지 않게 Wants= 는 걸지 않는다.
+After=network-online.target tailscaled.service
+Wants=network-online.target
+# 시스템 종료 시 파일시스템이 read-only 로 remount 되기 전에 정지시킨다.
+# cli_host 의 종료 시퀀스가 host_state 저장 + HIST/IQ finalize 를 하므로
+# 그 전에 디스크가 잠기면 마지막 상태를 잃는다.
+Before=shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=simple
+User=@USER@
+PermissionsStartOnly=true
+WorkingDirectory=@HOME@/BEWE/build-cli
+# cli_host 는 stdin 으로 로그인 4줄을 받는다: ID / PW / Tier / 위치번호.
+# stdin 은 FIFO 로 연다. 로그인 4줄을 먼저 흘려보낸 뒤 FIFO 를 계속 재개방해
+# 운용 중 명령 주입(/ch, /hist check, /chassis 1 reset ...)이 가능하게 한다.
+ExecStartPre=/bin/bash -c 'rm -f @FIFO@ && mkfifo -m 0660 @FIFO@ && chown @USER@:@USER@ @FIFO@'
+ExecStart=/bin/bash -c 'exec ./BEWE < <(printf "@STATION@\n1\n@TIER@\n@PRESET@\n"; while :; do cat @FIFO@; done)'
+# on-failure: 크래시·SDR 오류는 자동 복구하되, 정상 종료(systemctl stop / 시스템
+# shutdown)에는 재기동하지 않는다. always 였을 때는 깨끗이 종료한 직후 10초 뒤
+# 다시 떠서 종료 순서에 의존하는 불확실한 동작이 됐다.
+#
+# /powercycle partial 은 이 정책에 맞춰 종료 코드 42(비정상)로 죽는다 — 그래야
+# 재기동이 걸린다. 정상 종료 경로는 그대로 0 이라 조용히 멈춘다.
+Restart=on-failure
+RestartSec=10
+# SIGTERM → cli_host 의 g_shutdown 플래그 → 종료 시퀀스(저장·finalize).
+# 90초는 기본값이지만 명시해 둔다 — HIST finalize + Central push 가 들어간다.
+KillSignal=SIGTERM
+TimeoutStopSec=90
+StandardOutput=append:/var/log/bewe-@STATIONLC@.log
+StandardError=append:/var/log/bewe-@STATIONLC@.log
+
+[Install]
+WantedBy=multi-user.target

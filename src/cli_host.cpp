@@ -473,6 +473,13 @@ void FFTViewer::set_channel_detect(int ch_idx, bool on){
 // ── Signal handler ───────────────────────────────────────────────────────
 static std::atomic<bool> g_shutdown{false};
 static void sig_handler(int){ g_shutdown.store(true); }
+// /powercycle full — 정상 종료(상태 저장 포함)를 마친 뒤 머신을 재부팅한다.
+// 종료 경로 한가운데서 재부팅하면 host_state 가 안 써진 채 날아갈 수 있어,
+// 모든 정리가 끝난 main() 맨 끝에서만 실행한다.
+static std::atomic<bool> g_reboot_on_exit{false};
+// /powercycle partial — 종료 후 systemd 가 다시 띄우게 한다. 유닛이
+// Restart=on-failure 라 정상 종료(0)로는 재기동이 안 걸린다.
+static std::atomic<bool> g_restart_on_exit{false};
 
 // ── System monitor helpers (from ui.cpp) ─────────────────────────────────
 static void read_cpu(long long& idle, long long& total){
@@ -830,8 +837,14 @@ void run_cli_host(){
     std::atomic<bool> pending_chassis2_reset{false};
     std::atomic<bool> pending_rx_stop{false};
     std::atomic<bool> pending_rx_start{false};
-    // /powercycle — chassis 1 로 안 풀리는 SDR 사망 시 USB 재열거까지 가는 상위 복구
-    std::atomic<bool> pending_powercycle{false};
+    // 복구 명령 3단계. 상위는 하위가 고치는 문제를 전부 포함한다.
+    //   /chassis 1 reset    USB 재열거 + SDR 재초기화        (프로세스 유지)
+    //   /powercycle partial 위 + BEWE 프로세스 재시작        (머신 유지)
+    //   /powercycle full    위 + 머신 재부팅
+    // 재열거를 상위 단계에서 빼면 포함관계가 깨진다 — 프로세스/머신만 새로 떠도
+    // 장치가 굳어 있으면 그대로 다시 만난다.
+    std::atomic<bool> pending_powercycle_partial{false};
+    std::atomic<bool> pending_powercycle_full{false};
     bool usb_reset_pending = false;
     std::atomic<bool> ch_sync_dirty_flag{false};
 
@@ -1264,12 +1277,26 @@ void run_cli_host(){
                 v.net_srv->broadcast_chat("SYSTEM", "Usage: /hist check");
             }
         }
-        // "/powercycle" — /chassis 1 reset 이 안 먹을 때의 상위 복구. JOIN 이든
-        // HOST UI 든 여기로 모인다. 실제 동작은 메인 루프가 한다 (SDR 재초기화가
-        // 캡처 스레드 수명을 건드리므로 네트워크 스레드에서 하면 안 된다).
+        // "/powercycle partial|full" — /chassis 1 reset 이 안 먹을 때의 상위 복구.
+        // JOIN 이든 HOST UI 든 여기로 모인다. 실제 동작은 메인 루프가 한다
+        // (SDR 재초기화가 캡처 스레드 수명을 건드리므로 네트워크 스레드에선 안 된다).
+        //
+        // 인자는 필수다. full 은 머신을 재부팅하므로 오타나 습관적 입력으로 실행되면
+        // 복구까지 1~2분이 날아간다 — 무엇을 하는지 명시하게 강제한다.
         else if(strncmp(msg, "/powercycle", 11) == 0 && (msg[11] == 0 || msg[11] == ' ')){
-            bewe_log_push(0,"[CMD:%s] /powercycle\n", from);
-            pending_powercycle.store(true);
+            const char* arg = msg + 11;
+            while(*arg == ' ') arg++;
+            if(strcmp(arg, "partial") == 0){
+                bewe_log_push(0,"[CMD:%s] /powercycle partial\n", from);
+                pending_powercycle_partial.store(true);
+            } else if(strcmp(arg, "full") == 0){
+                bewe_log_push(0,"[CMD:%s] /powercycle full\n", from);
+                pending_powercycle_full.store(true);
+            } else {
+                bewe_log_push(2,"[CMD:%s] /powercycle needs an argument\n", from);
+                if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM",
+                    "Usage: /powercycle partial (restart BEWE) | /powercycle full (reboot machine)");
+            }
         }
     };
     srv->cb.on_chat = chat_handler;
@@ -2300,38 +2327,19 @@ void run_cli_host(){
             }
         }
 
-        // ── Chassis/RX reset processing ──────────────────────────────────
-        if(v.net_srv && pending_chassis1_reset.load()){
-            pending_chassis1_reset.store(false);
-            bewe_log_push(0,"[CLI] Chassis 1 reset ...\n");
-            if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM", "Chassis 1 reset ...");
-            if(v.net_srv) v.net_srv->broadcast_heartbeat(1);
-            v.is_running = false;
-            v.sdr_stream_error.store(true);
-            v.tm_iq_on.store(false);
-            v.spectrum_pause.store(true);
-            usb_reset_pending = true;
-        }
-        // ── /powercycle ──────────────────────────────────────────────────
-        // chassis 1 reset 은 USBDEVFS_RESET 을 장치 핸들로 쏜다. 펌웨어 링크가
-        // 죽어 있으면(BladeRF NIOS II timeout) 그 리셋조차 장치에 안 닿아 몇 번을
-        // 쳐도 안 살아난다. 여기서는 커널에게 unbind/재열거를 시켜(authorized 0>1)
-        // 케이블을 뽑았다 꽂은 것과 같은 상태로 만든다.
+        // ── 복구 3단계 공통: SDR 정지 + USB 재열거 ────────────────────────
+        // 세 단계(/chassis 1 reset, /powercycle partial, /powercycle full)가 전부
+        // 이 루틴을 거친다. 상위 단계가 재열거를 건너뛰면 "상위는 하위를 포함한다"가
+        // 깨진다 — 프로세스나 머신을 새로 띄워도 굳은 장치는 그대로 다시 만난다.
         //
-        // 순서: 캡처 정지 > 핸들 close > 딥 파워사이클 > sdr_stream_error 로
-        // 아래 reconnect 로직에 위임. 재초기화 자체를 여기서 직접 하지 않는 건
-        // 기존 reconnect 경로가 이미 fft plan 재생성·dem_worker 재기동·autoscale
-        // 재트리거까지 다 하고 있기 때문이다 (중복 구현하면 어긋난다).
-        if(v.net_srv && pending_powercycle.load()){
-            pending_powercycle.store(false);
-            bewe_log_push(0,"[CLI] Power cycle: deep USB re-enumeration ...\n");
-            v.net_srv->broadcast_chat("SYSTEM", "Power cycle: deep USB reset ...");
-            v.net_srv->broadcast_heartbeat(1);
-
+        // 재초기화 자체는 하지 않고 sdr_stream_error 로 아래 reconnect 로직에
+        // 위임한다. 그쪽이 이미 fft plan 재생성·dem_worker 재기동·autoscale
+        // 재트리거를 다 하고 있어서, 여기서 중복 구현하면 어긋난다.
+        auto stop_sdr_and_reenumerate = [&](const char* tag){
             uint16_t vid = 0, pid = 0; const char* pc_label = "SDR";
             sdr_usb_ids(v.hw.type, &vid, &pid, &pc_label);
 
-            // 캡처 스레드를 먼저 내린다. 파워사이클 도중 살아 있으면 사라진 장치에
+            // 캡처 스레드를 먼저 내린다. 재열거 도중 살아 있으면 사라진 장치에
             // 계속 read 를 걸어 libusb 가 에러 폭주한다.
             v.is_running = false;
             v.sdr_stream_error.store(true);
@@ -2340,13 +2348,13 @@ void run_cli_host(){
             if(v.dev_rtl) rtlsdr_cancel_async(v.dev_rtl);
 
             // 여기서 그냥 join 하면 캡처가 블로킹 read 안에 갇혀 있을 때 메인 루프가
-            // 통째로 멈춘다 — /powercycle 은 바로 그 상황을 풀려고 치는 명령인데,
-            // 정작 파워사이클 코드에 도달조차 못 하는 자기모순이 된다.
+            // 통째로 멈춘다 — 이 명령들은 바로 그 상황을 풀려고 치는 것인데, 정작
+            // 재열거 코드에 도달조차 못 하는 자기모순이 된다.
             // (2026-07-29 DGS-2: 무한 iio_buffer_refill 에 갇혀 명령 무반응)
             // 그래서 USB reset 으로 블로킹 read 를 먼저 깨워 스레드가 빠져나오게 한다.
-            // 그래도 안 빠지면 detach 해서 버린다 — 5초를 넘겨 기다리느니 파워사이클을
-            // 진행하는 편이 낫다. 재열거가 끝나면 그 스레드의 read 는 어차피 에러로
-            // 리턴하고 루프가 종료된다(is_running=false).
+            // 그래도 안 빠지면 detach 해서 버린다 — 계속 기다리느니 재열거를 진행하는
+            // 편이 낫다. 재열거가 끝나면 그 스레드의 read 는 어차피 에러로 리턴하고
+            // 루프가 종료된다(is_running=false).
             if(cap.joinable()){
                 for(int attempt = 0; attempt < 5 && !v.cap_exited.load(); attempt++){
                     if(vid) usb_reset_vidpid(vid, pid, pc_label);   // 블로킹 read 깨우기
@@ -2355,8 +2363,8 @@ void run_cli_host(){
                 if(v.cap_exited.load()){
                     cap.join();
                 } else {
-                    bewe_log_push(2,"[CLI] Power cycle: capture thread stuck - "
-                                    "detaching and proceeding with re-enumeration\n");
+                    bewe_log_push(2,"[CLI] %s: capture thread stuck - "
+                                    "detaching and proceeding with re-enumeration\n", tag);
                     cap.detach();   // joinable 인 채로 재대입하면 std::terminate
                 }
             }
@@ -2371,6 +2379,22 @@ void run_cli_host(){
             // 때문에 deauthorize 가 깨끗하게 안 된다.
             v.pluto_release();
 
+            return std::make_tuple(vid, pid, pc_label);
+        };
+
+        // ── /chassis 1 reset — USB 재열거 + SDR 재초기화 ──────────────────
+        // 예전엔 USBDEVFS_RESET 을 장치 핸들로 쏘는 약한 리셋이었다. 펌웨어 링크가
+        // 죽어 있으면(BladeRF NIOS II timeout, Pluto USB wedge) 그 리셋조차 장치에
+        // 안 닿아 몇 번을 쳐도 안 살아났다. 이제는 커널에게 unbind/재열거를 시켜
+        // (authorized 0>1) 케이블을 뽑았다 꽂은 것과 같은 상태로 만든다.
+        if(v.net_srv && pending_chassis1_reset.load()){
+            pending_chassis1_reset.store(false);
+            bewe_log_push(0,"[CLI] Chassis 1 reset: deep USB re-enumeration ...\n");
+            v.net_srv->broadcast_chat("SYSTEM", "Chassis 1 reset ...");
+            v.net_srv->broadcast_heartbeat(1);
+
+            auto [vid, pid, pc_label] = stop_sdr_and_reenumerate("Chassis 1 reset");
+
             // 블로킹 구간(최소 2초 off + 재열거 대기)이라 메인 루프를 세우지 않도록
             // 별도 스레드에서 돌린다. 끝나면 reconnect 로직이 이어받는다.
             std::atomic<bool>* pc_busy = &usb_reset_in_progress;
@@ -2382,20 +2406,20 @@ void run_cli_host(){
                 if(rc == 2){
                     // udev rule 미배포 — 이 기지에선 딥 리셋이 불가능하다. 조용히
                     // 실패하면 운용자가 "쳤는데 왜 안 되지" 로 시간을 버리므로 명시한다.
-                    bewe_log_push(2,"[CLI] Power cycle: no permission - falling back to "
+                    bewe_log_push(2,"[CLI] Chassis 1 reset: no permission - falling back to "
                                     "USB reset (deploy 99-bewe-usb-powercycle.rules)\n");
                     if(pc_srv) pc_srv->broadcast_chat("SYSTEM",
-                        "Power cycle: no permission - udev rule missing, using plain USB reset");
+                        "Chassis 1 reset: no permission - udev rule missing, using plain USB reset");
                     usb_reset_vidpid(vid, pid, pc_label);
                 } else if(rc != 0){
-                    bewe_log_push(2,"[CLI] Power cycle FAILED (rc=%d)\n", rc);
-                    if(pc_srv) pc_srv->broadcast_chat("SYSTEM", "Power cycle FAILED - check station log");
+                    bewe_log_push(2,"[CLI] Chassis 1 reset FAILED (rc=%d)\n", rc);
+                    if(pc_srv) pc_srv->broadcast_chat("SYSTEM", "Chassis 1 reset FAILED - check station log");
                 } else {
                     // 재열거가 끝나고 udev 가 권한을 다시 붙일 때까지 기다린다.
                     // 너무 빨리 bladerf_open 하면 장치는 보이는데 권한이 없어 실패한다.
                     std::this_thread::sleep_for(std::chrono::milliseconds(3000));
-                    bewe_log_push(0,"[CLI] Power cycle done - reconnecting\n");
-                    if(pc_srv) pc_srv->broadcast_chat("SYSTEM", "Power cycle done - reconnecting ...");
+                    bewe_log_push(0,"[CLI] Chassis 1 reset done - reconnecting\n");
+                    if(pc_srv) pc_srv->broadcast_chat("SYSTEM", "Chassis 1 reset done - reconnecting ...");
                 }
                 pc_busy->store(false);
             }).detach();
@@ -2406,6 +2430,47 @@ void run_cli_host(){
             cap_joined.store(true);
             usb_reset_pending = false;
             usb_reset_done    = true;
+        }
+
+        // ── /powercycle partial|full ─────────────────────────────────────
+        // chassis 1 reset 이 못 고치는 것 = 프로세스 자신의 상태다 (핸들 누수, 갇힌
+        // 스레드, 메모리). 그건 프로세스를 새로 띄워야만 청소된다 — OS 가 fd 를
+        // 강제 회수하기 때문이다. full 은 거기에 머신 재부팅까지 얹는다 (커널/드라이버
+        // 레벨까지 초기화).
+        //
+        // 어느 쪽이든 먼저 USB 재열거를 돌린다. 안 그러면 새로 뜬 프로세스가 굳은
+        // 장치를 그대로 다시 만난다 — 상위가 하위를 포함해야 한다는 요구가 깨진다.
+        //
+        // 재기동은 systemd 가 한다 (Restart=always). BEWE 는 그냥 종료하면 되고,
+        // full 은 종료 전에 재부팅을 예약한다. host_state_<STATION>.json 이
+        // cf/sr/gain/채널필터/디코드모듈을 이미 들고 있어 복귀 시 직전 상태로 돌아온다.
+        if(v.net_srv && (pending_powercycle_partial.load() || pending_powercycle_full.load())){
+            const bool full = pending_powercycle_full.load();
+            pending_powercycle_partial.store(false);
+            pending_powercycle_full.store(false);
+            const char* tag = full ? "Power cycle full" : "Power cycle partial";
+
+            bewe_log_push(0,"[CLI] %s: re-enumerating USB before restart ...\n", tag);
+            v.net_srv->broadcast_chat("SYSTEM",
+                full ? "Power cycle full: rebooting station ..."
+                     : "Power cycle partial: restarting BEWE ...");
+            v.net_srv->broadcast_heartbeat(1);
+
+            auto [vid, pid, pc_label] = stop_sdr_and_reenumerate(tag);
+            if(vid){
+                int rc = usb_deep_powercycle(vid, pid, 2000);
+                if(rc != 0){
+                    bewe_log_push(2,"[CLI] %s: re-enumeration rc=%d - falling back to USB reset\n",
+                                  tag, rc);
+                    usb_reset_vidpid(vid, pid, pc_label);
+                }
+            }
+
+            if(full) g_reboot_on_exit.store(true);
+            else     g_restart_on_exit.store(true);
+            // 종료 경로는 SIGINT 와 동일하다 — 녹음 flush, host_state 저장,
+            // Central 정리까지 전부 그쪽이 한다. 여기서 따로 하면 이중 정리가 된다.
+            g_shutdown.store(true);
         }
 
         if(v.net_srv && pending_chassis2_reset.load()){
@@ -2836,10 +2901,21 @@ void run_cli_host(){
                     }
                 }
                 fflush(stdout);
-            } else if(line == "/powercycle"){
-                // /chassis 1 reset 이 안 먹는 SDR 사망 상태의 상위 복구.
-                bewe_log_push(0,"[CMD:CLI] /powercycle\n");
-                pending_powercycle.store(true);
+            } else if(line == "/powercycle" || line.rfind("/powercycle ", 0) == 0){
+                // /chassis 1 reset 이 안 먹는(= 프로세스 자신이 문제인) 상태의 상위 복구.
+                // 인자 필수 — full 은 머신을 재부팅하므로 습관적 입력으로 실행되면 안 된다.
+                std::string arg = line.size() > 11 ? line.substr(11) : "";
+                while(!arg.empty() && arg.front() == ' ') arg.erase(arg.begin());
+                if(arg == "partial"){
+                    bewe_log_push(0,"[CMD:CLI] /powercycle partial\n");
+                    pending_powercycle_partial.store(true);
+                } else if(arg == "full"){
+                    bewe_log_push(0,"[CMD:CLI] /powercycle full\n");
+                    pending_powercycle_full.store(true);
+                } else {
+                    bewe_log_push(2,"[CMD:CLI] Usage: /powercycle partial (restart BEWE) | "
+                                    "/powercycle full (reboot machine)\n");
+                }
                 fflush(stdout);
             } else if(line == "/hist" || line.rfind("/hist ", 0) == 0){
                 // /hist check — 보존된 로컬 .bewehist 를 Central 아카이브와 대조해
@@ -3042,4 +3118,27 @@ void run_cli_host(){
     // 종료 시 record/ 녹음을 보존 (이전엔 private/ 로 이동했으나 제거).
 
     bewe_log_push(0,"[BEWE CLI] Stopped.\n");
+
+    // /powercycle full — 여기까지 왔으면 host_state 저장·미션 finalize·HIST rename 이
+    // 전부 끝났다. 이제서야 재부팅한다. polkit 이 systemctl reboot 을 허용하므로
+    // sudo 는 불필요하다 (전 기지 확인함). 부팅 후엔 systemd 유닛이 BEWE 를 다시
+    // 띄우고, host_state 가 직전 상태로 복원한다.
+    if(g_reboot_on_exit.load()){
+        bewe_log_push(0,"[BEWE CLI] Power cycle full: rebooting station now.\n");
+        std::fflush(stdout); std::fflush(stderr);
+        if(std::system("systemctl reboot") != 0)
+            bewe_log_push(2,"[BEWE CLI] reboot command failed - station left down!\n");
+        return;   // 재부팅이 시작됐다 — systemd 가 재기동할 필요 없다
+    }
+
+    // /powercycle partial 은 systemd 가 다시 띄워 줘야 완성된다. 유닛이
+    // Restart=on-failure 이므로(정상 종료로 죽었다 살아나는 혼란을 막으려는 설정)
+    // 그냥 리턴하면 종료 코드 0 이라 재기동이 안 걸린다 — 기지가 그대로 죽는다.
+    // 그래서 "실패" 로 종료해 재기동을 유도한다. systemctl stop / SIGTERM 은
+    // 이 플래그가 안 서므로 정상 리턴해 조용히 멈춘다.
+    if(g_restart_on_exit.load()){
+        bewe_log_push(0,"[BEWE CLI] Power cycle partial: exiting for systemd restart.\n");
+        std::fflush(stdout); std::fflush(stderr);
+        std::exit(42);
+    }
 }
