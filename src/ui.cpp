@@ -6667,6 +6667,14 @@ void run_streaming_viewer(){
             if(v.sig_lib_panel_open != prev_lib){ v.sig_lib_panel_open ? push_ov(5) : pop_ov(5); prev_lib=v.sig_lib_panel_open; }
             if(v.mission_modal_open != prev_mission){ v.mission_modal_open ? push_ov(6) : pop_ov(6); prev_mission=v.mission_modal_open; }
             if(v.demod_panel_open != prev_demod){ v.demod_panel_open ? push_ov(7) : pop_ov(7); prev_demod=v.demod_panel_open; }
+            // ui.cpp 밖(mission_view 등)에서도 "지금 누가 최상단인가"를 알아야 한다.
+            // STATUS(4)는 상시 사이드바라 '연 창'이 아니므로 판정에서 제외한다.
+            {
+                int t = 0;
+                for(auto it = g_overlay_stack.rbegin(); it != g_overlay_stack.rend(); ++it)
+                    if(*it != 4){ t = *it; break; }
+                v.overlay_top_id = t;
+            }
         }
         // STATUS(우측패널) 격리: 전체영역 오버레이(SA/LOG/HIST/LIB/DEMOD) 열려있으면
         // STATUS 토글·드래그·렌더 전부 차단. 내부 상태/백그라운드는 유지, 입력·표시만 막음.
@@ -9557,7 +9565,10 @@ void run_streaming_viewer(){
             ImGui::PushStyleColor(ImGuiCol_FrameBg,ImVec4(0.10f,0.12f,0.20f,1.f));
             ImGui::Begin("##chat",nullptr,
                 ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|
-                ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar);
+                ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar|
+                // NoInputs 까지 걸어야 클릭 순간의 focus 획득을 원천 차단한다.
+                // focus 강제만 끄면 "클릭한 그 프레임"에 채팅창이 MSN 위로 한 번 튄다.
+                (v.mission_input_lock() ? ImGuiWindowFlags_NoInputs : 0));
 
             ImGui::TextColored(ImVec4(0.4f,0.7f,1.f,1.f),"Chat");
             ImGui::Separator();

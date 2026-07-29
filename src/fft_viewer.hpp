@@ -1028,11 +1028,22 @@ public:
     // (ImGui 위젯 기반 경로는 IsItemHovered() 가 이미 처리해준다.)
     static bool float_win_capturing_mouse();
 
+    // 오버레이 z-order: 사용자가 "가장 마지막에 연 창"이 위로 온다 (ui.cpp 의
+    // g_overlay_stack / push_ov / pop_ov 가 관리). ui.cpp 밖(mission_view 등)에서
+    // 그 판정이 필요하므로 매 프레임 스택 최상단 ID 를 여기에 실어 준다.
+    //   0=none 1=SA 2=LOG 3=HIST 4=STATUS 5=LIB 6=MSN 7=DEMOD
+    int overlay_top_id = 0;
+    bool overlay_is_top_mission() const { return overlay_top_id == 6; }
+
     // MSN 이 열려 있는 동안 뒤쪽(메인페이지·STATUS)은 "보이되 잠긴다".
     // 바깥을 클릭해도 아무 반응이 없어야 하고, 무엇보다 그 클릭으로 뒤 창이
     // MSN 위로 올라오면 안 된다. 뒤 창(##stat_panel 등)에 NoInputs 를 붙이는
     // 근거이기도 하다 — NoInputs 면 ImGui 가 focus 를 주지 않아 z-order 가 안 뒤집힌다.
-    bool mission_input_lock() const { return mission_modal_open; }
+    // MSN 이 최상단일 때만 잠근다. HIST 뷰어처럼 MSN 보다 나중에 뜬 창이 있으면
+    // 그쪽이 주인공이므로 이 잠금은 풀려야 한다 ("마지막에 연 창이 위" 규칙).
+    bool mission_input_lock() const {
+        return mission_modal_open && overlay_is_top_mission();
+    }
 
     // 메인페이지 마우스 입력을 지금 받아도 되는가의 반대 — 입력 경로는 이걸 쓴다.
     // 풀스크린 오버레이 / MSN 이 떠 있거나, 마우스가 얹힌 창 위에 있으면 차단.

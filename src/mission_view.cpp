@@ -2609,9 +2609,10 @@ void draw_modal(FFTViewer& v, NetClient* cli){
     ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - W)*0.5f,
                                    (io.DisplaySize.y - H)*0.5f),
                             ImGuiCond_Once);
-    // 열려 있는 동안 항상 최상단 유지. 뒤 창들은 NoInputs 라 focus 를 못 뺏지만,
-    // 팝업·컨텍스트 메뉴 등 다른 경로로 z-order 가 밀리는 것까지 막는다.
-    ImGui::SetNextWindowFocus();
+    // 오버레이 스택 최상단(= 사용자가 가장 마지막에 연 창)일 때만 focus 를 가져온다.
+    // 무조건 강제하면 나중에 뜬 HIST 뷰어가 MSN 뒤로 깔린다 — "마지막에 작동시킨
+    // 창이 위" 가 규칙이다. 스택 관리는 ui.cpp 의 push_ov/pop_ov.
+    if(v.overlay_is_top_mission()) ImGui::SetNextWindowFocus();
     ImGui::SetNextWindowBgAlpha(0.96f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.f);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.08f, 0.14f, 1.f));
