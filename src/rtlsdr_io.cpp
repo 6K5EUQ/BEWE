@@ -115,7 +115,8 @@ bool FFTViewer::initialize_rtlsdr(float cf_mhz){
     rtlsdr_reset_buffer(dev_rtl);
 
     hw = make_rtlsdr_config(actual_sr);
-    gain_db = hw.gain_default;
+    // 재초기화에서는 운용자 gain 을 지킨다 (bladerf_io.cpp 와 동일 이유).
+    if(gain_db <= 0.f) gain_db = hw.gain_default;
 
     bewe_log_push(0,"RTL-SDR: %.2f MHz  %.3f MSPS  gain %.1f dB\n",
            cf_mhz, actual_sr/1e6, RTLSDR_RX_GAIN_TENTHS/10.0);

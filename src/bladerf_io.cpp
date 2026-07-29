@@ -188,7 +188,10 @@ bool FFTViewer::initialize_bladerf(float cf_mhz, float sr_msps){
     bewe_log("BladeRF: %.2f MHz  %.2f MSPS  BW %.2f MHz\n",cf_mhz,actual/1e6f,actual_bw/1e6f);
 
     hw = make_bladerf_config(actual);
-    gain_db = hw.gain_default;
+    // 재초기화(chassis 1 / powercycle / 자동 재연결)에서는 운용자가 맞춰 둔 gain 을
+    // 지켜야 한다. 무조건 gain_default 로 덮으면 복구 때마다 감도가 조용히 바뀐다
+    // (DGS-X 실측: 21.0 dB > 10.0 dB). 최초 오픈일 때만 기본값을 채운다.
+    if(gain_db <= 0.f) gain_db = hw.gain_default;
     std::memcpy(header.magic,"FFTD",4);
     fft_input_size = fft_size / FFT_PAD_FACTOR;  // fft_size is already padded in member init
     header.version=1; header.fft_size=fft_size; header.sample_rate=actual;

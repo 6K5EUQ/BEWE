@@ -113,7 +113,8 @@ bool FFTViewer::initialize_pluto(float cf_mhz, float sr_msps){
     pluto_rx_buf  = buf;
 
     hw = make_pluto_config(actual_sr);
-    gain_db = hw.gain_default;
+    // 재초기화에서는 운용자 gain 을 지킨다 (bladerf_io.cpp 와 동일 이유).
+    if(gain_db <= 0.f) gain_db = hw.gain_default;
 
     bewe_log_push(0,"Pluto: %.2f MHz  %.3f MSPS  gain %.0f dB\n",
            cf_mhz, actual_sr/1e6, gain_db);
