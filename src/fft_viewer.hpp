@@ -263,6 +263,9 @@ public:
     std::atomic<bool> capture_pause{false};// 캡처 스레드 pause (타임머신과 무관)
     std::atomic<bool> net_bcast_pause{false}; // /chassis 2 reset: 방송 일시 중단
     std::atomic<bool> sdr_stream_error{false};  // SDR 스트림 오류 (뽑힘/초기화 실패)
+    // 캡처 스레드가 루프를 빠져나왔는지. /powercycle 이 join 을 무한정 기다리지 않고
+    // (블로킹 read 에 갇혔을 수 있다) 포기 시점을 판단하는 데 쓴다.
+    std::atomic<bool> cap_exited{false};
     std::atomic<bool> dem_restart_needed{false}; // SR 변경 후 demod 재시작 필요
     std::atomic<bool> wf_area_visible{true};    // 워터폴 영역 실제 표시 여부 (수평바 포함)
     bool tm_iq_was_stopped=false;
@@ -954,6 +957,7 @@ public:
     bool initialize_bladerf(float cf_mhz, float sr_msps);
     bool initialize_rtlsdr(float cf_mhz);
     bool initialize_pluto(float cf_mhz, float sr_msps);
+    void pluto_release();            // iio buffer/context 해제 (idempotent)
     float pluto_get_temp_c() const;  // AD9361 내부 온도 °C (실패 시 음수)
     void capture_and_process();
     void capture_and_process_rtl();
@@ -1059,9 +1063,29 @@ void run_cli_host();
 void run_streaming_viewer();
 #endif
 
-// ── BladeRF USB 소프트 리셋 (sudo 불필요, udev rule 권한 사용) ─────────────
+// 캡처 스레드 수명 표시 RAII. 생성 시 cap_exited=false, 소멸(모든 return/예외
+// 경로) 시 true. /powercycle 이 join 을 포기할지 판단하는 데 쓴다.
+struct CapLifeGuard {
+    std::atomic<bool>* f;
+    explicit CapLifeGuard(std::atomic<bool>* p) : f(p) { f->store(false); }
+    ~CapLifeGuard(){ f->store(true); }
+};
+
+// ── USB 소프트 리셋 (sudo 불필요, udev rule 권한 사용) ────────────────────
 // USBDEVFS_RESET ioctl: 물리적으로 뽑았다 꽂는 것과 동일한 효과
+bool usb_reset_vidpid(uint16_t vid, uint16_t pid, const char* label);
 bool bladerf_usb_reset();
+
+// SDR 종류 → USB VID/PID. /chassis 1 reset · /powercycle · stall watchdog 이
+// 공유한다 (한 곳에서 빠지면 그 SDR 만 복구가 안 되는 사고가 난다).
+inline bool sdr_usb_ids(HWType t, uint16_t* vid, uint16_t* pid, const char** label){
+    switch(t){
+        case HWType::BLADERF: *vid=0x2cf0; *pid=0x5250; *label="BladeRF";     return true;
+        case HWType::RTLSDR:  *vid=0x0bda; *pid=0x2838; *label="RTL-SDR";     return true;
+        case HWType::PLUTO:   *vid=0x0456; *pid=0xb673; *label="ADALM-Pluto"; return true;
+        default: return false;
+    }
+}
 
 // ── RTL-SDR USB 소프트 리셋 (VID:PID 0bda:2838) ───────────────────────────
 // rtlsdr_read_sync 가 wedge된 커널 sync-URB 큐에서 영구 hang 할 때, 단순 reopen

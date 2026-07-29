@@ -2328,6 +2328,9 @@ void run_cli_host(){
             v.net_srv->broadcast_chat("SYSTEM", "Power cycle: deep USB reset ...");
             v.net_srv->broadcast_heartbeat(1);
 
+            uint16_t vid = 0, pid = 0; const char* pc_label = "SDR";
+            sdr_usb_ids(v.hw.type, &vid, &pid, &pc_label);
+
             // 캡처 스레드를 먼저 내린다. 파워사이클 도중 살아 있으면 사라진 장치에
             // 계속 read 를 걸어 libusb 가 에러 폭주한다.
             v.is_running = false;
@@ -2335,28 +2338,45 @@ void run_cli_host(){
             v.tm_iq_on.store(false);
             v.spectrum_pause.store(true);
             if(v.dev_rtl) rtlsdr_cancel_async(v.dev_rtl);
-            if(cap.joinable()) cap.join();
+
+            // 여기서 그냥 join 하면 캡처가 블로킹 read 안에 갇혀 있을 때 메인 루프가
+            // 통째로 멈춘다 — /powercycle 은 바로 그 상황을 풀려고 치는 명령인데,
+            // 정작 파워사이클 코드에 도달조차 못 하는 자기모순이 된다.
+            // (2026-07-29 DGS-2: 무한 iio_buffer_refill 에 갇혀 명령 무반응)
+            // 그래서 USB reset 으로 블로킹 read 를 먼저 깨워 스레드가 빠져나오게 한다.
+            // 그래도 안 빠지면 detach 해서 버린다 — 5초를 넘겨 기다리느니 파워사이클을
+            // 진행하는 편이 낫다. 재열거가 끝나면 그 스레드의 read 는 어차피 에러로
+            // 리턴하고 루프가 종료된다(is_running=false).
+            if(cap.joinable()){
+                for(int attempt = 0; attempt < 5 && !v.cap_exited.load(); attempt++){
+                    if(vid) usb_reset_vidpid(vid, pid, pc_label);   // 블로킹 read 깨우기
+                    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+                }
+                if(v.cap_exited.load()){
+                    cap.join();
+                } else {
+                    bewe_log_push(2,"[CLI] Power cycle: capture thread stuck - "
+                                    "detaching and proceeding with re-enumeration\n");
+                    cap.detach();   // joinable 인 채로 재대입하면 std::terminate
+                }
+            }
 
             // 핸들을 닫아야 커널이 deauthorize 할 때 걸리지 않는다.
             if(v.dev_blade){
                 bladerf_close(v.dev_blade); v.dev_blade = nullptr;
             }
             if(v.dev_rtl){ rtlsdr_close(v.dev_rtl); v.dev_rtl = nullptr; }
-
-            uint16_t vid = 0, pid = 0;
-            switch(v.hw.type){
-                case HWType::BLADERF: vid = 0x2cf0; pid = 0x5250; break;
-                case HWType::RTLSDR:  vid = 0x0bda; pid = 0x2838; break;
-                case HWType::PLUTO:   vid = 0x0456; pid = 0xb673; break;
-                default: break;
-            }
+            // Pluto: 정상 종료면 캡처 루프가 이미 정리했지만, 캡처가 뜨기 전에
+            // 명령이 들어온 경우엔 컨텍스트가 살아 있다. 남으면 libiio 의 USB 클레임
+            // 때문에 deauthorize 가 깨끗하게 안 된다.
+            v.pluto_release();
 
             // 블로킹 구간(최소 2초 off + 재열거 대기)이라 메인 루프를 세우지 않도록
             // 별도 스레드에서 돌린다. 끝나면 reconnect 로직이 이어받는다.
             std::atomic<bool>* pc_busy = &usb_reset_in_progress;
             NetServer* pc_srv = v.net_srv;
             pc_busy->store(true);
-            std::thread([vid, pid, pc_busy, pc_srv](){
+            std::thread([vid, pid, pc_label, pc_busy, pc_srv](){
                 int rc = 1;
                 if(vid) rc = usb_deep_powercycle(vid, pid, 2000);
                 if(rc == 2){
@@ -2366,7 +2386,7 @@ void run_cli_host(){
                                     "USB reset (deploy 99-bewe-usb-powercycle.rules)\n");
                     if(pc_srv) pc_srv->broadcast_chat("SYSTEM",
                         "Power cycle: no permission - udev rule missing, using plain USB reset");
-                    bladerf_usb_reset();
+                    usb_reset_vidpid(vid, pid, pc_label);
                 } else if(rc != 0){
                     bewe_log_push(2,"[CLI] Power cycle FAILED (rc=%d)\n", rc);
                     if(pc_srv) pc_srv->broadcast_chat("SYSTEM", "Power cycle FAILED - check station log");
@@ -2380,8 +2400,8 @@ void run_cli_host(){
                 pc_busy->store(false);
             }).detach();
 
-            // 캡처 스레드는 이미 join 했다. reconnect 로직이 다시 join 을 시도하지
-            // 않도록 상태를 정리해 둔다.
+            // 캡처 스레드 회수는 위에서 끝냈다 (stuck 이면 detach 된 채로 둔다).
+            // reconnect 로직이 다시 join 을 시도하지 않도록 상태를 정리해 둔다.
             bg_join_started = false;
             cap_joined.store(true);
             usb_reset_pending = false;
@@ -2543,6 +2563,8 @@ void run_cli_host(){
         // 영구 hang → sdr_stream_error 안 set → 아래 reconnect 영원히 안 탐 (silent
         // death, ~22h). total_ffts 정체를 직접 감지해 강제 복구. RTL 은 reopen 만으론
         // 안 풀려 USB reset 으로 hung read_sync 를 깨운 뒤 reconnect 에 위임. (v4.6.1)
+        // USB reset 은 SDR 종류를 가리지 않는다 — 예전엔 RTL 만 했는데, Pluto 도
+        // 같은 wedge 가 나므로 재초기화만 반복하며 안 풀렸다 (2026-07-29 DGS-2).
         {
             static int  wd_last_ffts = -1;
             static auto wd_last_change = clk::now();
@@ -2556,7 +2578,10 @@ void run_cli_host(){
                 } else if(std::chrono::duration<float>(clk::now()-wd_last_change).count() >= 10.0f){
                     bewe_log_push(0,"[CLI] SDR STALL: total_ffts frozen >=10s (read_sync hang) "
                                     "- forcing recovery\n");
-                    if(v.hw.type == HWType::RTLSDR) rtl_usb_reset();  // 깨워야 read_sync 가 에러 반환
+                    // 깨워야 블로킹 read (read_sync / iio_buffer_refill) 가 에러 반환
+                    uint16_t wvid=0, wpid=0; const char* wlabel=nullptr;
+                    if(sdr_usb_ids(v.hw.type, &wvid, &wpid, &wlabel))
+                        usb_reset_vidpid(wvid, wpid, wlabel);
                     v.sdr_stream_error.store(true);  // 아래 reconnect 트리거
                     wd_last_change = clk::now();      // 복구 중 재발화 방지
                 }
@@ -2582,20 +2607,28 @@ void run_cli_host(){
                 cap_joined.store(true);
             }
 
+            // SDR 종류와 무관하게 USB 리셋을 건다. 예전엔 BladeRF 만 리셋하고
+            // "Pluto/RTL-SDR: USB reset 불필요" 로 넘겼는데, 그러면 /chassis 1 reset
+            // 이 하는 일이 재초기화뿐이라 stall watchdog 이 이미 10초마다 하던 것과
+            // 같아진다 — USB 가 wedge 된 상태에선 몇 번을 쳐도 안 살아난다.
+            // (2026-07-29 DGS-2 Pluto: STALL/reconnect 33회 무한루프)
             if(cap_joined.load() && usb_reset_pending && !usb_reset_done){
                 usb_reset_done = true;
                 usb_reset_pending = false;
-                if(v.hw.type == HWType::BLADERF){
+                uint16_t rvid=0, rpid=0; const char* rlabel=nullptr;
+                if(sdr_usb_ids(v.hw.type, &rvid, &rpid, &rlabel)){
                     usb_reset_in_progress.store(true);
+                    // 핸들이 열려 있으면 리셋 후 stale fd 가 남는다. 종류별로 닫는다.
                     if(v.dev_blade){ bladerf_close(v.dev_blade); v.dev_blade=nullptr; }
-                    std::thread([&usb_reset_in_progress](){
-                        bewe_log_push(0,"[CLI] chassis 1 reset: USB reset BladeRF...\n");
-                        bladerf_usb_reset();
+                    if(v.dev_rtl){ rtlsdr_close(v.dev_rtl); v.dev_rtl=nullptr; }
+                    v.pluto_release();
+                    std::thread([&usb_reset_in_progress, rvid, rpid, rlabel](){
+                        bewe_log_push(0,"[CLI] chassis 1 reset: USB reset %s...\n", rlabel);
+                        usb_reset_vidpid(rvid, rpid, rlabel);
                         std::this_thread::sleep_for(std::chrono::milliseconds(3000));
                         usb_reset_in_progress.store(false);
                     }).detach();
                 }
-                // Pluto/RTL-SDR: USB reset 불필요, 재시도 타이머로 즉시 진행
             }
 
             sdr_retry_timer -= dt;

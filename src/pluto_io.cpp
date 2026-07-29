@@ -20,14 +20,23 @@ static constexpr uint32_t PLUTO_MAX_SR     = 61440000; // 61.44 MSPS (AD9361 최
 // 버퍼만 8192 로 줄고 fft_input_size 는 큰 채로 남아 RX 가 통째로 폐기됐다.
 static constexpr int      PLUTO_BUF_MIN    = 8192;     // iio_buffer 최소 샘플 수
 
+// iio_buffer_refill 블로킹 상한 (ms). 0 = 무한 = libiio 기본값.
+// 무한이면 USB 스트리밍이 wedge 됐을 때 refill 이 영영 리턴하지 않아, 캡처 루프의
+// while(is_running && !sdr_stream_error) 조건이 아예 평가되지 않는다. 그러면
+// (a) stall watchdog 이 sdr_stream_error 를 세워도 루프가 안 빠지고
+// (b) /powercycle 의 cap.join() 이 영구 대기해 메인 루프까지 멈춘다.
+// RTL 은 rtlsdr_cancel_async() 로 밖에서 깨울 수 있지만 libiio 엔 취소 API 가 없어
+// 사전에 타임아웃을 걸어두는 것이 유일한 탈출구다. 2 MSPS·8192 샘플 정상 refill 은
+// 약 4 ms 라 3 초는 오탐 여지 없이 충분히 여유롭다.
+static constexpr unsigned  PLUTO_RW_TIMEOUT_MS = 3000;
+
 // ── URI 후보 순회 (USB → IP) ─────────────────────────────────────────────
 static struct iio_context* pluto_open_ctx(){
     struct iio_context* ctx = nullptr;
     ctx = iio_create_context_from_uri("usb:");              // 첫 USB 디바이스
-    if(ctx) return ctx;
-    ctx = iio_create_context_from_uri("ip:192.168.2.1");    // 기본 USB RNDIS IP
-    if(ctx) return ctx;
-    ctx = iio_create_default_context();                     // IIOD_REMOTE env 포함 폴백
+    if(!ctx) ctx = iio_create_context_from_uri("ip:192.168.2.1");  // 기본 USB RNDIS IP
+    if(!ctx) ctx = iio_create_default_context();            // IIOD_REMOTE env 포함 폴백
+    if(ctx) iio_context_set_timeout(ctx, PLUTO_RW_TIMEOUT_MS);
     return ctx;
 }
 
@@ -150,6 +159,7 @@ bool FFTViewer::initialize_pluto(float cf_mhz, float sr_msps){
 
 // ── 캡처 루프 ────────────────────────────────────────────────────────────
 void FFTViewer::capture_and_process_pluto(){
+    CapLifeGuard cap_life(&cap_exited);
     auto* rxd = (struct iio_device*)pluto_rx_dev;
     auto* phy = (struct iio_device*)pluto_phy_dev;
     auto* buf = (struct iio_buffer*)pluto_rx_buf;
@@ -512,6 +522,13 @@ void FFTViewer::capture_and_process_pluto(){
     }
 
     delete[] iq16;
+    pluto_release();
+}
+
+// ── iio 핸들 해제 ────────────────────────────────────────────────────────
+// 캡처 루프 정상 종료 시 + /powercycle 이 USB 를 deauthorize 하기 직전에 부른다.
+// 후자에선 캡처가 뜨기 전이라 이미 null 일 수 있어 idempotent 해야 한다.
+void FFTViewer::pluto_release(){
     if(pluto_rx_buf){ iio_buffer_destroy((struct iio_buffer*)pluto_rx_buf); pluto_rx_buf=nullptr; }
     if(pluto_ctx){ iio_context_destroy((struct iio_context*)pluto_ctx); pluto_ctx=nullptr; }
     pluto_phy_dev=nullptr; pluto_rx_dev=nullptr; pluto_rx_i_ch=nullptr; pluto_rx_q_ch=nullptr;

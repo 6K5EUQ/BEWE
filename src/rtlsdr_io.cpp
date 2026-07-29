@@ -171,6 +171,7 @@ void FFTViewer::set_frequency(float cf_mhz, bool wait){
 // RTL-SDR은 uint8 IQ, center=127.5
 // 동기 read 방식 사용 (async보다 지연 제어 쉬움)
 void FFTViewer::capture_and_process_rtl(){
+    CapLifeGuard cap_life(&cap_exited);
     static constexpr int RX_MIN = 8192; // 최소 RX 청크 (USB 오버헤드 최소화)
     int rx_chunk = std::max(fft_input_size, RX_MIN);
     size_t    n_bytes = (size_t)rx_chunk * 2;

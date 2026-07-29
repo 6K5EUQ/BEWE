@@ -15,11 +15,11 @@
 #include <sys/ioctl.h>
 #include <linux/usbdevice_fs.h>
 
-// ── BladeRF USB 소프트 리셋 (USBDEVFS_RESET ioctl) ───────────────────────
-// vendor=2cf0, product=5250 장치를 /dev/bus/usb에서 찾아 리셋
+// ── USB 소프트 리셋 (USBDEVFS_RESET ioctl) ───────────────────────────────
+// vid/pid 장치를 /dev/bus/usb에서 찾아 리셋
 // 효과: 물리적으로 뽑았다 꽂는 것과 동일 (드라이버 unbind>reenumerate)
 // sudo 불필요 - udev rule로 plugdev 그룹에 rw 권한 부여됨
-bool bladerf_usb_reset(){
+bool usb_reset_vidpid(uint16_t want_vid, uint16_t want_pid, const char* label){
     // /dev/bus/usb/NNN/MMM 파일 순회해서 vendor/product 매칭
     DIR* bus_dir = opendir("/dev/bus/usb");
     if(!bus_dir){ perror("[USBreset] opendir /dev/bus/usb"); return false; }
@@ -45,8 +45,9 @@ bool bladerf_usb_reset(){
             if(read(fd, desc, sizeof(desc)) == (ssize_t)sizeof(desc)){
                 uint16_t vid = (uint16_t)(desc[8]  | (desc[9]  << 8));
                 uint16_t pid = (uint16_t)(desc[10] | (desc[11] << 8));
-                if(vid == 0x2cf0 && pid == 0x5250){
-                    bewe_log_push(0,"[USBreset] found BladeRF at %s - issuing USBDEVFS_RESET\n", dev_path);
+                if(vid == want_vid && pid == want_pid){
+                    bewe_log_push(0,"[USBreset] found %s at %s - issuing USBDEVFS_RESET\n",
+                                  label, dev_path);
                     if(ioctl(fd, USBDEVFS_RESET, nullptr) == 0){
                         bewe_log_push(0,"[USBreset] reset OK\n");
                         found = true;
@@ -60,9 +61,11 @@ bool bladerf_usb_reset(){
         closedir(dev_dir);
     }
     closedir(bus_dir);
-    if(!found) bewe_log_push(0,"[USBreset] BladeRF not found in /dev/bus/usb\n");
+    if(!found) bewe_log_push(0,"[USBreset] %s not found in /dev/bus/usb\n", label);
     return found;
 }
+
+bool bladerf_usb_reset(){ return usb_reset_vidpid(0x2cf0, 0x5250, "BladeRF"); }
 
 // ── USB 딥 파워사이클 (/powercycle) ──────────────────────────────────────
 // bladerf_usb_reset() 의 USBDEVFS_RESET 은 /dev/bus/usb 노드를 열어 ioctl 을 쏘는
@@ -222,6 +225,7 @@ bool FFTViewer::initialize_bladerf(float cf_mhz, float sr_msps){
 }
 
 void FFTViewer::capture_and_process(){
+    CapLifeGuard cap_life(&cap_exited);
     // RX 버퍼: fft_size와 무관하게 최소 32768 샘플 고정 > USB 오버헤드 최소화
     // + sync_rx 호출/캡처 스레드 웨이크업 1/4 (고SR context switch 절감, 지연 +0.8ms@40MSPS)
     static constexpr int RX_MIN = 32768;
