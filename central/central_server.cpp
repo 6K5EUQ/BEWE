@@ -882,6 +882,11 @@ void CentralServer::dispatch_to_joins(std::shared_ptr<HostRoom> room,
                                      bewe_pkt + BEWE_HDR_SIZE, bewe_len - BEWE_HDR_SIZE);
         return;
     }
+    if(bewe_type == BEWE_TYPE_DB_SAVE_FROM_ARCHIVE){
+        handle_db_save_from_archive(room, nullptr,
+                                    bewe_pkt + BEWE_HDR_SIZE, bewe_len - BEWE_HDR_SIZE);
+        return;
+    }
 
     // ── LWF live stream tap: Central archive 전용 (JOIN으로는 relay 안 함) ──
     // JOIN은 미션창에서 archive 파일을 수동 다운로드만 — 실시간 row 스트림 불필요.
@@ -1672,6 +1677,11 @@ bool CentralServer::intercept_join_cmd(std::shared_ptr<JoinEntry> je,
                                      bewe_pkt + BEWE_HDR_SIZE, bewe_len - BEWE_HDR_SIZE);
         return true;
     }
+    if(bewe_type == BEWE_TYPE_DB_SAVE_FROM_ARCHIVE){
+        handle_db_save_from_archive(room, je,
+                                    bewe_pkt + BEWE_HDR_SIZE, bewe_len - BEWE_HDR_SIZE);
+        return true;
+    }
     // JOIN → Central: PUSH_META/PUSH_DATA (LOCAL 우클릭 Upload).
     // HOST 측 push worker 와 transfer_id 풀이 다르도록 (HOST=1..127, JOIN=128..255) 클라가 alloc.
     // Central 측 mission_xfers 는 room 단위라 HOST/JOIN 두 발신자 모두 동일 map 에 들어가지만
@@ -1765,6 +1775,105 @@ void CentralServer::build_and_broadcast_op_list(std::shared_ptr<HostRoom> room){
 
 
 // ── DB_LIST broadcast ─────────────────────────────────────────────────────
+// ── 미션 아카이브 → DB 서버 내부 복사 (v13.15) ───────────────────────────
+// 예전엔 JOIN 이 아카이브 파일을 통째로 내려받았다가 DB_SAVE_META/DATA 로 다시
+// 올렸다. 두 트리 모두 Central 디스크 위에 있으므로 왕복이 통째로 낭비다.
+// 여기서는 파일을 읽어 그대로 쓰기만 한다 — 네트워크로 나가는 바이트가 없다.
+void CentralServer::handle_db_save_from_archive(std::shared_ptr<HostRoom> room,
+                                                std::shared_ptr<JoinEntry> requester,
+                                                const uint8_t* payload, size_t plen){
+    (void)requester;
+    if(plen < sizeof(PktDbSaveFromArchive)) return;
+    PktDbSaveFromArchive r{};
+    memcpy(&r, payload, sizeof(r));
+    r.key.station[63]      = '\0';
+    r.key.code[7]          = '\0';
+    r.key.filename[127]    = '\0';
+    r.operator_name[31]    = '\0';
+
+    if(!db_filename_safe(r.key.filename)){
+        printf("[Central] DB_SAVE_FROM_ARCHIVE REJECT unsafe filename\n");
+        return;
+    }
+    // archive_dir() 이 station/code/year/subdir 를 모두 검증한다 (빈 문자열 = 거부).
+    std::string src_dir = archive_dir(r.key.station, r.key.year, r.key.code, r.key.subdir);
+    if(src_dir.empty()){
+        printf("[Central] DB_SAVE_FROM_ARCHIVE REJECT bad key station='%s' code='%s'\n",
+               r.key.station, r.key.code);
+        return;
+    }
+    std::string src = src_dir + "/" + r.key.filename;
+    struct stat sst{};
+    if(stat(src.c_str(), &sst) != 0 || !S_ISREG(sst.st_mode)){
+        printf("[Central] DB_SAVE_FROM_ARCHIVE not found: %s\n", src.c_str());
+        return;
+    }
+
+    db_ensure_dirs();
+    const char* sub = db_subdir_for(r.key.filename);
+    std::string dst = db_base_dir() + "/" + sub + "/" + r.key.filename;
+
+    // 중복 판정: 같은 이름이 이미 있으면 크기를 비교한다. 같으면 같은 파일로 보고
+    // 건너뛰고, 다르면 덮어쓴다 (db_unique_name 의 _2 접미사를 쓰지 않는다 —
+    // 같은 아카이브 파일을 두 번 눌렀을 때 사본이 늘어나면 안 된다).
+    struct stat dst_st{};
+    if(stat(dst.c_str(), &dst_st) == 0 && S_ISREG(dst_st.st_mode) &&
+       (uint64_t)dst_st.st_size == (uint64_t)sst.st_size){
+        printf("[Central] DB_SAVE_FROM_ARCHIVE already in DB (same size %.1fMB): %s\n",
+               sst.st_size/1048576.0, r.key.filename);
+        return;
+    }
+
+    FILE* fi = fopen(src.c_str(), "rb");
+    if(!fi){
+        printf("[Central] DB_SAVE_FROM_ARCHIVE open src failed: %s\n", src.c_str());
+        return;
+    }
+    FILE* fo = fopen(dst.c_str(), "wb");
+    if(!fo){
+        fclose(fi);
+        printf("[Central] DB_SAVE_FROM_ARCHIVE open dst failed: %s\n", dst.c_str());
+        return;
+    }
+    std::vector<uint8_t> buf(256*1024);
+    uint64_t copied = 0;
+    bool io_ok = true;
+    for(;;){
+        size_t n = fread(buf.data(), 1, buf.size(), fi);
+        if(n == 0) break;
+        if(fwrite(buf.data(), 1, n, fo) != n){ io_ok = false; break; }
+        copied += n;
+    }
+    fclose(fi);
+    fclose(fo);
+    if(!io_ok){
+        unlink(dst.c_str());
+        printf("[Central] DB_SAVE_FROM_ARCHIVE write failed (disk full?): %s\n", dst.c_str());
+        return;
+    }
+
+    // .info / .sigmf-meta 사이드카도 같이 옮긴다 — DB 목록이 Operator/Note 를
+    // 이 파일에서 읽는다. 없으면 그냥 넘어간다.
+    {
+        std::string si = SigMF::sidecar_path(src);
+        FILE* a = fopen(si.c_str(), "rb");
+        if(a){
+            FILE* b = fopen(SigMF::sidecar_path(dst).c_str(), "wb");
+            if(b){
+                char sb[4096]; size_t n;
+                while((n = fread(sb, 1, sizeof(sb), a)) > 0) fwrite(sb, 1, n, b);
+                fclose(b);
+            }
+            fclose(a);
+        }
+    }
+
+    printf("[Central] DB_SAVE_FROM_ARCHIVE: %s/%s/%u/%s → DB/%s (%.1fMB) by '%s'\n",
+           r.key.station, r.key.code, (unsigned)r.key.year, r.key.filename,
+           sub, copied/1048576.0, r.operator_name);
+    broadcast_db_list(room);
+}
+
 void CentralServer::broadcast_db_list(std::shared_ptr<HostRoom> room){
     // ~/BEWE/DataBase/{iq,audio,hist}/ 모두 스캔
     std::string db_base = db_base_dir();

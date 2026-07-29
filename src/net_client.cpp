@@ -1185,6 +1185,13 @@ bool NetClient::send_mission_file_set_note(const MissionFileKey& key, const char
     if(note) strncpy(r.note, note, sizeof(r.note) - 1);
     return raw_send(PacketType::MISSION_FILE_SET_NOTE, &r, sizeof(r));
 }
+bool NetClient::send_db_save_from_archive(const MissionFileKey& key,
+                                          const char* operator_name){
+    PktDbSaveFromArchive r{};
+    r.key = key;
+    if(operator_name) strncpy(r.operator_name, operator_name, sizeof(r.operator_name) - 1);
+    return raw_send(PacketType::DB_SAVE_FROM_ARCHIVE, &r, sizeof(r));
+}
 bool NetClient::cmd_db_save(const char* filepath, const char* operator_name){
     FILE* fp = fopen(filepath, "rb");
     if(!fp) return false;

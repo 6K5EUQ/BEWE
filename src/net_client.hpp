@@ -372,6 +372,8 @@ public:
     bool send_mission_file_delete(const MissionFileKey& key);
     bool send_mission_file_rename(const MissionFileKey& key, const char* new_filename);
     bool send_mission_file_set_note(const MissionFileKey& key, const char* note);
+    // v13.15 — 아카이브 파일을 Central 내부에서 DB 로 복사 (다운로드 후 재업로드 불필요)
+    bool send_db_save_from_archive(const MissionFileKey& key, const char* operator_name);
 
     // DB list received from Central
     std::function<void(const std::vector<DbFileEntry>&)> on_db_list;

@@ -186,6 +186,9 @@ static constexpr uint8_t BEWE_TYPE_MISSION_SYNC_FOR       = 0x5B;
 // HIST 정합성 조회 (v13.12) — HOST 가 정각 finalize 직후 그 파일 한 개의 행수를 묻는다.
 static constexpr uint8_t BEWE_TYPE_HIST_STAT_REQ          = 0x5C;
 static constexpr uint8_t BEWE_TYPE_HIST_STAT              = 0x5D;
+// 미션 아카이브 → DB 서버 내부 복사 (v13.15). 파일이 이미 Central 안에 있으므로
+// JOIN 이 내려받았다 다시 올릴 필요가 없다.
+static constexpr uint8_t BEWE_TYPE_DB_SAVE_FROM_ARCHIVE   = 0x5E;
 
 static constexpr uint8_t BEWE_TYPE_CHAT     = 0x07;
 

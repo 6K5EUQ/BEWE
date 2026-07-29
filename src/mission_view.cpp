@@ -1149,6 +1149,43 @@ static void central_context_menu(NetClient* cli, const CentralFileRow& row){
         if(ImGui::MenuItem("Download")){
             start_download(cli, row);
         }
+        // Save DB — Central 이 아카이브 사본을 DB 로 내부 복사한다. 파일이 이미
+        // Central 안에 있으므로 내려받았다 다시 올리지 않는다 (전송 0 바이트).
+        // 우클릭한 행이 다중선택 안에 있으면 선택 전체를, 아니면 그 행 하나만.
+        if(ImGui::MenuItem("Save DB")){
+            if(!cli){
+                MissionView::show_toast("Save DB: not connected to Central");
+            } else {
+                std::string op = login_get_id() ? std::string(login_get_id()) : std::string();
+                CentralSelKey rk{};
+                strncpy(rk.station,  row.station,  sizeof(rk.station)  - 1);
+                rk.year   = row.year;
+                rk.subdir = row.subdir;
+                strncpy(rk.code,     row.code,     sizeof(rk.code)     - 1);
+                strncpy(rk.filename, row.filename, sizeof(rk.filename) - 1);
+
+                std::vector<CentralSelKey> targets;
+                if(g_sel_kind == SelKind::CENTRAL && central_in_selection(rk))
+                    targets = g_sel_central_keys;
+                else
+                    targets = { rk };
+
+                for(const auto& t : targets){
+                    MissionFileKey k{};
+                    strncpy(k.station,  t.station,  sizeof(k.station)  - 1);
+                    k.year   = t.year;
+                    k.subdir = t.subdir;
+                    strncpy(k.code,     t.code,     sizeof(k.code)     - 1);
+                    strncpy(k.filename, t.filename, sizeof(k.filename) - 1);
+                    cli->send_db_save_from_archive(k, op.c_str());
+                }
+                char msg[64];
+                snprintf(msg, sizeof(msg), "Save DB requested (%d file%s)",
+                         (int)targets.size(), targets.size() == 1 ? "" : "s");
+                MissionView::show_toast(msg);
+                g_db_last_req_time = 0.0;   // DB 탭 다음 렌더에서 즉시 새로고침
+            }
+        }
         if(ImGui::MenuItem("Note", nullptr, false, wr)){
             open_note_central(row);
         }

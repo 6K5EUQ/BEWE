@@ -138,6 +138,12 @@ enum class PacketType : uint8_t {
     // HOST 는 "확인 불가" 로 보고 로컬본을 그대로 보존한다 (안전 측 실패).
     HIST_STAT_REQ          = 0x5C,  // host → central: PktHistStatReq
     HIST_STAT              = 0x5D,  // central → host: PktHistStat
+
+    // 미션 아카이브 → DB 서버 내부 복사 (v13.15). 예전엔 JOIN 이 파일을 통째로
+    // 내려받았다가 다시 올려야 했다 — 둘 다 Central 안에 있으므로 왕복이 통째로
+    // 낭비다. 구 Central 은 0x5E 를 몰라 조용히 무시하고, JOIN 은 DB 목록이 안
+    // 바뀌는 것으로 알게 된다 (안전 측 실패).
+    DB_SAVE_FROM_ARCHIVE   = 0x5E,  // join/host → central: PktDbSaveFromArchive
 };
 
 // ── Packet header (9 bytes, packed) ──────────────────────────────────────
@@ -1087,6 +1093,14 @@ struct __attribute__((packed)) PktMissionFilePushAck {
     uint8_t        _pad[2];
     uint64_t       total_bytes;     // 실제 디스크에 쓰인 바이트
     char           error_msg[64];
+};
+
+// any → Central: 미션 아카이브 파일을 DB 로 복사 (서버 내부 복사, 전송 없음)
+// .info 사이드카가 있으면 같이 복사한다. DB 에 같은 이름이 이미 있으면
+// 크기를 비교해 같으면 건너뛰고, 다르면 덮어쓴다.
+struct __attribute__((packed)) PktDbSaveFromArchive {
+    MissionFileKey key;
+    char           operator_name[32];
 };
 
 // ── Wire helpers ──────────────────────────────────────────────────────────
