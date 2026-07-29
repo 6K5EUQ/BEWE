@@ -1014,9 +1014,9 @@ public:
     // 열려 있으면 메인페이지 입력(마우스/키보드)은 전부 격리 차단한다 — 렌더와
     // 내부 상태는 그대로 유지해서, 오버레이를 닫으면 즉시 정상 동작.
     //
-    // MSN(mission) 은 여기 안 들어간다. 화면을 다 덮지 않는 78% floating 창이라
-    // 뒤의 메인페이지·STATUS 는 계속 보이고 조작도 된다. MSN 창 위 클릭이 뒤로
-    // 새는 것만 막으면 되고, 그건 float_win_capturing_mouse() 가 담당한다.
+    // MSN(mission) 은 여기 안 들어간다 — 뒤의 메인페이지·STATUS 는 계속 "보여야"
+    // 하기 때문이다. 다만 보이기만 할 뿐 조작은 안 된다: 입력 차단은
+    // main_mouse_blocked() 가, 창이 위로 올라오는 것은 mission_input_lock() 이 맡는다.
     bool overlay_blocking() const {
         return eid_panel_open || log_panel_open || lwf_modal_open
             || sig_lib_panel_open || demod_panel_open;
@@ -1028,10 +1028,16 @@ public:
     // (ImGui 위젯 기반 경로는 IsItemHovered() 가 이미 처리해준다.)
     static bool float_win_capturing_mouse();
 
+    // MSN 이 열려 있는 동안 뒤쪽(메인페이지·STATUS)은 "보이되 잠긴다".
+    // 바깥을 클릭해도 아무 반응이 없어야 하고, 무엇보다 그 클릭으로 뒤 창이
+    // MSN 위로 올라오면 안 된다. 뒤 창(##stat_panel 등)에 NoInputs 를 붙이는
+    // 근거이기도 하다 — NoInputs 면 ImGui 가 focus 를 주지 않아 z-order 가 안 뒤집힌다.
+    bool mission_input_lock() const { return mission_modal_open; }
+
     // 메인페이지 마우스 입력을 지금 받아도 되는가의 반대 — 입력 경로는 이걸 쓴다.
-    // 풀스크린 오버레이가 떠 있거나, 마우스가 얹힌 창(MSN 등) 위에 있으면 차단.
+    // 풀스크린 오버레이 / MSN 이 떠 있거나, 마우스가 얹힌 창 위에 있으면 차단.
     bool main_mouse_blocked() const {
-        return overlay_blocking() || float_win_capturing_mouse();
+        return overlay_blocking() || mission_input_lock() || float_win_capturing_mouse();
     }
 
     // ── ui.cpp (rendering — GUI only) ────────────────────────────────────

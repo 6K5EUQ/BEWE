@@ -2601,14 +2601,17 @@ void draw_modal(FFTViewer& v, NetClient* cli){
     if(just_opened) g_disk_scan_time = -1.0;  // 좌측 트리 disk 스캔 캐시 리셋
     if(!v.mission_modal_open) return;
     ImGuiIO& io = ImGui::GetIO();
-    float W = io.DisplaySize.x * 0.78f;
-    float H = io.DisplaySize.y * 0.78f;
+    float W = io.DisplaySize.x * 0.80f;
+    float H = io.DisplaySize.y * 0.80f;
     if(W < 700) W = 700;
     if(H < 460) H = 460;
     ImGui::SetNextWindowSize(ImVec2(W, H), ImGuiCond_Once);
     ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - W)*0.5f,
                                    (io.DisplaySize.y - H)*0.5f),
                             ImGuiCond_Once);
+    // 열려 있는 동안 항상 최상단 유지. 뒤 창들은 NoInputs 라 focus 를 못 뺏지만,
+    // 팝업·컨텍스트 메뉴 등 다른 경로로 z-order 가 밀리는 것까지 막는다.
+    ImGui::SetNextWindowFocus();
     ImGui::SetNextWindowBgAlpha(0.96f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.f);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.08f, 0.14f, 1.f));
