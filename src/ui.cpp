@@ -6667,14 +6667,6 @@ void run_streaming_viewer(){
             if(v.sig_lib_panel_open != prev_lib){ v.sig_lib_panel_open ? push_ov(5) : pop_ov(5); prev_lib=v.sig_lib_panel_open; }
             if(v.mission_modal_open != prev_mission){ v.mission_modal_open ? push_ov(6) : pop_ov(6); prev_mission=v.mission_modal_open; }
             if(v.demod_panel_open != prev_demod){ v.demod_panel_open ? push_ov(7) : pop_ov(7); prev_demod=v.demod_panel_open; }
-            // ui.cpp 밖(mission_view 등)에서도 "지금 누가 최상단인가"를 알아야 한다.
-            // STATUS(4)는 상시 사이드바라 '연 창'이 아니므로 판정에서 제외한다.
-            {
-                int t = 0;
-                for(auto it = g_overlay_stack.rbegin(); it != g_overlay_stack.rend(); ++it)
-                    if(*it != 4){ t = *it; break; }
-                v.overlay_top_id = t;
-            }
         }
         // STATUS(우측패널) 격리: 전체영역 오버레이(SA/LOG/HIST/LIB/DEMOD) 열려있으면
         // STATUS 토글·드래그·렌더 전부 차단. 내부 상태/백그라운드는 유지, 입력·표시만 막음.
@@ -7613,13 +7605,10 @@ void run_streaming_viewer(){
                 ImGui::SetNextWindowBgAlpha(0.0f);
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8,8));
                 ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0,0,0,0));
-                // MSN 이 떠 있으면 NoInputs — 클릭이 여기 먹지 않고, ImGui 가 focus 를
-                // 주지 않으므로 이 패널이 MSN 위로 튀어오르지 않는다 (보이기만 한다).
                 ImGui::Begin("##stat_panel", nullptr,
                     ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|
                     ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar|
-                    ImGuiWindowFlags_NoDecoration|
-                    (v.mission_input_lock() ? ImGuiWindowFlags_NoInputs : 0));
+                    ImGuiWindowFlags_NoDecoration);
 
                 // ── 탭 바 ─────────────────────────────────────────────────
                 ImGui::PushStyleColor(ImGuiCol_Tab,            ImVec4(0.12f,0.12f,0.16f,1.f));
@@ -8378,12 +8367,10 @@ void run_streaming_viewer(){
                 ImGui::SetNextWindowBgAlpha(0.0f);
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8,8));
                 ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0,0,0,0));
-                // MSN 활성 중엔 NoInputs (##stat_panel 과 같은 이유).
                 ImGui::Begin("##sched_panel", nullptr,
                     ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|
                     ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar|
-                    ImGuiWindowFlags_NoDecoration|
-                    (v.mission_input_lock() ? ImGuiWindowFlags_NoInputs : 0));
+                    ImGuiWindowFlags_NoDecoration);
 
                 ImGui::PushStyleColor(ImGuiCol_Tab,       ImVec4(0.12f,0.12f,0.16f,1.f));
                 ImGui::PushStyleColor(ImGuiCol_TabHovered,ImVec4(0.20f,0.30f,0.45f,1.f));
@@ -9063,7 +9050,10 @@ void run_streaming_viewer(){
                           :              IM_COL32(220,60,60,255);
                 if(state>0) dl->AddText(ImVec2(lx+1,ty_b),col,txt);
                 dl->AddText(ImVec2(lx,ty_b),col,txt);
-                bool clicked=ImGui::IsMouseClicked(ImGuiMouseButton_Left)&&!mouse_blocked&&
+                // 하단바 오버레이 토글은 mouse_blocked 로 막지 않는다 — 이 바가
+                // 열린 오버레이를 끄는 유일한 수단이라, 막으면 켠 창을 다시 눌러도
+                // 안 꺼진다 (모든 하단 좌측 바 창의 공통 규칙: 다시 누르면 닫힘).
+                bool clicked=ImGui::IsMouseClicked(ImGuiMouseButton_Left)&&
                     io.MousePos.x>=lx&&io.MousePos.x<=lx+sz.x&&
                     io.MousePos.y>=ty_b&&io.MousePos.y<=ty_b+sz.y;
                 lx += sz.x + 14.0f;
@@ -9557,18 +9547,13 @@ void run_streaming_viewer(){
                                            io.DisplaySize.y-CH-TOPBAR_H-10));
             ImGui::SetNextWindowSize(ImVec2(CW,CH));
             ImGui::SetNextWindowBgAlpha(0.92f);
-            // MSN 활성 중엔 강제 포커스 금지 — 매 프레임 focus 를 뺏으면 채팅창이
-            // MSN 위를 덮어버린다. MSN 이 항상 최상단이어야 한다.
-            if(!v.mission_input_lock()) ImGui::SetNextWindowFocus();
+            ImGui::SetNextWindowFocus();
             ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,8.f);
             ImGui::PushStyleColor(ImGuiCol_WindowBg,ImVec4(0.05f,0.07f,0.12f,1.f));
             ImGui::PushStyleColor(ImGuiCol_FrameBg,ImVec4(0.10f,0.12f,0.20f,1.f));
             ImGui::Begin("##chat",nullptr,
                 ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|
-                ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar|
-                // NoInputs 까지 걸어야 클릭 순간의 focus 획득을 원천 차단한다.
-                // focus 강제만 끄면 "클릭한 그 프레임"에 채팅창이 MSN 위로 한 번 튄다.
-                (v.mission_input_lock() ? ImGuiWindowFlags_NoInputs : 0));
+                ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar);
 
             ImGui::TextColored(ImVec4(0.4f,0.7f,1.f,1.f),"Chat");
             ImGui::Separator();

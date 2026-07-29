@@ -2601,23 +2601,21 @@ void draw_modal(FFTViewer& v, NetClient* cli){
     if(just_opened) g_disk_scan_time = -1.0;  // 좌측 트리 disk 스캔 캐시 리셋
     if(!v.mission_modal_open) return;
     ImGuiIO& io = ImGui::GetIO();
-    float W = io.DisplaySize.x * 0.80f;
-    float H = io.DisplaySize.y * 0.80f;
-    if(W < 700) W = 700;
-    if(H < 460) H = 460;
-    ImGui::SetNextWindowSize(ImVec2(W, H), ImGuiCond_Once);
-    ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - W)*0.5f,
-                                   (io.DisplaySize.y - H)*0.5f),
-                            ImGuiCond_Once);
-    // 오버레이 스택 최상단(= 사용자가 가장 마지막에 연 창)일 때만 focus 를 가져온다.
-    // 무조건 강제하면 나중에 뜬 HIST 뷰어가 MSN 뒤로 깔린다 — "마지막에 작동시킨
-    // 창이 위" 가 규칙이다. 스택 관리는 ui.cpp 의 push_ov/pop_ov.
-    if(v.overlay_is_top_mission()) ImGui::SetNextWindowFocus();
-    ImGui::SetNextWindowBgAlpha(0.96f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.f);
+    // 전체화면 오버레이 (DEMOD/SA/LOG 와 동일 규격). 하단 상태바만 남긴다.
+    // 78%/80% 짜리 floating 창이던 시절엔 "창 밖" 이 존재해서 그쪽 클릭이 뒤 UI 로
+    // 새고, 클릭 순간 뒤 창이 한 프레임 위로 튀는 문제가 계속 남았다. 화면을 다
+    // 덮으면 '밖'이 아예 없어져 그 부류 문제가 원천적으로 사라진다.
+    float W = io.DisplaySize.x;
+    float H = io.DisplaySize.y - (v.ais_fullscreen ? 0.f : TOPBAR_H);
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(W, H));
+    // 열릴 때 한 번만 focus — 그 뒤 나중에 뜬 창(HIST 뷰어 등)이 위로 올 수 있어야
+    // 한다 ("마지막에 작동시킨 창이 위" 규칙, DEMOD 패널과 동일).
+    if(just_opened) ImGui::SetNextWindowFocus();
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.08f, 0.14f, 1.f));
     if(ImGui::Begin("MISSION##mission_modal", &v.mission_modal_open,
-        ImGuiWindowFlags_NoCollapse)){
+        ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|
+        ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoCollapse)){
 
         // 이 창이 포커스이고 다른 viewer가 떠있지 않을 때만 ESC로 닫기 —
         // viewer(HIST/SA)가 떠있으면 그쪽 ESC 핸들러가 먼저 처리.
@@ -2708,7 +2706,6 @@ void draw_modal(FFTViewer& v, NetClient* cli){
     }
     ImGui::End();
     ImGui::PopStyleColor();
-    ImGui::PopStyleVar();
 
     draw_note_editor_submodal(v, cli);
     draw_start_submodal(v, cli);
