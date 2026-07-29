@@ -830,6 +830,8 @@ void run_cli_host(){
     std::atomic<bool> pending_chassis2_reset{false};
     std::atomic<bool> pending_rx_stop{false};
     std::atomic<bool> pending_rx_start{false};
+    // /powercycle — chassis 1 로 안 풀리는 SDR 사망 시 USB 재열거까지 가는 상위 복구
+    std::atomic<bool> pending_powercycle{false};
     bool usb_reset_pending = false;
     std::atomic<bool> ch_sync_dirty_flag{false};
 
@@ -1261,6 +1263,13 @@ void run_cli_host(){
             } else if(v.net_srv){
                 v.net_srv->broadcast_chat("SYSTEM", "Usage: /hist check");
             }
+        }
+        // "/powercycle" — /chassis 1 reset 이 안 먹을 때의 상위 복구. JOIN 이든
+        // HOST UI 든 여기로 모인다. 실제 동작은 메인 루프가 한다 (SDR 재초기화가
+        // 캡처 스레드 수명을 건드리므로 네트워크 스레드에서 하면 안 된다).
+        else if(strncmp(msg, "/powercycle", 11) == 0 && (msg[11] == 0 || msg[11] == ' ')){
+            bewe_log_push(0,"[CMD:%s] /powercycle\n", from);
+            pending_powercycle.store(true);
         }
     };
     srv->cb.on_chat = chat_handler;
@@ -2303,6 +2312,82 @@ void run_cli_host(){
             v.spectrum_pause.store(true);
             usb_reset_pending = true;
         }
+        // ── /powercycle ──────────────────────────────────────────────────
+        // chassis 1 reset 은 USBDEVFS_RESET 을 장치 핸들로 쏜다. 펌웨어 링크가
+        // 죽어 있으면(BladeRF NIOS II timeout) 그 리셋조차 장치에 안 닿아 몇 번을
+        // 쳐도 안 살아난다. 여기서는 커널에게 unbind/재열거를 시켜(authorized 0>1)
+        // 케이블을 뽑았다 꽂은 것과 같은 상태로 만든다.
+        //
+        // 순서: 캡처 정지 > 핸들 close > 딥 파워사이클 > sdr_stream_error 로
+        // 아래 reconnect 로직에 위임. 재초기화 자체를 여기서 직접 하지 않는 건
+        // 기존 reconnect 경로가 이미 fft plan 재생성·dem_worker 재기동·autoscale
+        // 재트리거까지 다 하고 있기 때문이다 (중복 구현하면 어긋난다).
+        if(v.net_srv && pending_powercycle.load()){
+            pending_powercycle.store(false);
+            bewe_log_push(0,"[CLI] Power cycle: deep USB re-enumeration ...\n");
+            v.net_srv->broadcast_chat("SYSTEM", "Power cycle: deep USB reset ...");
+            v.net_srv->broadcast_heartbeat(1);
+
+            // 캡처 스레드를 먼저 내린다. 파워사이클 도중 살아 있으면 사라진 장치에
+            // 계속 read 를 걸어 libusb 가 에러 폭주한다.
+            v.is_running = false;
+            v.sdr_stream_error.store(true);
+            v.tm_iq_on.store(false);
+            v.spectrum_pause.store(true);
+            if(v.dev_rtl) rtlsdr_cancel_async(v.dev_rtl);
+            if(cap.joinable()) cap.join();
+
+            // 핸들을 닫아야 커널이 deauthorize 할 때 걸리지 않는다.
+            if(v.dev_blade){
+                bladerf_close(v.dev_blade); v.dev_blade = nullptr;
+            }
+            if(v.dev_rtl){ rtlsdr_close(v.dev_rtl); v.dev_rtl = nullptr; }
+
+            uint16_t vid = 0, pid = 0;
+            switch(v.hw.type){
+                case HWType::BLADERF: vid = 0x2cf0; pid = 0x5250; break;
+                case HWType::RTLSDR:  vid = 0x0bda; pid = 0x2838; break;
+                case HWType::PLUTO:   vid = 0x0456; pid = 0xb673; break;
+                default: break;
+            }
+
+            // 블로킹 구간(최소 2초 off + 재열거 대기)이라 메인 루프를 세우지 않도록
+            // 별도 스레드에서 돌린다. 끝나면 reconnect 로직이 이어받는다.
+            std::atomic<bool>* pc_busy = &usb_reset_in_progress;
+            NetServer* pc_srv = v.net_srv;
+            pc_busy->store(true);
+            std::thread([vid, pid, pc_busy, pc_srv](){
+                int rc = 1;
+                if(vid) rc = usb_deep_powercycle(vid, pid, 2000);
+                if(rc == 2){
+                    // udev rule 미배포 — 이 기지에선 딥 리셋이 불가능하다. 조용히
+                    // 실패하면 운용자가 "쳤는데 왜 안 되지" 로 시간을 버리므로 명시한다.
+                    bewe_log_push(2,"[CLI] Power cycle: no permission - falling back to "
+                                    "USB reset (deploy 99-bewe-usb-powercycle.rules)\n");
+                    if(pc_srv) pc_srv->broadcast_chat("SYSTEM",
+                        "Power cycle: no permission - udev rule missing, using plain USB reset");
+                    bladerf_usb_reset();
+                } else if(rc != 0){
+                    bewe_log_push(2,"[CLI] Power cycle FAILED (rc=%d)\n", rc);
+                    if(pc_srv) pc_srv->broadcast_chat("SYSTEM", "Power cycle FAILED - check station log");
+                } else {
+                    // 재열거가 끝나고 udev 가 권한을 다시 붙일 때까지 기다린다.
+                    // 너무 빨리 bladerf_open 하면 장치는 보이는데 권한이 없어 실패한다.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+                    bewe_log_push(0,"[CLI] Power cycle done - reconnecting\n");
+                    if(pc_srv) pc_srv->broadcast_chat("SYSTEM", "Power cycle done - reconnecting ...");
+                }
+                pc_busy->store(false);
+            }).detach();
+
+            // 캡처 스레드는 이미 join 했다. reconnect 로직이 다시 join 을 시도하지
+            // 않도록 상태를 정리해 둔다.
+            bg_join_started = false;
+            cap_joined.store(true);
+            usb_reset_pending = false;
+            usb_reset_done    = true;
+        }
+
         if(v.net_srv && pending_chassis2_reset.load()){
             pending_chassis2_reset.store(false);
             bewe_log_push(0,"[CLI] Chassis 2 reset ...\n");
@@ -2718,6 +2803,11 @@ void run_cli_host(){
                     }
                 }
                 fflush(stdout);
+            } else if(line == "/powercycle"){
+                // /chassis 1 reset 이 안 먹는 SDR 사망 상태의 상위 복구.
+                bewe_log_push(0,"[CMD:CLI] /powercycle\n");
+                pending_powercycle.store(true);
+                fflush(stdout);
             } else if(line == "/hist" || line.rfind("/hist ", 0) == 0){
                 // /hist check — 보존된 로컬 .bewehist 를 Central 아카이브와 대조해
                 // 빠진 구간만 올리고, 다 있으면 로컬본을 지운다.
@@ -2845,6 +2935,7 @@ void run_cli_host(){
                 bewe_log_push(0,"  /mission status  - Show current mission state\n");
                 bewe_log_push(0,"  /chassis 1 reset - USB SDR hardware reset\n");
                 bewe_log_push(0,"  /chassis 2 reset - Network broadcast reset\n");
+                bewe_log_push(0,"  /powercycle      - Deep USB re-enumeration (when chassis 1 fails)\n");
                 bewe_log_push(0,"  /rx stop         - Stop SDR capture\n");
                 bewe_log_push(0,"  /rx start        - Restart SDR capture\n");
                 bewe_log_push(0,"  /shutdown        - Clean exit\n");

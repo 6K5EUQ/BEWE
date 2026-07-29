@@ -1,0 +1,34 @@
+# BEWE /powercycle — grant plugdev write access to the USB "authorized" attribute.
+#
+# Why this exists:
+#   /chassis 1 reset issues USBDEVFS_RESET through the device handle. When the SDR
+#   firmware link itself is dead (e.g. BladeRF "Failed to receive NIOS II response:
+#   Operation timed out"), that reset never reaches the device and the capture stays
+#   down. /powercycle instead deauthorizes and reauthorizes the device via sysfs,
+#   which makes the kernel unbind and re-enumerate it — equivalent to unplugging the
+#   cable. On drone-mounted stations nobody can unplug anything, so this is the only
+#   escalation left.
+#
+# By default /sys/bus/usb/devices/<X-Y>/authorized is root-only (0644 root:root).
+# This rule opens it to the plugdev group so BEWE can run unprivileged.
+#
+# Install (per station, once):
+#   sudo cp assets/udev/99-bewe-usb-powercycle.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=2cf0
+#   sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=0bda
+#
+# Verify:
+#   ls -l /sys/bus/usb/devices/*/authorized   # want -rw-rw-r-- root plugdev
+#
+# Without this rule /powercycle logs "not writable" and falls back to the plain
+# USBDEVFS_RESET path, i.e. it behaves exactly like /chassis 1 reset.
+
+# BladeRF 2.0 micro
+SUBSYSTEM=="usb", ATTR{idVendor}=="2cf0", ATTR{idProduct}=="5250", RUN+="/bin/sh -c 'chgrp plugdev /sys%p/authorized; chmod 0664 /sys%p/authorized'"
+
+# RTL-SDR (RTL2832U)
+SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="2838", RUN+="/bin/sh -c 'chgrp plugdev /sys%p/authorized; chmod 0664 /sys%p/authorized'"
+
+# ADALM-Pluto (PlutoSDR)
+SUBSYSTEM=="usb", ATTR{idVendor}=="0456", ATTR{idProduct}=="b673", RUN+="/bin/sh -c 'chgrp plugdev /sys%p/authorized; chmod 0664 /sys%p/authorized'"

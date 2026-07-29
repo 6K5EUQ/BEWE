@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <cerrno>
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -60,6 +62,99 @@ bool bladerf_usb_reset(){
     closedir(bus_dir);
     if(!found) bewe_log_push(0,"[USBreset] BladeRF not found in /dev/bus/usb\n");
     return found;
+}
+
+// ── USB 딥 파워사이클 (/powercycle) ──────────────────────────────────────
+// bladerf_usb_reset() 의 USBDEVFS_RESET 은 /dev/bus/usb 노드를 열어 ioctl 을 쏘는
+// 방식이라 장치가 응답해야 성립한다. NIOS II 링크가 죽으면 ("Failed to receive
+// NIOS II response: Operation timed out") 그 리셋조차 장치에 안 닿아 /chassis 1
+// reset 을 몇 번 쳐도 복구되지 않는다.
+//
+// 여기서는 장치를 우회해 커널에게 시킨다. sysfs 의 authorized 에 0 을 쓰면 커널이
+// 드라이버를 unbind 하고 장치를 사실상 죽인다. 1 을 쓰면 재열거(re-enumerate) —
+// 케이블을 뽑았다 꽂는 것과 같은 경로다. 드론 탑재라 사람이 못 뽑는 기지에서
+// 이게 유일한 상위 복구 수단이다.
+//
+// sysfs 경로는 /dev/bus/usb 노드가 아니라 /sys/bus/usb/devices/<X-Y>/ 이고,
+// idVendor/idProduct 가 텍스트 파일(16진 4자리)로 들어있다.
+static bool read_sysfs_hex4(const char* path, uint16_t* out){
+    int fd = open(path, O_RDONLY);
+    if(fd < 0) return false;
+    char buf[16] = {};
+    ssize_t n = read(fd, buf, sizeof(buf)-1);
+    close(fd);
+    if(n <= 0) return false;
+    *out = (uint16_t)strtoul(buf, nullptr, 16);
+    return true;
+}
+
+int usb_deep_powercycle(uint16_t vid, uint16_t pid, int off_ms){
+    const char* base = "/sys/bus/usb/devices";
+    DIR* d = opendir(base);
+    if(!d){ bewe_log_push(2,"[PWRCYCLE] opendir %s failed\n", base); return 1; }
+
+    char dev_dir[256] = {};
+    struct dirent* e;
+    while((e = readdir(d))){
+        if(e->d_name[0] == '.') continue;
+        // 인터페이스 노드(3-1:1.0)와 루트허브(usb3)는 건너뛴다 — 장치 노드만 본다.
+        if(strchr(e->d_name, ':') || strncmp(e->d_name, "usb", 3) == 0) continue;
+        char p[512]; uint16_t v = 0, pd = 0;
+        snprintf(p, sizeof(p), "%s/%s/idVendor", base, e->d_name);
+        if(!read_sysfs_hex4(p, &v) || v != vid) continue;
+        snprintf(p, sizeof(p), "%s/%s/idProduct", base, e->d_name);
+        if(!read_sysfs_hex4(p, &pd) || pd != pid) continue;
+        snprintf(dev_dir, sizeof(dev_dir), "%s/%s", base, e->d_name);
+        break;
+    }
+    closedir(d);
+
+    if(!dev_dir[0]){
+        bewe_log_push(2,"[PWRCYCLE] device %04x:%04x not found in %s\n", vid, pid, base);
+        return 1;
+    }
+
+    char auth[512];
+    snprintf(auth, sizeof(auth), "%s/authorized", dev_dir);
+    if(access(auth, W_OK) != 0){
+        bewe_log_push(2,"[PWRCYCLE] %s not writable - deploy udev rule "
+                        "(assets/udev/99-bewe-usb-powercycle.rules)\n", auth);
+        return 2;
+    }
+
+    auto write_auth = [&](const char* val)->bool{
+        int fd = open(auth, O_WRONLY);
+        if(fd < 0) return false;
+        ssize_t w = write(fd, val, 1);
+        close(fd);
+        return w == 1;
+    };
+
+    bewe_log_push(0,"[PWRCYCLE] %s: deauthorize (%04x:%04x)\n", dev_dir, vid, pid);
+    if(!write_auth("0")){
+        bewe_log_push(2,"[PWRCYCLE] write 0 failed: %s\n", strerror(errno));
+        return 3;
+    }
+    // FX3 같은 USB 컨트롤러가 완전히 내려갔다 올라올 시간을 준다. 너무 짧으면
+    // 재열거는 되는데 펌웨어가 절반만 올라와 다시 NIOS timeout 이 난다.
+    std::this_thread::sleep_for(std::chrono::milliseconds(off_ms));
+
+    bewe_log_push(0,"[PWRCYCLE] reauthorize\n");
+    if(!write_auth("1")){
+        // 여기서 실패하면 장치가 deauthorized 로 남아 아예 안 보인다. 재시도로
+        // 반드시 되살려야 한다 — 실패해도 로그로 남겨 운용자가 알게 한다.
+        for(int i = 0; i < 5; i++){
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            if(write_auth("1")){
+                bewe_log_push(0,"[PWRCYCLE] reauthorize OK (retry %d)\n", i+1);
+                return 0;
+            }
+        }
+        bewe_log_push(2,"[PWRCYCLE] REAUTHORIZE FAILED - device left deauthorized!\n");
+        return 3;
+    }
+    bewe_log_push(0,"[PWRCYCLE] done - device re-enumerating\n");
+    return 0;
 }
 
 bool FFTViewer::initialize_bladerf(float cf_mhz, float sr_msps){

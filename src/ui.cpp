@@ -2505,6 +2505,7 @@ static const ChatCmdInfo CHAT_CMDS[] = {
     {"/rx stop",         "Stop SDR capture",      false},
     {"/chassis 1 reset", "Reset SDR hardware",    false},
     {"/chassis 2 reset", "Reset network link",    false},
+    {"/powercycle",      "Deep USB reset of SDR", false},
     {"/mission start",   "Start mission on HOST", false},
     {"/mission end",     "End mission on HOST",   false},
     {"/mission status",  "Show mission state",    false},
@@ -2853,8 +2854,13 @@ void run_streaming_viewer(){
     bool do_chassis_reset = false;
     int  chassis_reset_mode = 0; // 0=LOCAL, 1=HOST
     bool usb_reset_pending = false; // chassis 1 reset 시 USB reset 수행 플래그
+    // /powercycle: 위 USB reset 슬롯을 ioctl 대신 sysfs 딥 재열거로 승격시킨다.
+    // 재연결 경로(fft plan 재생성·dem 재기동·autoscale)는 그대로 재사용한다.
+    bool deep_powercycle_req = false;
     std::atomic<bool> pending_chassis1_reset{false}; // 네트워크 스레드 > 메인 루프 전달
     std::atomic<bool> pending_chassis2_reset{false}; // 네트워크 스레드 > 메인 루프 전달
+    // /powercycle — chassis 1 로 안 풀리는 SDR 사망 시 USB 재열거까지 가는 상위 복구
+    std::atomic<bool> pending_powercycle{false};     // 네트워크 스레드 > 메인 루프 전달
     std::atomic<bool> pending_rx_stop{false};        // JOIN > HOST: /rx stop
     std::atomic<bool> pending_rx_start{false};       // JOIN > HOST: /rx start
     // HOST 모드 로컬 채팅 로그 (do-while 외부에서 선언해야 콜백 람다에서 접근 가능)
@@ -5661,6 +5667,12 @@ void run_streaming_viewer(){
                     v.net_srv->broadcast_chat("SYSTEM", "Usage: /hist check");
                 }
             }
+            // "/powercycle" — chassis 1 reset 이 안 먹을 때의 상위 복구.
+            // 실제 동작은 메인 루프가 한다 (SDR 재초기화는 캡처 스레드 수명을 건드린다).
+            else if(strncmp(msg, "/powercycle", 11) == 0 && (msg[11] == 0 || msg[11] == ' ')){
+                bewe_log_push(0,"[CMD:%s] /powercycle\n", from ? from : "join");
+                pending_powercycle.store(true);
+            }
         };
     }
 
@@ -5854,6 +5866,29 @@ void run_streaming_viewer(){
             v.tm_iq_on.store(false);
             v.spectrum_pause.store(true);
             usb_reset_pending = true;
+        }
+        // ── /powercycle ──────────────────────────────────────────────────
+        // chassis 1 reset 은 USBDEVFS_RESET 을 장치 핸들로 쏜다. 펌웨어 링크가 죽어
+        // 있으면(BladeRF NIOS II timeout) 그 리셋조차 장치에 안 닿아 몇 번을 쳐도
+        // 안 살아난다. 여기서는 커널에게 unbind/재열거를 시켜(authorized 0>1)
+        // 케이블을 뽑았다 꽂은 것과 같은 상태로 만든다.
+        // 아래 재연결 블록의 USB reset 슬롯을 딥 모드로 승격시키는 방식이라
+        // 재초기화 경로는 chassis 1 과 100% 공유한다.
+        if(v.net_srv && pending_powercycle.load()){
+            pending_powercycle.store(false);
+            { std::lock_guard<std::mutex> lk(host_chat_mtx);
+              LocalChatMsg lm{}; strncpy(lm.from,"SYSTEM",31);
+              strncpy(lm.msg,"Power cycle: deep USB reset ...",255);
+              if((int)host_chat_log.size()>=200) host_chat_log.erase(host_chat_log.begin());
+              host_chat_log.push_back(lm); }
+            v.net_srv->broadcast_chat("SYSTEM", "Power cycle: deep USB reset ...");
+            v.net_srv->broadcast_heartbeat(1);
+            v.is_running = false;
+            v.sdr_stream_error.store(true);
+            v.tm_iq_on.store(false);
+            v.spectrum_pause.store(true);
+            usb_reset_pending   = true;
+            deep_powercycle_req = true;
         }
         if(v.net_srv && pending_chassis2_reset.load()){
             pending_chassis2_reset.store(false);
@@ -6054,7 +6089,45 @@ void run_streaming_viewer(){
             if(cap_joined.load() && usb_reset_pending && !usb_reset_done){
                 usb_reset_done = true;
                 usb_reset_pending = false;
-                if(v.hw.type == HWType::BLADERF){
+                bool deep = deep_powercycle_req;
+                deep_powercycle_req = false;
+                // 딥 파워사이클은 BladeRF 외 장치에도 적용된다 (RTL/Pluto 모두 USB).
+                // 반면 기존 chassis 1 의 ioctl 리셋은 BladeRF 전용 경로 그대로 둔다.
+                if(deep){
+                    uint16_t vid = 0, pid = 0;
+                    switch(v.hw.type){
+                        case HWType::BLADERF: vid = 0x2cf0; pid = 0x5250; break;
+                        case HWType::RTLSDR:  vid = 0x0bda; pid = 0x2838; break;
+                        case HWType::PLUTO:   vid = 0x0456; pid = 0xb673; break;
+                        default: break;
+                    }
+                    usb_reset_in_progress.store(true);
+                    // 핸들이 열려 있으면 커널이 deauthorize 할 때 걸린다.
+                    if(v.dev_blade){ bladerf_close(v.dev_blade); v.dev_blade = nullptr; }
+                    if(v.dev_rtl)  { rtlsdr_close(v.dev_rtl);    v.dev_rtl   = nullptr; }
+                    NetServer* pc_srv = v.net_srv;
+                    std::thread([&usb_reset_in_progress = usb_reset_in_progress, vid, pid, pc_srv](){
+                        int rc = 1;
+                        if(vid) rc = usb_deep_powercycle(vid, pid, 2000);
+                        if(rc == 2){
+                            bewe_log_push(2,"[UI] Power cycle: no permission - falling back to "
+                                            "USB reset (deploy 99-bewe-usb-powercycle.rules)\n");
+                            if(pc_srv) pc_srv->broadcast_chat("SYSTEM",
+                                "Power cycle: no permission - udev rule missing, using plain USB reset");
+                            bladerf_usb_reset();
+                        } else if(rc != 0){
+                            bewe_log_push(2,"[UI] Power cycle FAILED (rc=%d)\n", rc);
+                            if(pc_srv) pc_srv->broadcast_chat("SYSTEM", "Power cycle FAILED - check log");
+                        } else {
+                            bewe_log_push(2,"[UI] Power cycle done - reconnecting\n");
+                            if(pc_srv) pc_srv->broadcast_chat("SYSTEM", "Power cycle done - reconnecting ...");
+                        }
+                        // 재열거 + udev 권한 재부여 대기. 너무 빨리 open 하면 장치는
+                        // 보이는데 권한이 없어 실패한다.
+                        std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+                        usb_reset_in_progress.store(false);
+                    }).detach();
+                } else if(v.hw.type == HWType::BLADERF){
                     usb_reset_in_progress.store(true);
                     // capture_and_process 종료 시 dev_blade가 nullptr로 세팅됨
                     // (혹시 남아있으면 닫기)
@@ -9746,7 +9819,8 @@ void run_streaming_viewer(){
                             }
                         }
 
-                    } else if(chat_str.rfind("/mission", 0) == 0 || chat_str.rfind("/hist", 0) == 0){
+                    } else if(chat_str.rfind("/mission", 0) == 0 || chat_str.rfind("/hist", 0) == 0
+                              || chat_str.rfind("/powercycle", 0) == 0){
                         // HOST 가 실행해야 하는 명령 — 채팅 그대로 넘긴다.
                         // (/rx·/chassis 처럼 전용 패킷을 새로 만들지 않고 on_chat 경로 재사용.
                         //  HOST/LOCAL 이면 자기 on_chat 이 바로 받으므로 broadcast 한 번이면 된다.)
@@ -9757,6 +9831,20 @@ void run_streaming_viewer(){
                             // broadcast_chat 은 자기 on_chat 을 부르지 않으므로 직접 실행한다.
                             if(v.net_srv->cb.on_chat)
                                 v.net_srv->cb.on_chat(login_get_id(), chat_str.c_str());
+                        } else if(chat_str.rfind("/powercycle", 0) == 0){
+                            // LOCAL: HOST 가 없어도 SDR 은 이 프로세스가 직접 쥐고 있다.
+                            // net_srv 게이트를 타는 위 경로 대신 여기서 바로 건다.
+                            if(v.is_running || cap.joinable()){
+                                push_local("SYSTEM", "Power cycle: deep USB reset ...", false);
+                                v.is_running = false;
+                                v.sdr_stream_error.store(true);
+                                v.tm_iq_on.store(false);
+                                v.spectrum_pause.store(true);
+                                usb_reset_pending   = true;
+                                deep_powercycle_req = true;
+                            } else {
+                                push_local("SYSTEM", "No SDR connected - skip power cycle", false);
+                            }
                         } else {
                             push_local("System", "Not connected — command needs a HOST.", true);
                         }

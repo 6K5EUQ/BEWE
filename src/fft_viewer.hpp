@@ -1068,5 +1068,15 @@ bool bladerf_usb_reset();
 // 으로는 안 풀리고 포트 re-enumeration 만 복구됨. USBDEVFS_RESET ioctl 사용.
 bool rtl_usb_reset();
 
+// ── USB 딥 파워사이클 (/powercycle) ───────────────────────────────────────
+// USBDEVFS_RESET 은 장치 핸들을 거치므로 펌웨어 링크가 죽으면(BladeRF NIOS II
+// timeout 등) 리셋 요청 자체가 장치에 닿지 않는다 — /chassis 1 reset 이 안 먹는
+// 상황이 이것. 여기서는 커널 쪽에서 끊는다: sysfs authorized 0 > 1 로 드라이버를
+// unbind 했다가 재열거한다 (물리적 재삽입과 동일).
+//   반환 0=성공, 1=장치 못 찾음, 2=권한 없음(udev rule 미배포), 3=write 실패
+// 권한: /sys/bus/usb/devices/<X-Y>/authorized 는 기본 root 전용이라 udev rule 로
+// plugdev 쓰기를 열어야 한다 (assets/udev/99-bewe-usb-powercycle.rules).
+int usb_deep_powercycle(uint16_t vid, uint16_t pid, int off_ms);
+
 // ── DEMOD 모듈 패널 렌더 (demod_panel.cpp) ────────────────────────────────
 void demod_draw_panel(FFTViewer& v, bool just_opened);
