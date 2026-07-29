@@ -6411,6 +6411,36 @@ void run_streaming_viewer(){
                             && !v.lwf_modal_open && !v.sig_lib_panel_open
                             && !v.mission_modal_open && !v.demod_panel_open;
 
+        // ── FRZ / TM 토글 (P 키·스페이스바 = 하단바 FRZ·TM 클릭, 완전 동일 동작) ──
+        // 키 핸들러와 하단바 양쪽에서 호출하므로 여기서 한 번만 정의한다.
+        auto toggle_freeze = [&](){
+            bool np = !v.spectrum_pause.load();
+            // JOIN이든 HOST든 로컬 FFT 표시 토글 (채널 복조 스트리밍과 무관)
+            v.spectrum_pause.store(np);
+            if(v.net_srv){
+                v.net_srv->broadcast_channel_sync(v.channels,MAX_CHANNELS);
+                // 즉시 heartbeat: JOIN에게 pause 상태 즉시 반영
+                v.net_srv->broadcast_heartbeat(np ? 2 : 0);
+                heartbeat_last = std::chrono::steady_clock::now();
+            }
+            // JOIN 모드: Central에 FFT 송신 토글 요청 — 네트워크 자체 차단/재개.
+            // (audio/HB/CMD 등 다른 트래픽은 영향 없음.)
+            if(v.remote_mode && v.net_cli){
+                v.net_cli->cmd_toggle_fft_recv(/*enable=*/!np);
+            }
+        };
+        auto toggle_tm = [&](){
+            if(v.tm_active.load()){
+                v.tm_offset=0.0f;
+                v.tm_active.store(false);
+            } else {
+                v.tm_freeze_idx=v.current_fft_idx;
+                v.tm_display_fft_idx=v.current_fft_idx;
+                v.tm_offset=0.0f;
+                v.tm_active.store(true);
+            }
+        };
+
         // ── Keyboard shortcuts ────────────────────────────────────────────
         if(!editing && main_kbd_active){
             if(ImGui::IsKeyPressed(ImGuiKey_R,false)){
@@ -6495,36 +6525,13 @@ void run_streaming_viewer(){
             }
 
 
-            if(ImGui::IsKeyPressed(ImGuiKey_P,false)){
-                bool np = !v.spectrum_pause.load();
-                // JOIN이든 HOST든 로컬 FFT 표시 토글 (채널 복조 스트리밍과 무관)
-                v.spectrum_pause.store(np);
-                if(v.net_srv){
-                    v.net_srv->broadcast_channel_sync(v.channels,MAX_CHANNELS);
-                    // 즉시 heartbeat: JOIN에게 pause 상태 즉시 반영
-                    v.net_srv->broadcast_heartbeat(np ? 2 : 0);
-                    heartbeat_last = std::chrono::steady_clock::now();
-                }
-                // JOIN 모드: Central에 FFT 송신 토글 요청 — 네트워크 자체 차단/재개.
-                // (audio/HB/CMD 등 다른 트래픽은 영향 없음.)
-                if(v.remote_mode && v.net_cli){
-                    v.net_cli->cmd_toggle_fft_recv(/*enable=*/!np);
-                }
-            }
+            if(ImGui::IsKeyPressed(ImGuiKey_P,false)) toggle_freeze();
             // (T 키 매핑 제거 — 사용자 요청. IQ rolling 은 항상 HOST 측에서 자동 관리)
             // 스페이스바: TM 토글 (진입/해제)
             // EID Audio 탭(mode 8) 활성 시에는 audio play/pause 전용 — TM 토글 비활성
             if(ImGui::IsKeyPressed(ImGuiKey_Space,false)
                && !(v.eid_panel_open && v.eid_view_mode == 8)){
-                if(v.tm_active.load()){
-                    v.tm_offset=0.0f;
-                    v.tm_active.store(false);
-                } else {
-                    v.tm_freeze_idx=v.current_fft_idx;
-                    v.tm_display_fft_idx=v.current_fft_idx;
-                    v.tm_offset=0.0f;
-                    v.tm_active.store(true);
-                }
+                toggle_tm();
             }
             // 오버레이(EID/LOG/HIST/LIB) 활성 시엔 채널 demod 키 (A/F 등) 무시
             if(main_kbd_active && sci>=0 && v.channels[sci].filter_active){
@@ -9105,50 +9112,40 @@ void run_streaming_viewer(){
                 bar_try_toggle(6, v.demod_panel_open);
             }
 
-            // 오른쪽>왼쪽: TM IQ AUD WF FFT LINK SDR
+            // 오른쪽>왼쪽: FRZ TM IQ AUD WF FFT LINK SDR
+            // 토글되는 건 IQ / TM / FRZ 셋뿐 — 나머지(AUD/WF/FFT/LINK/SDR)는
+            // 상태 표시등이라 누를 이유가 없다. 셋 다 대응 단축키와 동일 동작:
+            //   IQ = I 키, TM = 스페이스바, FRZ = P 키
             float rx=disp_w-8.0f;
 
-            // FRZ — spectrum pause indicator (TM 오른쪽)
-            rx=draw_ind(rx,"FRZ", v.spectrum_pause.load() ? 1 : 0);
+            // FRZ (클릭 가능 — P 키와 동일 동작)
+            if(click_ind(rx,"FRZ", v.spectrum_pause.load() ? 1 : 0)){
+                toggle_freeze();
+            }
 
-            // TM
-            rx=draw_ind(rx,"TM", tm_on ? 1 : 0);
+            // TM (클릭 가능 — 스페이스바와 동일 동작)
+            if(click_ind(rx,"TM", tm_on ? 1 : 0)){
+                toggle_tm();
+            }
 
             // IQ (클릭 가능 — I 키와 동일 동작)
             if(click_ind(rx,"IQ", iq_on ? 1 : 0)){
                 v.toggle_tm_iq();
             }
 
-            // AUD (3색)
+            // AUD (3색) — 표시 전용
             rx=draw_ind(rx,"AUD", aud_led);
 
-            // WF (클릭 가능, 3색>초록/빨간)
-            if(click_ind(rx,"WF", wf_led)){
-                v.spectrum_pause.store(!v.spectrum_pause.load());
-            }
+            // WF (3색) — 표시 전용
+            rx=draw_ind(rx,"WF", wf_led);
 
-            // FFT (클릭 가능, 3색>초록/빨간)
-            if(click_ind(rx,"FFT", fft_led)){
-                v.spectrum_pause.store(!v.spectrum_pause.load());
-            }
+            // FFT (3색) — 표시 전용
+            rx=draw_ind(rx,"FFT", fft_led);
 
-            // LINK (3색: draw_ind 사용)
+            // LINK (3색) — 표시 전용
             rx=draw_ind(rx,"LINK", link_state);
-            // LINK 클릭: capture_pause 토글
-            {
-                ImVec2 lsz=ImGui::CalcTextSize("LINK");
-                float lx=rx+14.0f; // draw_ind가 이미 이동시킴, 실제 그려진 위치 복원
-                bool lclicked=ImGui::IsMouseClicked(ImGuiMouseButton_Left)&&!mouse_blocked&&
-                    io.MousePos.x>=lx&&io.MousePos.x<=lx+lsz.x&&
-                    io.MousePos.y>=ty_b&&io.MousePos.y<=ty_b+lsz.y;
-                if(lclicked){
-                    bool np=!v.capture_pause.load();
-                    if(v.remote_mode && v.net_cli) v.net_cli->cmd_set_capture_pause(np);
-                    else { v.capture_pause.store(np); }
-                }
-            }
 
-            // SDR
+            // SDR — 표시 전용
             rx=draw_ind(rx,"SDR", sdr_led);
 
         }
