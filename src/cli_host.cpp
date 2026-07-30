@@ -3042,9 +3042,11 @@ void run_cli_host(){
                 bewe_log_push(0,"  /mission start   - Begin a new mission\n");
                 bewe_log_push(0,"  /mission end     - End active mission\n");
                 bewe_log_push(0,"  /mission status  - Show current mission state\n");
-                bewe_log_push(0,"  /chassis 1 reset - USB SDR hardware reset\n");
-                bewe_log_push(0,"  /chassis 2 reset - Network broadcast reset\n");
-                bewe_log_push(0,"  /powercycle      - Deep USB re-enumeration (when chassis 1 fails)\n");
+                // 복구 3티어 — 낮은 것부터. 위로 갈수록 잃는 범위가 커진다.
+                bewe_log_push(0,"  /chassis 1 reset    - USB re-enumerate + SDR reinit (keeps process)\n");
+                bewe_log_push(0,"  /chassis 2 reset    - Network broadcast reset\n");
+                bewe_log_push(0,"  /powercycle partial - above + restart BEWE (keeps machine)\n");
+                bewe_log_push(0,"  /powercycle full    - above + reboot machine\n");
                 bewe_log_push(0,"  /rx stop         - Stop SDR capture\n");
                 bewe_log_push(0,"  /rx start        - Restart SDR capture\n");
                 bewe_log_push(0,"  /shutdown        - Clean exit\n");
