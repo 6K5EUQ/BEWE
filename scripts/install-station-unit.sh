@@ -60,6 +60,29 @@ sed -e "s|@STATION@|$STATION|g" \
 touch "/var/log/bewe-${STATIONLC}.log"
 chown "$RUN_USER:$RUN_USER" "/var/log/bewe-${STATIONLC}.log"
 
+# /powercycle full 은 `systemctl reboot` 을 호출한다. systemd 서비스는 로그인
+# 세션이 없어 polkit 이 기본적으로 "Interactive authentication required" 로 막는다
+# (2026-07-30 DGS-2 실측: 재부팅이 거부되고 기지가 죽은 채 남았다). 실행 계정에만
+# 재부팅을 허용한다.
+POLKIT_RULE=/etc/polkit-1/rules.d/49-bewe-reboot.rules
+if [ -d /etc/polkit-1/rules.d ]; then
+    cat > "$POLKIT_RULE" <<POLKIT
+// BEWE /powercycle full — 실행 계정이 재부팅할 수 있게 한다.
+// 무인 기지라 사람이 붙어 대화형 인증을 해 줄 수 없다.
+polkit.addRule(function(action, subject) {
+    if ((action.id == "org.freedesktop.login1.reboot" ||
+         action.id == "org.freedesktop.login1.reboot-multiple-sessions") &&
+        subject.user == "$RUN_USER") {
+        return polkit.Result.YES;
+    }
+});
+POLKIT
+    echo "installed: $POLKIT_RULE (reboot for $RUN_USER)"
+else
+    echo "WARNING: /etc/polkit-1/rules.d 없음 — /powercycle full 이 재부팅에" >&2
+    echo "         실패한다. 실패 시 프로세스 재시작으로 폴백한다." >&2
+fi
+
 systemctl daemon-reload
 systemctl enable bewe-station.service
 

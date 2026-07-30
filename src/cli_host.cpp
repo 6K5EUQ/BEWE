@@ -3126,9 +3126,15 @@ void run_cli_host(){
     if(g_reboot_on_exit.load()){
         bewe_log_push(0,"[BEWE CLI] Power cycle full: rebooting station now.\n");
         std::fflush(stdout); std::fflush(stderr);
-        if(std::system("systemctl reboot") != 0)
-            bewe_log_push(2,"[BEWE CLI] reboot command failed - station left down!\n");
-        return;   // 재부팅이 시작됐다 — systemd 가 재기동할 필요 없다
+        // polkit 이 막으면 ("Interactive authentication required") 재부팅이 안 된다.
+        // 그때 그냥 리턴하면 종료 코드 0 이라 Restart=on-failure 가 안 걸려 기지가
+        // 통째로 죽은 채 남는다 (2026-07-30 DGS-2 실측). 재부팅에 실패하면 최소한
+        // 프로세스는 살려야 하므로 partial 과 같은 경로로 떨어뜨린다.
+        if(std::system("systemctl reboot") == 0)
+            return;   // 재부팅이 시작됐다 — systemd 가 재기동할 필요 없다
+        bewe_log_push(2,"[BEWE CLI] reboot command failed - falling back to process restart. "
+                        "Grant reboot rights: scripts/install-station-unit.sh (polkit rule).\n");
+        g_restart_on_exit.store(true);
     }
 
     // /powercycle partial 은 systemd 가 다시 띄워 줘야 완성된다. 유닛이
