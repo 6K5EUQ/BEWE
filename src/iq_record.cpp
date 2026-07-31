@@ -242,6 +242,11 @@ static const char* dem_mode_name(Channel::DemodMode m){
 }
 
 // ── IQ 녹음 워커 ─────────────────────────────────────────────────────────
+// ── 아래 블록은 HOST 전용 레코더다 ─────────────────────────────────────────
+// 전대역 IQ(rec_worker/start_rec/stop_rec), 채널별 오디오(start/stop_audio_rec),
+// 채널별 IQ(iq_only_worker/start/stop_iq_rec) — 전부 로컬 SDR 샘플이 있어야 한다.
+// JOIN 빌드는 샘플이 없고 호출부도 없다 (JOIN 은 HOST 에 요청만 보낸다).
+#ifdef BEWE_HOST_BUILD
 void FFTViewer::rec_worker(){
     uint32_t msr=header.sample_rate;
     float off=(rec_cf_mhz-(float)(header.center_frequency/1e6f))*1e6f;
@@ -729,6 +734,8 @@ void FFTViewer::stop_iq_rec(int ch_idx){
 }
 
 // ── JOIN 모드 로컬 오디오 녹음 (mix_worker에서 채널 오디오를 WAV에 씀) ──────
+#endif  // BEWE_HOST_BUILD (HOST 레코더)
+
 void FFTViewer::start_join_audio_rec(int ch_idx){
     if(ch_idx<0||ch_idx>=MAX_CHANNELS) return;
     Channel& ch=channels[ch_idx];

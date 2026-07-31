@@ -19,8 +19,12 @@
 #else
   typedef unsigned int GLuint;
 #endif
+#ifdef BEWE_HOST_BUILD
+// SDR 드라이버 헤더는 HOST 빌드만 본다. JOIN 은 하드웨어를 열지 않으므로
+// 이 헤더도, 링크할 .so 도 필요 없다 (JOIN PC 에 -dev 패키지 불필요).
 #include <libbladeRF.h>
 #include <rtl-sdr.h>
+#endif
 #include <fftw3.h>
 
 #include <cstdint>
@@ -866,6 +870,7 @@ public:
 
     // ── Hardware (공통) ───────────────────────────────────────────────────
     HWConfig hw;                          // 런타임 HW 파라미터
+#ifdef BEWE_HOST_BUILD
     struct bladerf*  dev_blade = nullptr; // BladeRF 디바이스
     rtlsdr_dev_t*    dev_rtl   = nullptr; // RTL-SDR 디바이스
     // ADALM-Pluto (libiio) — void* 로 선언해 header include 오염 방지
@@ -875,6 +880,7 @@ public:
     void*            pluto_rx_i_ch   = nullptr; // iio_channel* voltage0
     void*            pluto_rx_q_ch   = nullptr; // iio_channel* voltage1
     void*            pluto_rx_buf    = nullptr; // iio_buffer*
+#endif
     fftwf_plan      fft_plan=nullptr;
     fftwf_complex  *fft_in=nullptr, *fft_out=nullptr;
     bool  is_running=true;

@@ -38,18 +38,23 @@ endif()
 
 find_package(PkgConfig REQUIRED)
 find_package(ZLIB REQUIRED)              # 모듈 히스토리 스트림 압축
-pkg_check_modules(BLADERF REQUIRED libbladeRF)
 pkg_check_modules(FFTW    REQUIRED fftw3f)
 pkg_check_modules(ALSA    REQUIRED alsa)
 pkg_check_modules(MPG123  REQUIRED libmpg123)
-pkg_check_modules(RTLSDR  REQUIRED librtlsdr)
 pkg_check_modules(LIBPNG  REQUIRED libpng)
-
-pkg_check_modules(VOLK REQUIRED volk)
-pkg_check_modules(IIO    REQUIRED libiio)
-pkg_check_modules(AD9361 REQUIRED libad9361)
 pkg_check_modules(OPUS   REQUIRED opus)      # 오디오 Opus 코덱 (HOST 인코드/JOIN 디코드)
 pkg_check_modules(ZSTD   REQUIRED libzstd)   # FFT uint8 무손실 추가압축
+
+# ── SDR 드라이버 — HOST(CLI) 빌드 전용 ────────────────────────────────────
+# JOIN(GUI)은 하드웨어를 열지 않으므로 이 -dev 패키지들이 필요 없다. REQUIRED 를
+# 무조건 걸어두면 JOIN 만 쓰는 PC 에서도 설치를 강요하게 된다.
+if(CLI)
+    pkg_check_modules(BLADERF REQUIRED libbladeRF)
+    pkg_check_modules(RTLSDR  REQUIRED librtlsdr)
+    pkg_check_modules(VOLK    REQUIRED volk)
+    pkg_check_modules(IIO     REQUIRED libiio)
+    pkg_check_modules(AD9361  REQUIRED libad9361)
+endif()
 
 if(CLI)
     # ── CLI build (no OpenGL/GLFW/ImGui) ──────────────────────────────────
@@ -190,15 +195,10 @@ else()
     target_include_directories(BEWE PRIVATE
         src
         ${CMAKE_SOURCE_DIR}/libs/mbelib
-        ${BLADERF_INCLUDE_DIRS}
         ${FFTW_INCLUDE_DIRS}
         ${ALSA_INCLUDE_DIRS}
         ${MPG123_INCLUDE_DIRS}
-        ${RTLSDR_INCLUDE_DIRS}
         ${LIBPNG_INCLUDE_DIRS}
-        ${VOLK_INCLUDE_DIRS}
-        ${IIO_INCLUDE_DIRS}
-        ${AD9361_INCLUDE_DIRS}
         ${OPUS_INCLUDE_DIRS}
         ${ZSTD_INCLUDE_DIRS}
         ${IMGUI_PATH}
@@ -206,18 +206,13 @@ else()
     )
 
     target_link_libraries(BEWE PRIVATE
-        ${BLADERF_LIBRARIES}
         ${FFTW_LIBRARIES}
         ${ALSA_LIBRARIES}
         ${MPG123_LIBRARIES}
-        ${RTLSDR_LIBRARIES}
         ${LIBPNG_LIBRARIES}
         OpenGL::GL
         GLEW::GLEW
         glfw
-        ${VOLK_LIBRARIES}
-        ${IIO_LIBRARIES}
-        ${AD9361_LIBRARIES}
         ${OPUS_LIBRARIES}
         ${ZSTD_LIBRARIES}
         ZLIB::ZLIB

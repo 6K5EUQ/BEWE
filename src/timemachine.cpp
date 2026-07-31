@@ -324,6 +324,10 @@ void FFTViewer::tm_update_display(){
 }
 
 bool FFTViewer::tm_rec_start(){
+#ifndef BEWE_HOST_BUILD
+    // TM 롤링 IQ 파일은 HOST 가 쓴다 — JOIN 엔 잘라낼 원본이 없다.
+    return false;
+#else
     if(!tm_iq_file_ready||tm_iq_fd<0){ return false; }
     int disp_row=tm_display_fft_idx%MAX_FFTS_MEMORY;
     if(!iq_row_avail[disp_row]){ return false; }
@@ -340,4 +344,5 @@ bool FFTViewer::tm_rec_start(){
     read_pos=read_pos%tm_iq_total_samples;
     tm_rec_read_pos=read_pos; tm_rec_active=true;
     start_rec(); return true;
+#endif
 }

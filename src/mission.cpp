@@ -206,9 +206,12 @@ void stop_utc0_worker(){
 
 // ── 자동 캡처 helpers ─────────────────────────────────────────────────────
 static const char* mission_sdr_kind_str(const FFTViewer& v){
+#ifdef BEWE_HOST_BUILD
+    // 핸들이 열려 있으면 그게 정본 (hw.type 이 갱신되기 전 시점도 커버).
     if(v.dev_blade)             return "BladeRF";
     if(v.pluto_ctx)             return "Pluto";
     if(v.dev_rtl)               return "RTL-SDR";
+#endif
     if(v.hw.type == HWType::BLADERF) return "BladeRF";
     if(v.hw.type == HWType::PLUTO)   return "Pluto";
     if(v.hw.type == HWType::RTLSDR)  return "RTL-SDR";
@@ -323,14 +326,18 @@ bool FFTViewer::mission_end(){
     }
 
     LongWaterfall::request_rotate();
+#ifdef BEWE_HOST_BUILD
+    // HOST 레코더 정리 — 미션이 끝나면 파일이 갈 곳이 없어진다.
     if(rec_on.load()) stop_rec();
     for(int i = 0; i < MAX_CHANNELS; ++i){
         if(channels[i].iq_rec_on.load()) stop_iq_rec(i);
-        if(channels[i].audio_rec_on.load()){
-            if(remote_mode) stop_join_audio_rec(i);
-            else            stop_audio_rec(i);
-        }
+        if(channels[i].audio_rec_on.load()) stop_audio_rec(i);
     }
+#else
+    // JOIN 은 자기 PC 로컬 오디오 녹음만 갖는다.
+    for(int i = 0; i < MAX_CHANNELS; ++i)
+        if(channels[i].audio_rec_on.load()) stop_join_audio_rec(i);
+#endif
 
 #ifdef BEWE_HOST_BUILD
     // Mission File Push: 미션 종료 시점에 잔여 파일 모두 enqueue (race-safe)

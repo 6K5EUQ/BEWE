@@ -549,12 +549,9 @@ static void draw_start_submodal(FFTViewer& v, NetClient* cli){
             memcpy(sdr_buf, cli->remote_sdr_kind, sizeof(sdr_buf));
             sdr_buf[sizeof(sdr_buf)-1] = '\0';
         }
-        const char* sdr =
-            v.remote_mode      ? (sdr_buf[0] ? sdr_buf :
-                                  v.mission_sdr_kind[0] ? v.mission_sdr_kind : "(remote)") :
-            (v.dev_blade)      ? "BladeRF" :
-            (v.pluto_ctx)      ? "Pluto"   :
-            (v.dev_rtl)        ? "RTL-SDR" : "Unknown";
+        // JOIN 전용 빌드 — SDR 종류는 HOST 가 보낸 값(remote_sdr_kind)이 정본이다.
+        const char* sdr = sdr_buf[0] ? sdr_buf :
+                          v.mission_sdr_kind[0] ? v.mission_sdr_kind : "(remote)";
         ImGui::BulletText("SDR: %s", sdr);
         ImGui::BulletText("Antenna: %s", antenna_buf[0] ? antenna_buf : "(unset)");
         // login_get_id가 비면 USER env / hostname 으로 폴백 (mission.cpp와 동일 정책)
@@ -578,19 +575,14 @@ static void draw_start_submodal(FFTViewer& v, NetClient* cli){
             bewe_log_push(0, "[MISSION] Start button clicked: remote_mode=%d cli=%p net_cli=%p\n",
                           (int)v.remote_mode, (void*)cli, (void*)v.net_cli);
             bool ok = false;
-            // cli 파라미터가 null이어도 remote_mode면 v.net_cli로 폴백
+            // cli 파라미터가 null이어도 v.net_cli 로 폴백. 미션 시작은 HOST 가 한다.
             NetClient* use_cli = cli ? cli : v.net_cli;
-            if(v.remote_mode && use_cli){
+            if(use_cli){
                 ok = use_cli->send_mission_start();
                 bewe_log_push(0, "[MISSION] cli->send_mission_start() → ok=%d\n", (int)ok);
                 if(!ok) MissionView::show_toast("Mission start failed: not connected");
-            } else if(!v.remote_mode){
-                ok = v.mission_start(login_get_id(), /*op_index=*/0, /*rollover=*/false);
-                bewe_log_push(0, "[MISSION] v.mission_start() → ok=%d state=%d\n",
-                              (int)ok, (int)v.mission_state);
-                if(!ok) MissionView::show_toast("Mission start failed: already active");
             } else {
-                bewe_log_push(1, "[MISSION] start failed: remote_mode=1 but no NetClient available\n");
+                bewe_log_push(1, "[MISSION] start failed: no NetClient available\n");
                 MissionView::show_toast("Mission start failed: net client missing");
             }
             if(ok) MissionView::show_toast("Mission start requested");
@@ -2412,10 +2404,6 @@ static void draw_left_tree(FFTViewer& v){
     uint64_t cf = v.net_cli ? v.net_cli->remote_central_disk_free.load() : 0;
     uint64_t hf = v.net_cli ? v.net_cli->remote_host_disk_free.load()    : 0;
     uint64_t lf = v.local_disk_free.load();
-    // LOCAL/HOST 모드는 자기 머신이 곧 HOST → HOST 칸 = local_disk_free, Central 은 미연결 시 0.
-    if(!v.remote_mode){
-        hf = lf;
-    }
     ImGui::TextColored(disk_color(cf), "Central: %s", cf ? fmt_free(cf).c_str() : "—");
     ImGui::TextColored(disk_color(hf), "Host:    %s", hf ? fmt_free(hf).c_str() : "—");
     ImGui::TextColored(disk_color(lf), "Local:   %s", lf ? fmt_free(lf).c_str() : "—");

@@ -184,18 +184,8 @@ void FFTViewer::handle_channel_interactions(float gx, float gw, float gy, float 
                 if(!channels[i].resize_drag) continue;
                 channels[i].resize_drag=false;
                 any_resized = true;
-                // detect 채널을 lock 아닌 상태에서 넓혔다면 그건 탐색 대역을 다시 그린 것이다
-                // → det_s/det_e 도 따라가야 한다. arm 시점 값만 붙들면, 신호가 끝나 release
-                // 될 때 옛 폭으로 되돌려 사용자가 늘린 게 사라진다. lock 중이면 s/e 는 잡은
-                // 신호의 폭이므로 탐색 대역으로 옮기지 않는다. (HOST 로컬 경로 — JOIN 은
-                // cmd_update_ch_range 로 HOST 에 보내고 거기서 같은 처리를 한다)
-                if(!remote_mode &&
-                   channels[i].det_on.load(std::memory_order_relaxed) &&
-                   !channels[i].det_locked.load(std::memory_order_relaxed)){
-                    channels[i].det_s = channels[i].s;
-                    channels[i].det_e = channels[i].e;
-                    channels[i].det_base_reset();   // 대역이 바뀌었으니 기준선 무효 → 재수집
-                }
+                // (detect 탐색대역 추종은 HOST 가 한다 — JOIN 은 아래 cmd_update_ch_range
+                //  로 새 폭을 보내고 HOST 가 det_s/det_e 갱신 + 기준선 재수집을 수행한다.)
                 // JOIN: send new range to HOST (복조 재시작은 HOST 가 한다)
                 if(net_cli) net_cli->cmd_update_ch_range(i, channels[i].s, channels[i].e);
             }
@@ -256,8 +246,8 @@ void FFTViewer::handle_channel_interactions(float gx, float gw, float gy, float 
                 // JOIN: 서버에 삭제 요청 > 서버가 broadcast 처리
                 net_cli->cmd_delete_ch(ci);
             }
-            // 녹음 중이면 중지 (R키 + audio + I키 IQ)
-            if(rec_on.load() && rec_ch==ci) stop_rec();
+            // 녹음 중이면 중지 (R키 로컬 오디오). IQ 녹음은 HOST 가 하므로
+            // 채널 삭제 요청을 받은 HOST 가 자기 쪽에서 정리한다.
             if(channels[ci].audio_rec_on.load()) stop_join_audio_rec(ci);
             // 로컬 즉시 반영 (서버 sync가 확인해줌)
             channels[ci].reset_slot();
@@ -4526,15 +4516,9 @@ void run_streaming_viewer(){
             }
             if(main_kbd_active && ImGui::IsKeyPressed(ImGuiKey_Delete,false)){
                 if(sci>=0&&v.channels[sci].filter_active){
-                    // IQ 녹음 중이면 중지
-                    if(v.channels[sci].iq_rec_on.load())
-                        v.stop_iq_rec(sci);
                     // 오디오 녹음 중이면 중지 + 파일 삭제
                     if(v.channels[sci].audio_rec_on.load()){
-                        if(v.remote_mode && v.net_cli)
-                            v.stop_join_audio_rec(sci);
-                        else
-                            v.stop_audio_rec(sci);
+                        v.stop_join_audio_rec(sci);
                         std::lock_guard<std::mutex> lk(v.rec_entries_mtx);
                         for(auto it=v.rec_entries.begin();it!=v.rec_entries.end();++it){
                             if(it->is_audio && it->ch_idx==sci){
@@ -4545,8 +4529,6 @@ void run_streaming_viewer(){
                             }
                         }
                     }
-                    // 전체 IQ 녹음 중이면 중지
-                    if(v.rec_on.load() && v.rec_ch==sci) v.stop_rec();
                     if(v.net_cli) v.net_cli->cmd_delete_ch(sci);
                     v.selected_ch=-1;
                 } else if(file_ctx.selected && file_ctx.type == FileCtxMenu::FT_DB){
@@ -4689,10 +4671,7 @@ void run_streaming_viewer(){
         {
             // 원격 주파수 동기화 (편집 중이 아닐 때)
             if(!ImGui::IsItemActive()){
-                if(v.net_cli)
-                    new_freq = v.net_cli->remote_cf_mhz.load();
-                else if(!v.remote_mode && v.header.center_frequency > 0)
-                    new_freq = (float)(v.header.center_frequency / 1e6);
+                if(v.net_cli) new_freq = v.net_cli->remote_cf_mhz.load();
             }
             char fbuf[32]; snprintf(fbuf,sizeof(fbuf),"%.3f MHz",new_freq);
             float tw=ImGui::CalcTextSize(fbuf).x;
@@ -4749,7 +4728,7 @@ void run_streaming_viewer(){
         ImGui::SameLine();
 
         // ── Sample Rate combo (LOCAL/HOST/JOIN 표시) ──────────────────────
-        if((v.dev_blade || v.dev_rtl || v.pluto_ctx) || v.remote_mode){
+        {
             // BladeRF: 2.5/5/10/20/30.72/61.44 MSPS
             // RTL-SDR: 0.25/0.96/1.44/2.56/3.2 MSPS
             // Pluto  : 0.52/1/2/2.56/3.2/10/20/40/61.44 MSPS (3.2 초과는 USB2 드롭 전제, 파워 스펙트럼 관측 전용)
@@ -4760,13 +4739,8 @@ void run_streaming_viewer(){
             static const float pluto_srs[]  = {0.52f,1.0f,2.0f,2.56f,3.2f,10.0f,20.0f,40.0f,61.44f};
             static const char* pluto_lbls[] = {"0.52M","1M","2M","2.56M","3.2M","10M","20M","40M","61.44M"};
             // 0=blade, 1=rtl, 2=pluto
-            int hw_mode;
-            if(v.remote_mode){
-                uint8_t rh = v.net_cli ? v.net_cli->remote_hw.load() : 1;
-                hw_mode = (rh == 0) ? 0 : (rh == 2) ? 2 : 1;
-            } else if(v.dev_blade) hw_mode = 0;
-            else if(v.pluto_ctx)   hw_mode = 2;
-            else                   hw_mode = 1;
+            uint8_t rh = v.net_cli ? v.net_cli->remote_hw.load() : 1;
+            int hw_mode = (rh == 0) ? 0 : (rh == 2) ? 2 : 1;
             const float* sr_list;  const char** sr_lbls;  int sr_count;
             switch(hw_mode){
                 case 0: sr_list = blade_srs; sr_lbls = blade_lbls; sr_count = 7; break;
@@ -5225,24 +5199,9 @@ void run_streaming_viewer(){
                 if(vv.net_cli){
                     uint8_t rh = vv.net_cli->remote_hw.load();
                     sdr_name = (rh == 0) ? "BladeRF 2.0 micro xA9" :
-                               (rh == 2) ? "ADALM-Pluto" : "RTL-SDR v4";
+                               (rh == 2) ? "ADALM-Pluto" :
+                               (rh == 3) ? "KrakenSDR" : "RTL-SDR v4";
                     sdr_t = vv.net_cli->remote_sdr_temp_c.load();
-                } else {
-                    if(vv.dev_blade){ sdr_name = "BladeRF 2.0 micro xA9";
-                        // RFIC 온도: USB 쿼리 비용 절감 — 3초 캐시 (하단바와 동일 주기).
-                        // 주의: static 캐시라 draw_system_status 가 다른 vv 로 호출되면 캐시가 공유됨 (현재 호출처는 v 하나).
-                        static uint8_t s_rfic_temp_cache = 0;
-                        static float   s_rfic_temp_timer = 3.f;
-                        s_rfic_temp_timer += io.DeltaTime;
-                        if(s_rfic_temp_timer >= 3.0f){
-                            s_rfic_temp_timer = 0.f;
-                            float _t = 0.f;
-                            if(bladerf_get_rfic_temperature(vv.dev_blade, &_t) == 0)
-                                s_rfic_temp_cache = (uint8_t)std::min(255.f, std::max(0.f, _t));
-                        }
-                        sdr_t = s_rfic_temp_cache;
-                    } else if(vv.hw.type == HWType::PLUTO) sdr_name = "ADALM-Pluto";
-                    else if(vv.dev_rtl) sdr_name = "RTL-SDR v4";
                 }
                 ImGui::PushID(tag);
                 char rx_lbl[128];
@@ -5720,7 +5679,6 @@ void run_streaming_viewer(){
                                     ImGui::SetTooltip("%s",tip);
                                 }
                                 auto delete_ch = [&](){
-                                    if(v.rec_on.load() && v.rec_ch==ci) v.stop_rec();
                                     if(v.channels[ci].audio_rec_on.load()) v.stop_join_audio_rec(ci);
                                     if(v.net_cli) v.net_cli->cmd_delete_ch(ci);
                                     v.channels[ci].reset_slot();
@@ -5739,7 +5697,6 @@ void run_streaming_viewer(){
                             // Del 키 (선택된 채널) — 모달 오버레이(HIST/EID/LOG/LIB) 떠있으면 차단.
                             // STATUS 사이드 패널은 비모달이라 평소 동작하되, 모달이 위에 있으면 그 창 단축키가 우선.
                             if(ch.selected && main_kbd_active && ImGui::IsKeyPressed(ImGuiKey_Delete,false)){
-                                if(v.rec_on.load() && v.rec_ch==ci) v.stop_rec();
                                 if(v.channels[ci].audio_rec_on.load()) v.stop_join_audio_rec(ci);
                                 if(v.net_cli) v.net_cli->cmd_delete_ch(ci);
                                 v.channels[ci].reset_slot();
@@ -5866,13 +5823,13 @@ void run_streaming_viewer(){
                                             ImGui::PopStyleColor();
                                         }
                                     }
-                                    // 채널이 삭제된 IQ REC 항목 자동 정리
+                                    // 채널이 삭제된 IQ REC 항목 자동 정리 (HOST 가 실제
+                                    // 녹음을 멈추므로 여기선 표시 항목만 걷어낸다)
                                     for(int ri=(int)v.rec_entries.size()-1;ri>=0;ri--){
                                         auto& re=v.rec_entries[ri];
                                         if(re.is_audio || re.finished || re.is_region) continue;
-                                        if(re.ch_idx>=0 && !v.channels[re.ch_idx].filter_active){
-                                            v.stop_iq_rec(re.ch_idx);
-                                        }
+                                        if(re.ch_idx>=0 && !v.channels[re.ch_idx].filter_active)
+                                            v.rec_entries.erase(v.rec_entries.begin()+ri);
                                     }
                                     // 파일이 삭제된 finished 항목 정리 (2초마다)
                                     {
@@ -5979,7 +5936,6 @@ void run_streaming_viewer(){
                                                     if(ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)){
                                                         if(re.ch_idx>=0){
                                                             int ci=re.ch_idx;
-                                                            v.stop_iq_rec(ci);
                                                             if(v.channels[ci].audio_rec_on.load()) v.stop_join_audio_rec(ci);
                                                             if(v.net_cli) v.net_cli->cmd_delete_ch(ci);
                                                             v.channels[ci].reset_slot();
@@ -6327,10 +6283,7 @@ void run_streaming_viewer(){
                 }
 
                 // LOCAL/HOST: SDR 필수 (BladeRF/RTL-SDR/Pluto), JOIN: net_cli 연결 필수
-                bool can_add = v.remote_mode
-                    ? (v.net_cli && v.net_cli->is_connected())
-                    : (v.dev_blade || v.dev_rtl
-                       || (v.hw.type == HWType::PLUTO && v.pluto_ctx != nullptr));
+                bool can_add = (v.net_cli && v.net_cli->is_connected());
                 bool block_add = !can_add || preview_overlap;
                 if(block_add) ImGui::BeginDisabled();
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f,0.55f,0.2f,1.f));
@@ -6631,34 +6584,15 @@ void run_streaming_viewer(){
                     }).detach();
                 }
 
-                // SDR 온도
-                // - LOCAL/HOST + BladeRF: libbladeRF 직접 쿼리 (3초마다)
-                // - LOCAL/HOST + RTL-SDR: 온도 API 없음 > "00°C"
-                // - JOIN: HOST HEARTBEAT에서 수신한 remote_sdr_temp_c 사용
+                // SDR 온도 — HOST 가 HEARTBEAT 로 실어 보낸 값을 그대로 쓴다
+                // (JOIN 에는 하드웨어가 없으므로 직접 쿼리할 대상이 없다).
                 static char  sdr_temp_str[16]  = "";
-                static float sdr_temp_timer    = 1.f;
                 static std::mutex sdr_temp_mtx;
-                sdr_temp_timer += io.DeltaTime;
-                if(v.remote_mode && v.net_cli){
-                    // JOIN: HOST에서 받은 SDR 온도
+                if(v.net_cli){
                     uint8_t rt = v.net_cli->remote_sdr_temp_c.load();
                     std::lock_guard<std::mutex> lk(sdr_temp_mtx);
                     snprintf(sdr_temp_str, sizeof(sdr_temp_str),
                              "%02d\xC2\xB0""C", (int)rt);
-                } else if(sdr_temp_timer >= 3.0f){
-                    sdr_temp_timer = 0.f;
-                    if(v.dev_blade){
-                        float sdr_t = 0.f;
-                        if(bladerf_get_rfic_temperature(v.dev_blade, &sdr_t) == 0){
-                            std::lock_guard<std::mutex> lk(sdr_temp_mtx);
-                            snprintf(sdr_temp_str, sizeof(sdr_temp_str),
-                                     "%.0f\xC2\xB0""C", sdr_t);
-                        }
-                    } else if(v.dev_rtl){
-                        // RTL-SDR: 온도 API 미지원
-                        std::lock_guard<std::mutex> lk(sdr_temp_mtx);
-                        snprintf(sdr_temp_str, sizeof(sdr_temp_str), "00\xC2\xB0""C");
-                    }
                 }
 
                 // 시계 (KST 기준) — time_t 가 바뀐 프레임에만 재포맷
@@ -6721,38 +6655,17 @@ void run_streaming_viewer(){
                 wf_led  = (fft_active && v.wf_area_visible.load()) ? 1 : 0;
             }
 
-            // SDR: 스트리밍 실제 끊김 여부
-            static int   sdr_last_fft_idx = -1;
-            static float sdr_stall_timer  = 0.f;
-            if(!v.remote_mode){
-                if(v.current_fft_idx != sdr_last_fft_idx){
-                    sdr_last_fft_idx = v.current_fft_idx;
-                    sdr_stall_timer  = 0.f;
-                } else if(!spectrum_paused && capturing && fft_panel_on){
-                    sdr_stall_timer += io.DeltaTime;
-                }
-                if(spectrum_paused || !capturing || !fft_panel_on) sdr_stall_timer = 0.f;
-            } else {
-                sdr_last_fft_idx = -1;
-                sdr_stall_timer  = 0.f;
-            }
-            // SDR LED: 0=빨강(없음/에러) 1=초록(정상 스트리밍) 2=노랑(중단됐지만 하드웨어 감지됨 — /rx start 대기)
-            bool sdr_on;
-            int  sdr_led;
-            if(v.remote_mode && v.net_cli){
+            // SDR LED — HOST 의 상태를 HEARTBEAT 로 받아 그린다.
+            // 0=빨강(연결/HB 끊김 또는 HOST SDR 에러) 1=초록(정상) 2=노랑(HOST 가 /rx stop 등으로 중단)
+            bool sdr_on = false;
+            int  sdr_led = 0;
+            if(v.net_cli){
                 double lht = v.net_cli->last_heartbeat_time.load();
-                bool hb_received = (lht > 0.0);  // 한 번이라도 HB 수신
-                bool hb_ok = hb_received && (glfwGetTime() - lht) < 5.0;
+                bool hb_ok = (lht > 0.0) && (glfwGetTime() - lht) < 5.0;
                 bool connected = v.net_cli->is_connected();
                 uint8_t rst = v.net_cli->remote_sdr_state.load();
                 sdr_on = connected && hb_ok && rst == 0;
                 sdr_led = (!connected || !hb_ok) ? 0 : (rst == 0 ? 1 : rst == 2 ? 2 : 0);
-            } else {
-                bool stream_err = v.sdr_stream_error.load();
-                sdr_on = !v.remote_mode && !stream_err && capturing && (sdr_stall_timer < 2.0f);
-                sdr_led = sdr_on ? 1
-                        : (!stream_err && v.rx_stopped.load() && v.sdr_hw_present.load()) ? 2
-                        : 0;
             }
 
             // LINK: HOST=Central Server 연결 상태, JOIN=HOST 연결 상태, LOCAL=꺼짐
@@ -6829,16 +6742,8 @@ void run_streaming_viewer(){
                 else                aud_led = 2; // 노란: 채널 있으나 스컬치 미통과 or 전체 뮤트
             }
 
-            // ── SDR 오류 시 FFT/WF/AUD/IQ 모두 빨간 (LINK/TM/SDR은 독립) ──
-            if(!v.remote_mode && v.sdr_stream_error.load()){
-                fft_led = 0; wf_led = 0; aud_led = 0;
-                iq_on = false;
-            }
-            // ── /rx stop: FFT/WF/AUD/IQ 모두 빨간 (SDR 표시등은 위에서 계산한 tri-state 유지 — 노랑 가능) ──
-            if(!v.remote_mode && v.rx_stopped.load()){
-                fft_led = 0; wf_led = 0; aud_led = 0;
-                iq_on = false;
-            }
+            // (로컬 SDR 오류/rx-stop 표시는 HOST 전용이었다. JOIN 은 HOST 의 SDR 상태를
+            //  위 SDR LED 로 받아 보고, 스트림이 끊기면 FFT/AUD 가 스스로 빨개진다.)
 
             // ── JOIN: HOST 연결 끊김 시 AUD/IQ 빨간 ──
             if(v.remote_mode && link_state == 0){

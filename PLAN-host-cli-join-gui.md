@@ -340,7 +340,14 @@ Split roles: HOST is CLI-only, GUI is JOIN-only (v13.20.0)
 - [x] Phase 4.2 `/tm save <ch> [sec_ago]` CLI — 4.2 상세 표의 어댑터로 구현
       (freeze_idx=current_fft_idx → tm_offset=sec_ago → `tm_update_display()` → selected_ch → `tm_rec_start()`,
        실패 시 selected_ch 원복. TM IQ off / 미션 IDLE / 이미 녹음중 / 비활성 채널은 사유를 찍고 거절)
-- [ ] Phase 5 선택 (별도 커밋)
+- [x] Phase 5 — 의존성 슬림화 + dead code 제거 (별도 커밋)
+      - GUI 에서 `libbladeRF`/`librtlsdr`/`libiio`/`libad9361`/`volk` **링크 제거** (`ldd` 0건).
+        `pkg_check_modules(... REQUIRED)` 5개를 `if(CLI)` 안으로 이동 → JOIN PC 에 SDR -dev 패키지 불필요
+      - `fft_viewer.hpp`: SDR 드라이버 헤더 include + `dev_blade`/`dev_rtl`/`pluto_*` 멤버를 `BEWE_HOST_BUILD` 로 가드
+      - GUI 전 파일 `!remote_mode` **0건** (SDR LED/stall 워치독/주파수박스/디텍트 추종/미션 start/디스크 표시 등 죽은 arm 제거)
+      - `iq_record.cpp` HOST 레코더 블록(`rec_worker`~`stop_iq_rec`) 가드 — GUI 는 `start/stop_join_audio_rec` + `write_default_info_file` 만 컴파일
+      - `mission_end()` / `tm_rec_start()` 의 HOST 레코더 경로 가드
+      - `mission.cpp`/`mission_view.cpp` 의 SDR 종류 판정을 HOST 는 핸들, JOIN 은 `remote_sdr_kind` 로 분리
 
 ## 검증 결과 (`v13.20.0` 시점)
 
