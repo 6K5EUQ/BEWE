@@ -5125,15 +5125,21 @@ void run_streaming_viewer(){
         dl->AddRectFilled(ImVec2(vdiv_x,content_y),ImVec2(vdiv_x+vdiv_w,content_y+content_h),IM_COL32(50,50,50,255));
         dl->AddLine(ImVec2(vdiv_x+vdiv_w/2,content_y),ImVec2(vdiv_x+vdiv_w/2,content_y+content_h),IM_COL32(80,80,80,255),1);
         // 세로 구분선 드래그: 수동 마우스 감지 (빠른 드래그에서 InvisibleButton 놓침 방지)
+        // vdiv_dragging 은 STATUS 창 생성부에서도 봐야 해서 바깥 스코프에 둔다 —
+        // 드래그로 구분선을 오른쪽(패널을 좁히는 방향)으로 밀면 커서가 직전 프레임의
+        // STATUS 창 영역으로 들어가고, 그 창이 마우스를 캡처해 드래그가 끊긴다.
+        static bool vdiv_dragging = false;
         {
             ImVec2 mpos2 = io.MousePos;
             bool vdiv_hov = (mpos2.x >= vdiv_x && mpos2.x <= vdiv_x + vdiv_w &&
                              mpos2.y >= content_y && mpos2.y <= content_y + content_h)
                             && !mouse_blocked;
-            static bool vdiv_dragging = false;
             if(vdiv_hov && !mouse_blocked && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
                 vdiv_dragging = true;
-            if(!ImGui::IsMouseDown(ImGuiMouseButton_Left) || mouse_blocked)
+            // 일단 잡았으면 버튼을 놓을 때까지만 끈다. mouse_blocked 로 끊으면 안 된다 —
+            // 패널을 좁히는 방향으로 밀면 커서가 STATUS 창(##stat_panel) 위로 올라가고,
+            // float_win_capturing_mouse() 가 true 가 되어 드래그가 몇 픽셀마다 끊긴다.
+            if(!ImGui::IsMouseDown(ImGuiMouseButton_Left))
                 vdiv_dragging = false;
             if(vdiv_dragging){
                 v.right_panel_ratio -= io.MouseDelta.x / disp_w;
@@ -5436,7 +5442,8 @@ void run_streaming_viewer(){
                 ImGui::Begin("##stat_panel", nullptr,
                     ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|
                     ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar|
-                    ImGuiWindowFlags_NoDecoration);
+                    ImGuiWindowFlags_NoDecoration|
+                    (vdiv_dragging ? ImGuiWindowFlags_NoInputs : 0));
 
                 {
                     ImGui::BeginChild("##link_scroll", ImVec2(0,0), false,
