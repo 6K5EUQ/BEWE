@@ -329,6 +329,12 @@ void NetServer::handle_packet(std::shared_ptr<ClientConn> c,
             case CmdType::SET_AUTOSCALE:
                 if(cb.on_set_autoscale) cb.on_set_autoscale();
                 break;
+            case CmdType::DF_SET_SNR:
+                if(cb.on_df_set_snr) cb.on_df_set_snr((int)cmd->df_set_snr.snr_db);
+                break;
+            case CmdType::DF_MEASURE:
+                if(cb.on_df_measure) cb.on_df_measure((int)cmd->df_measure.dnum);
+                break;
             case CmdType::SET_CH_DETECT:
                 if(cb.on_set_ch_detect)
                     cb.on_set_ch_detect(cmd->set_ch_detect.idx,
@@ -460,6 +466,11 @@ void NetServer::handle_packet(std::shared_ptr<ClientConn> c,
     }
 
     // ── Band plan: any client (LAN-direct or relay-injected) → host ──────
+    case PacketType::DF_CONFIG: {
+        if(!c->authed || len < sizeof(PktDfConfig)) break;
+        if(cb.on_df_set_config) cb.on_df_set_config(*reinterpret_cast<const PktDfConfig*>(payload));
+        break;
+    }
     case PacketType::BAND_ADD: {
         if(!c->authed || len < sizeof(PktBandEntry)) break;
         if(cb.on_band_add) cb.on_band_add(*reinterpret_cast<const PktBandEntry*>(payload));
@@ -922,10 +933,12 @@ void NetServer::broadcast_chat(const char* from, const char* msg){
 void NetServer::broadcast_heartbeat(uint8_t host_state, uint8_t sdr_temp_c, uint8_t sdr_state, uint8_t iq_on,
                                     uint8_t host_cpu_pct, uint8_t host_ram_pct, uint8_t host_cpu_temp_c,
                                     const char* antenna, const char* sdr_kind, uint8_t host_bat_pct,
-                                    uint32_t host_up_x100, uint8_t host_bat_ac){
+                                    uint32_t host_up_x100, uint8_t host_bat_ac, uint8_t df_state,
+                                    int8_t df_snr_thr){
     PktHeartbeat hb{}; hb.host_state = host_state; hb.sdr_temp_c = sdr_temp_c; hb.sdr_state = sdr_state; hb.iq_on = iq_on;
     hb.host_cpu_pct = host_cpu_pct; hb.host_ram_pct = host_ram_pct; hb.host_cpu_temp_c = host_cpu_temp_c;
     hb.host_bat_pct = host_bat_pct; hb.host_up_x100 = host_up_x100; hb.host_bat_ac = host_bat_ac;
+    hb.df_state = df_state; hb.df_snr_thr = df_snr_thr;
     if(antenna)  strncpy(hb.antenna,  antenna,  sizeof(hb.antenna)-1);
     if(sdr_kind) strncpy(hb.sdr_kind, sdr_kind, sizeof(hb.sdr_kind)-1);
     auto pkt = make_packet(PacketType::HEARTBEAT, &hb, sizeof(hb));
@@ -952,6 +965,19 @@ void NetServer::broadcast_disk_stat(uint64_t free_bytes, uint64_t total_bytes, c
     for(auto& c : clients_){
         if(c->is_relay || !c->authed || !c->alive.load()) continue;
         c->enqueue(pkt, false);
+    }
+}
+
+// ── Broadcast DF config ───────────────────────────────────────────────────
+// HOST 가 적용한 설정을 정본으로 뿌린다. 변경 시 + JOIN 접속 시 보낸다.
+void NetServer::broadcast_df_config(const PktDfConfig& c){
+    auto pkt = make_packet(PacketType::DF_CONFIG, &c, sizeof(c));
+    if(cb.on_relay_broadcast)
+        cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
+    std::lock_guard<std::mutex> lk(clients_mtx_);
+    for(auto& cl : clients_){
+        if(cl->is_relay || !cl->authed || !cl->alive.load()) continue;
+        cl->enqueue(pkt, false);
     }
 }
 

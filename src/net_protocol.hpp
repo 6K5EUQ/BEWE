@@ -144,6 +144,13 @@ enum class PacketType : uint8_t {
     // 낭비다. 구 Central 은 0x5E 를 몰라 조용히 무시하고, JOIN 은 DB 목록이 안
     // 바뀌는 것으로 알게 된다 (안전 측 실패).
     DB_SAVE_FROM_ARCHIVE   = 0x5E,  // join/host → central: PktDbSaveFromArchive
+    DF_CONFIG              = 0x5F,  // 양방향: PktDfConfig.
+                                    //   HOST -> JOIN : 현재 DF 설정(정본) 방송
+                                    //   JOIN -> HOST : 설정 변경 요청
+                                    // DF 측정은 HOST 가 하므로 설정도 HOST 소유다.
+                                    // JOIN 은 로컬에 반영하지 않고 요청만 보내고,
+                                    // HOST 가 적용한 뒤 방송하는 값이 정본이 된다 —
+                                    // 여러 JOIN 이 동시에 만져도 한 값으로 수렴한다.
 };
 
 // ── Packet header (9 bytes, packed) ──────────────────────────────────────
@@ -354,6 +361,10 @@ enum class CmdType : uint8_t {
     SET_HW          = 0x21,  // JOIN → server: switch HOST SDR runtime ("bladerf"/"pluto"/"rtlsdr")
     TOGGLE_FFT_RECV = 0x22,  // JOIN → central: enable/disable FFT stream (audio/HB unaffected)
     SET_CH_DETECT   = 0x23,  // JOIN → server: toggle energy-detect mode on channel
+    DF_MEASURE      = 0x24,  // JOIN → server: 표시번호 n 의 채널 필터를 방탐 측정.
+                             // JOIN 에는 SDR 이 없으므로 HOST 가 대신 재고, 결과는
+                             // 기존 채팅 브로드캐스트로 모두에게 돌아간다.
+    DF_SET_SNR      = 0x25,  // JOIN → server: DF SNR 임계 변경 (HOST 소유 값)
 };
 
 struct __attribute__((packed)) PktCmd {
@@ -390,6 +401,8 @@ struct __attribute__((packed)) PktCmd {
         struct { char    name[16]; }                       set_hw;
         struct { uint8_t enable; }                         toggle_fft_recv;
         struct { uint8_t idx; uint8_t enable; }            set_ch_detect;
+        struct { uint8_t dnum; }                           df_measure;   // 표시번호(1..10)
+        struct { int8_t  snr_db; }                         df_set_snr;
         uint8_t raw[64];
     };
 };
@@ -412,7 +425,9 @@ struct __attribute__((packed)) PktStatus {
     float    cf_mhz;
     float    gain_db;
     uint32_t sample_rate;
-    uint8_t  hw_type;  // 0=BladeRF, 1=RTL-SDR
+    uint8_t  hw_type;  // 0=BladeRF, 1=RTL-SDR, 2=ADALM-Pluto, 3=KrakenSDR
+                       // 값만 추가한다 — 구조는 그대로라 Central 재빌드 불필요.
+                       // 구 JOIN 은 모르는 값을 0 처럼 다뤄 표시명만 빈다.
     uint8_t  pad[3];
 };
 
@@ -645,6 +660,26 @@ struct __attribute__((packed)) PktDiskStat {
 // Sent every 3 seconds.
 // host_state: 0=OK, 1=CHASSIS_RESETTING, 2=SPECTRUM_PAUSED
 // sdr_state:  0=OK, 1=ERROR (stall/buffer problem)
+// ── DF_CONFIG ─────────────────────────────────────────────────────────────
+// 필드 추가는 반드시 말미에. 수신 측이 len 게이트로 구버전과 호환한다.
+struct __attribute__((packed)) PktDfConfig {
+    float    radius_m;        // 배열 반경 (m)
+    float    heading_deg;     // 방위에 더할 오프셋
+    float    snr_thr_db;      // 이 값 미만이면 "No signal"
+    float    dc_guard_hz;     // LO 누설 배제 반폭
+    float    c_papr;          // 통계적 바닥 상수 (고급)
+    uint16_t target_looks;    // 프레임당 목표 look 수 = 연산 예산
+    uint16_t fft_size;        // 세그먼트 FFT 크기 K (좁은 채널이면 엔진이 키운다)
+    uint8_t  elements;        // UCA 소자 수
+    uint8_t  algo;            // 0=Bartlett 1=Capon 2=MUSIC
+    uint8_t  sense;           // 0=CW 1=CCW
+    uint8_t  avg_frames;      // 평균낼 프레임 수
+    uint8_t  max_frames;      // CAL 버스트를 만났을 때의 상한
+    uint8_t  signal_dim;      // MUSIC 모델 차수
+    uint8_t  enable_control;  // :5001 로 FREQ/GAIN 을 보낼지
+    uint8_t  _pad;
+};
+
 struct __attribute__((packed)) PktHeartbeat {
     uint8_t host_state;      // 0=OK, 1=CHASSIS_RESETTING, 2=SPECTRUM_PAUSED
     uint8_t sdr_temp_c;      // SDR 온도 (°C 정수, 0=미지원/미측정)
@@ -661,6 +696,12 @@ struct __attribute__((packed)) PktHeartbeat {
     uint32_t host_up_x100;   // HOST→Central 업로드 레이트 (0.01 KB/s 단위, 상한 ~41GB/s = 실질 무포화)
     uint8_t host_bat_ac;     // 0=방전 중, 1=AC 연결, 2=알 수 없음. 말미 추가 필드 —
                              // 구 JOIN 은 무시하고, 신 JOIN 은 len 게이트로 구 HOST 와도 동작
+    int8_t  df_snr_thr;      // HOST 의 DF SNR 임계 (dB, 정수). HOST 소유이고 전원이
+                             // 공유한다 — JOIN 은 이 값을 그대로 보여주고 쓴다.
+                             // 같은 말미-추가 규칙 (len 게이트).
+    uint8_t df_state;        // HOST 방탐 가용도: 0=불가 1=가능(캘리 완료) 2=준비중/측정중.
+                             // 같은 말미-추가 규칙. JOIN 이 DF 램프를 HOST 와 같은 색으로
+                             // 그리려면 sync_state 결과가 필요하다 — 그걸 한 바이트로 준다.
 };
 
 // ── IQ_CHUNK ──────────────────────────────────────────────────────────────

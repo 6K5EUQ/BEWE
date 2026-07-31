@@ -4,7 +4,15 @@
 
 // ── BEWE version (창 제목 및 About 표시용) ──────────────────────────────────
 // SemVer: vMAJOR.MINOR.PATCH — 자세한 정책은 CLAUDE.md 참조
-#define BEWE_VERSION "v13.18.2"
+#define BEWE_VERSION "v13.19.0"
+
+// ── 역할 축 ────────────────────────────────────────────────────────────────
+// HOST = CLI 빌드, JOIN = GUI 빌드. BEWE_HEADLESS 에서 파생하므로 CMake 노브가
+// 하나뿐이고 두 마커가 어긋날 수 없다 (BEWE_HEADLESS 없는 BEWE_HOST_BUILD 는
+// 존재하지 않는 조합). BEWE_HEADLESS = "UI 없음", BEWE_HOST_BUILD = "HOST 역할".
+#ifdef BEWE_HEADLESS
+  #define BEWE_HOST_BUILD 1
+#endif
 
 #ifdef BEWE_HEADLESS
   typedef uint32_t ImU32;

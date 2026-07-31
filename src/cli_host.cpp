@@ -766,6 +766,9 @@ void run_cli_host(){
     // ── Restore saved host state — 재시작 시 직전 상태 그대로 (cf/sr 먼저) ──
     HostState::Snapshot saved_state = HostState::load(station_str);
     float init_sr = 0.f;
+    // DF 설정은 initialize() 보다 먼저 넣어야 한다 — Kraken 백엔드가 기동할 때
+    // 이 설정으로 엔진을 띄우기 때문. 채널 복원(apply_channels)보다 이르다.
+    HostState::apply_df(v, saved_state);
     if(saved_state.ok){
         if(saved_state.cf_mhz >= 0.1f && saved_state.cf_mhz <= 6000.f) cf = saved_state.cf_mhz;
         if(saved_state.sr_msps >= 0.1f && saved_state.sr_msps <= 61.44f) init_sr = saved_state.sr_msps;
@@ -804,12 +807,7 @@ void run_cli_host(){
         bewe_log_push(0,"[BEWE CLI] SDR: %s detected\n",
                v.hw.type==HWType::BLADERF ? "BladeRF" :
                v.hw.type==HWType::PLUTO   ? "ADALM-Pluto" : "RTL-SDR");
-        if(v.hw.type == HWType::BLADERF)
-            cap = std::thread(&FFTViewer::capture_and_process, &v);
-        else if(v.hw.type == HWType::PLUTO)
-            cap = std::thread(&FFTViewer::capture_and_process_pluto, &v);
-        else
-            cap = std::thread(&FFTViewer::capture_and_process_rtl, &v);
+        bewe_spawn_capture(v, cap);
         if(saved_state.ok && saved_state.has_gain){
             v.gain_db = saved_state.gain_db;
             v.set_gain(saved_state.gain_db);
@@ -942,6 +940,22 @@ void run_cli_host(){
     srv->cb.on_set_autoscale = [&](){
         v.autoscale_req.store(true, std::memory_order_relaxed);  // 캡처 스레드가 처리 (레이스 방지)
         v.sq_recalib_req.store(true, std::memory_order_relaxed);
+    };
+    // JOIN 이 숫자키를 눌렀을 때. JOIN 에는 SDR 이 없으므로 HOST 가 대신 잰다.
+    // 표시번호는 CHANNEL_SYNC 로 동기화된 채널 배열에서 나온 값이라 양쪽이 같다.
+    // 결과·거절 사유는 df_pump 드레인이 broadcast_chat 으로 모두에게 돌려준다.
+    // SNR 임계는 HOST 소유다. JOIN 이 DF 탭에서 바꾸면 이 명령으로 들어오고,
+    // 적용 결과는 하트비트로 전원에게 되돌아간다.
+    srv->cb.on_df_set_config = [&](const PktDfConfig& c){
+        v.df_set_cfg(c);          // 적용 + 정본 재방송
+    };
+    srv->cb.on_df_set_snr = [&](int snr_db){
+        PktDfConfig c{}; v.df_get_cfg(c);
+        c.snr_thr_db = (float)snr_db;
+        v.df_set_cfg(c);
+    };
+    srv->cb.on_df_measure = [&](int dnum){
+        v.df_request_by_display_num(dnum);
     };
     srv->cb.on_set_ch_detect = [&](int idx, bool on){
         v.set_channel_detect(idx, on);
@@ -2069,6 +2083,18 @@ void run_cli_host(){
         auto now = clk::now();
         float dt = std::chrono::duration<float>(now - loop_last).count();
         loop_last = now;
+
+        // ── DF 측정 결과 -> 로그 + 방송 ──────────────────────────────────
+        // GUI 는 채팅 패널에도 넣지만 헤드리스는 로그/방송이 전부다.
+        v.df_pump();
+        if(v.pending_df_result.pending.exchange(false)){
+            auto& r = v.pending_df_result;
+            char line[256], logline[320];
+            v.df_format_line(line,    sizeof line,    /*detailed=*/false);
+            v.df_format_line(logline, sizeof logline, /*detailed=*/true);
+            bewe_log_push(r.ok?0:2, "[DF] %s\n", logline);
+            if(v.net_srv) v.net_srv->broadcast_chat("DF", line);
+        }
         // 절대 데드라인 pacing — 기존 dt 기반 계산은 dt 에 이전 iteration 의 poll
         // sleep 이 포함되어 sleep/no-sleep 교대 발생, 실 루프가 ~95Hz 였음.
         next_tick += std::chrono::milliseconds(20);
@@ -2230,7 +2256,8 @@ void run_cli_host(){
             if(el >= 1.0f){
                 status_last = clk::now();
                 uint8_t hwt = (v.hw.type==HWType::RTLSDR) ? 1 :
-                              (v.hw.type==HWType::PLUTO)  ? 2 : 0;
+                              (v.hw.type==HWType::PLUTO)  ? 2 :
+                              (v.hw.type==HWType::KRAKEN) ? 3 : 0;
                 v.net_srv->broadcast_status(
                     (float)(v.header.center_frequency/1e6),
                     v.gain_db, v.header.sample_rate, hwt);
@@ -2274,9 +2301,17 @@ void run_cli_host(){
                 uint8_t cpu_temp = (uint8_t)std::min(255, std::max(0, v.sysmon_cpu_temp_c.load()));
                 const char* sk = v.dev_blade ? "BladeRF" : v.pluto_ctx ? "Pluto" : v.dev_rtl ? "RTL-SDR" : "Unknown";
                 uint32_t up_x100 = kbps_to_x100(v.net_up_kbps.load());
+                // DF 가용도: 0=불가 1=가능(캘리 완료) 2=준비중/측정중.
+                // JOIN 이 이걸 받아 HOST 와 같은 색으로 DF 램프를 그린다.
+                const int dls = v.df_link_state();
+                const uint8_t df_st = (v.hw.type != HWType::KRAKEN) ? 0
+                                    : v.df_measuring()              ? 2
+                                    : (dls == 2)                    ? 1
+                                    : (dls == 1)                    ? 2 : 0;
                 v.net_srv->broadcast_heartbeat(hst, sdr_t_hb, sdr_st, iq_st,
                                                cpu_pct, ram_pct, cpu_temp, v.host_antenna, sk,
-                                               v.sysmon_bat.load(), up_x100, v.sysmon_bat_ac.load());
+                                               v.sysmon_bat.load(), up_x100, v.sysmon_bat_ac.load(),
+                                               df_st, (int8_t)lrint(v.df_snr_threshold()));
             }
         }
 
@@ -2315,12 +2350,7 @@ void run_cli_host(){
             if(v.initialize(cur_cf, 0.f)){
                 v.set_gain(v.gain_db);
                 v.sdr_stream_error.store(false);
-                if(v.hw.type == HWType::BLADERF)
-                    cap = std::thread(&FFTViewer::capture_and_process, &v);
-                else if(v.hw.type == HWType::PLUTO)
-                    cap = std::thread(&FFTViewer::capture_and_process_pluto, &v);
-                else
-                    cap = std::thread(&FFTViewer::capture_and_process_rtl, &v);
+                bewe_spawn_capture(v, cap);
                 bewe_log_push(0,"[CLI][SDR] switched to %s\n", new_sdr.c_str());
             } else {
                 bewe_log_push(2,"[CLI][SDR] switch to %s FAILED\n", new_sdr.c_str());
@@ -2558,12 +2588,7 @@ void run_cli_host(){
                 v.is_running = true;
                 if(v.initialize(cur_cf, cur_sr)){
                     v.set_gain(v.gain_db);
-                    if(v.hw.type == HWType::BLADERF)
-                        cap = std::thread(&FFTViewer::capture_and_process, &v);
-                    else if(v.hw.type == HWType::PLUTO)
-                        cap = std::thread(&FFTViewer::capture_and_process_pluto, &v);
-                    else
-                        cap = std::thread(&FFTViewer::capture_and_process_rtl, &v);
+                    bewe_spawn_capture(v, cap);
                     v.mix_stop.store(false);
                     v.mix_thr = std::thread(&FFTViewer::mix_worker, &v);
                     // RX stop 이 stop_worker() 로 HIST worker 를 죽였으므로 재개한다.
@@ -2724,12 +2749,7 @@ void run_cli_host(){
                     // 2초 settling 후 깨끗한 신호로 캘리브.
                     pending_autoscale_at = clk::now() + std::chrono::seconds(2);
                     v.set_gain(v.gain_db);
-                    if(v.hw.type == HWType::BLADERF)
-                        cap = std::thread(&FFTViewer::capture_and_process, &v);
-                    else if(v.hw.type == HWType::PLUTO)
-                        cap = std::thread(&FFTViewer::capture_and_process_pluto, &v);
-                    else
-                        cap = std::thread(&FFTViewer::capture_and_process_rtl, &v);
+                    bewe_spawn_capture(v, cap);
                     if(v.spectrum_pause.load())
                         chassis_unpause_timer = 1.f;
                     if(v.net_srv){
@@ -2844,12 +2864,7 @@ void run_cli_host(){
                     v.is_running = true;
                     if(v.initialize(cur_cf, cur_sr3)){
                         v.set_gain(v.gain_db);
-                        if(v.hw.type == HWType::BLADERF)
-                            cap = std::thread(&FFTViewer::capture_and_process, &v);
-                        else if(v.hw.type == HWType::PLUTO)
-                            cap = std::thread(&FFTViewer::capture_and_process_pluto, &v);
-                        else
-                            cap = std::thread(&FFTViewer::capture_and_process_rtl, &v);
+                        bewe_spawn_capture(v, cap);
                         v.mix_stop.store(false);
                         v.mix_thr = std::thread(&FFTViewer::mix_worker, &v);
                         if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM", "RX start");
@@ -2876,7 +2891,8 @@ void run_cli_host(){
                         v.set_frequency(cf);
                         if(v.net_srv){
                             uint8_t hwt = (v.hw.type==HWType::RTLSDR) ? 1 :
-                                          (v.hw.type==HWType::PLUTO)  ? 2 : 0;
+                                          (v.hw.type==HWType::PLUTO)  ? 2 :
+                              (v.hw.type==HWType::KRAKEN) ? 3 : 0;
                             v.net_srv->broadcast_status(cf, v.gain_db,
                                                         v.header.sample_rate, hwt);
                         }
@@ -2927,6 +2943,16 @@ void run_cli_host(){
                 } else {
                     printf("  Usage: /hist check\n");
                 }
+                fflush(stdout);
+            } else if(line == "/df" || line.rfind("/df ", 0) == 0){
+                // /df <n> — 표시번호 n 의 채널 필터를 방탐 측정. GUI 숫자키와 같은 경로.
+                // 결과·거절 사유는 메인 루프의 df_pump 드레인이 로그/방송으로 낸다.
+                std::string sub = line.size() > 3 ? line.substr(3) : "";
+                while(!sub.empty() && sub.front() == ' ') sub.erase(sub.begin());
+                if(!sub.empty() && sub[0] >= '0' && sub[0] <= '9')
+                    v.df_request_by_display_num(atoi(sub.c_str()));
+                else
+                    bewe_log_push(0,"  Usage: /df <filter number>   (the number drawn on the filter)\n");
                 fflush(stdout);
             } else if(line == "/ch" || line.rfind("/ch ", 0) == 0){
                 // /ch add <CF_MHz> <BW_kHz> [none|am|fm]  /  /ch list  /  /ch del <n>

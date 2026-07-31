@@ -108,3 +108,6 @@ BEAE/ais/data/guard/
 BEAE/stt/.venv/
 BEAE/stt/**/__pycache__/
 BEAE/stt/*.log
+# BEAE AMC (자동변조인식) — AIS 와 동일 정책: 코드만 추적, 데이터/모델 로컬 전용
+BEAE/amc/**/__pycache__/
+BEAE/amc/data/

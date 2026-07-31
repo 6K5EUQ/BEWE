@@ -12,6 +12,7 @@ extern void bewe_log_push(int col, const char* fmt, ...);
 #include <cstring>
 #include <cerrno>
 #include <chrono>
+#include <mutex>
 #include <dirent.h>
 #include <netdb.h>
 #include <unistd.h>
@@ -633,9 +634,32 @@ void NetClient::handle_packet(PacketType type,
         break;
     }
 
+    case PacketType::DF_CONFIG: {
+        if(len < (int)sizeof(PktDfConfig)) break;
+        std::lock_guard<std::mutex> lk(df_cfg_mtx);
+        df_cfg = *reinterpret_cast<const PktDfConfig*>(payload);
+        df_cfg_valid.store(true);
+        break;
+    }
     case PacketType::CHAT: {
         if(len < sizeof(PktChat)) break;
         auto* c = reinterpret_cast<const PktChat*>(payload);
+        // Central 이중 전달 방어. HOST 가 broadcast 하면 ① 직접 연결된 클라이언트
+        // ② Central 릴레이 양쪽으로 나가는데, Central 경유로 붙은 JOIN 은 두 경로
+        // 모두에 걸려 같은 줄을 두 번 받는다. HOST 는 수신 측(chat_handler)에서
+        // 같은 방식으로 이미 걸러내고 있다 — JOIN 에도 같은 규칙을 둔다.
+        // 같은 (from,msg) 가 1초 안에 또 오면 중복으로 본다. 사람이 같은 줄을
+        // 1초 안에 두 번 치는 일은 실질적으로 없고, 있어도 잃는 건 한 줄이다.
+        {
+            static std::mutex dup_mtx;
+            static std::string last_key;
+            static std::chrono::steady_clock::time_point last_t{};
+            std::string key = std::string(c->from) + "\x01" + c->msg;
+            auto now = std::chrono::steady_clock::now();
+            std::lock_guard<std::mutex> dlk(dup_mtx);
+            if(key == last_key && now - last_t < std::chrono::seconds(1)) break;
+            last_key = key; last_t = now;
+        }
         std::lock_guard<std::mutex> lk(chat_mtx);
         if((int)chat_log.size() >= CHAT_LOG_MAX) chat_log.erase(chat_log.begin());
         ChatMsg m{}; strncpy(m.from, c->from, 31); strncpy(m.msg, c->msg, 255);
@@ -668,6 +692,11 @@ void NetClient::handle_packet(PacketType type,
         remote_sdr_temp_c.store(hb->sdr_temp_c);
         remote_sdr_state.store(hb->sdr_state);
         remote_iq_on.store(hb->iq_on);
+        // 말미 추가 필드. 구 HOST 는 여기까지 안 보내므로 len 으로 가른다.
+        if(len >= (int)(offsetof(PktHeartbeat, df_state) + 1)){
+            remote_df_state.store(hb->df_state);
+            remote_df_snr_thr.store(hb->df_snr_thr);
+        }
         // 구 HOST(host_up_x100 이전)와의 호환 — 확장 필드는 별도 게이트
         if(len >= offsetof(PktHeartbeat, host_up_x100)){
             remote_host_cpu.store(hb->host_cpu_pct);
@@ -863,6 +892,19 @@ bool NetClient::cmd_set_sq_thresh(int idx, float thr){
 }
 bool NetClient::cmd_set_autoscale(){
     PktCmd c{}; c.cmd=(uint8_t)CmdType::SET_AUTOSCALE;
+    return send_cmd(c);
+}
+bool NetClient::send_df_config(const PktDfConfig& c){
+    return raw_send(PacketType::DF_CONFIG, &c, sizeof(c));
+}
+bool NetClient::cmd_df_set_snr(int snr_db){
+    PktCmd c{}; c.cmd=(uint8_t)CmdType::DF_SET_SNR;
+    c.df_set_snr.snr_db=(int8_t)snr_db;
+    return send_cmd(c);
+}
+bool NetClient::cmd_df_measure(int dnum){
+    PktCmd c{}; c.cmd=(uint8_t)CmdType::DF_MEASURE;
+    c.df_measure.dnum=(uint8_t)dnum;
     return send_cmd(c);
 }
 bool NetClient::cmd_set_ch_detect(int idx, bool on){

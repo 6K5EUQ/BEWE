@@ -85,6 +85,14 @@ if(CLI)
         src/host_band_categories.cpp
         src/long_waterfall.cpp
         src/pluto_io.cpp
+        src/kraken_io.cpp
+        src/df/heimdall_client.cpp
+        src/df/df_linalg.cpp
+        src/df/df_manifold.cpp
+        src/df/df_xspec.cpp
+        src/df/df_estimator.cpp
+        src/df/df_engine.cpp
+        src/df/df_selftest.cpp
         src/session_spawn.cpp
     )
 
@@ -182,6 +190,15 @@ else()
         src/sig_lib_view.cpp
         src/mission_view.cpp
         src/pluto_io.cpp
+        src/kraken_io.cpp
+        src/df_view.cpp
+        src/df/heimdall_client.cpp
+        src/df/df_linalg.cpp
+        src/df/df_manifold.cpp
+        src/df/df_xspec.cpp
+        src/df/df_estimator.cpp
+        src/df/df_engine.cpp
+        src/df/df_selftest.cpp
         src/session_spawn.cpp
         ${IMGUI_SOURCES}
     )

@@ -450,8 +450,20 @@ public:
     void sched_arm_entry(int idx);
     void sched_begin_rec(int idx);
     void sched_stop_entry(int idx);
-    // Overlap 검사 — [start, start+dur)이 기존 WAITING/RECORDING entry와 겹치는지 (sched_mtx 잡은 채로 호출)
-    bool sched_has_overlap(time_t start, float dur) const;
+    // Overlap 검사 — pre-arm 윈도우 포함 [start - PRE_ARM, start+dur) 가 기존
+    // active entry와 겹치는지 (sched_mtx 잡은 채로 호출).
+    // JOIN(GUI)도 ADD 버튼 활성화 판정에 쓰므로 헤더 인라인 — sched_record.cpp 는 HOST 전용.
+    bool sched_has_overlap(time_t start, float dur) const {
+        time_t a0 = start - (time_t)SCHED_PRE_ARM_SEC;
+        time_t a1 = start + (time_t)dur;
+        for(const auto& e : sched_entries){
+            if(e.status == SchedEntry::DONE || e.status == SchedEntry::FAILED) continue;
+            time_t b0 = e.start_time - (time_t)SCHED_PRE_ARM_SEC;
+            time_t b1 = e.start_time + (time_t)e.duration_sec;
+            if(a0 < b1 && b0 < a1) return true;
+        }
+        return false;
+    }
     // 전체 sched 리스트를 JOIN 클라이언트에 브로드캐스트 (SCHED_SYNC)
     void broadcast_sched_list();         // 내부에서 sched_mtx 잡음
     void broadcast_sched_list_locked();  // 호출자가 이미 sched_mtx를 잡은 상태여야 함
@@ -480,6 +492,8 @@ public:
 
     // ── DEMOD 모듈 패널 (src/modules/ 설치형 모듈 컨테이너) ──────────────
     bool                 demod_panel_open = false;
+    // DF(방탐) 설정 전체영역 오버레이. 다른 오버레이와 상호배타.
+    bool                 df_panel_open    = false;
     // AIS 지도 크게보기(mv.big) 상태 미러 — 켜지면 앱 상단바+DEMOD 탭바 숨겨 지도만 전체화면.
     // AIS 뷰가 매 프레임 mv.big 값을 여기 반영; 다른 모듈 탭/패널에선 항상 false 로 리셋.
     bool                 ais_fullscreen = false;
@@ -652,6 +666,7 @@ public:
             if(rh == 0) return "BladeRF 2.0 micro xA9 (12bit ADC)";
             if(rh == 1) return "RTL-SDR v4 (8bit ADC)";
             if(rh == 2) return "ADALM Pluto SDR (12bit ADC)";
+            if(rh == 3) return "KrakenSDR 5ch coherent (8bit ADC, heimdall DAQ)";
             return "";
         }
         return hw_recorder_name(hw.type);
@@ -957,11 +972,87 @@ public:
     bool initialize_bladerf(float cf_mhz, float sr_msps);
     bool initialize_rtlsdr(float cf_mhz);
     bool initialize_pluto(float cf_mhz, float sr_msps);
+    bool initialize_kraken(float cf_mhz);   // heimdall DAQ (TCP :5000) — kraken_io.cpp
     void pluto_release();            // iio buffer/context 해제 (idempotent)
     float pluto_get_temp_c() const;  // AD9361 내부 온도 °C (실패 시 음수)
     void capture_and_process();
     void capture_and_process_rtl();
     void capture_and_process_pluto();
+    void capture_and_process_kraken();
+
+    // ── DF (KrakenSDR 방탐) ──────────────────────────────────────────────
+    // 구현은 kraken_io.cpp. 이 헤더가 df/ 를 include 하지 않도록 plain 스칼라만
+    // 주고받는다 (df:: 타입이 여기 새면 거의 모든 .cpp 가 df/ 에 재컴파일 의존).
+    bool df_engine_ready() const;
+    int  df_link_state()   const;   // 0=down  1=calibrating  2=streaming
+    bool df_measuring()    const;
+    bool df_submit(double center_hz, double bw_hz, int arr_idx, int dnum);
+    void df_stop_engine();
+    // 설정 접근 (설정 패널·HostState 용). algo 0=Bartlett 1=Capon 2=MUSIC,
+    // sense 0=CW 1=CCW.
+    // DF 설정 전체. HOST 소유이고 JOIN 은 HOST 가 방송한 정본을 본다.
+    // 개별 인자로 넘기던 걸 구조체로 바꿨다 — 항목이 늘면서 호출부마다
+    // 인자를 빼먹는 사고가 나기 쉬웠다.
+    //   df_get_cfg : HOST/LOCAL 은 자기 값, JOIN 은 HOST 가 방송한 값
+    //   df_set_cfg : HOST/LOCAL 은 즉시 적용 + 방송, JOIN 은 HOST 로 요청만
+    void df_get_cfg(PktDfConfig& out) const;
+    void df_set_cfg(const PktDfConfig& c);
+    // 설정이 바뀌었을 때 HOST 가 정본을 뿌린다 (JOIN 접속 시에도).
+    void df_broadcast_cfg() const;
+    double df_snr_threshold() const;   // 편의 접근 (수락 규칙 표시용)
+    // 설정 패널 실시간 판독. 문자열 하나 + 스칼라 몇 개로 끝낸다.
+    struct DFLive {
+        int      link = 0;            // 0=down 1=calibrating 2=streaming
+        bool     usable = false;
+        unsigned sync_state = 0, delay_sync = 0, iq_sync = 0, noise_src = 0;
+        unsigned channels = 0, overdrive = 0;
+        double   daq_cf_mhz = 0, daq_fs_msps = 0;
+        double   frame_rate_hz = 0, recv_mbps = 0;
+        unsigned long long frames_ok = 0, frames_cal = 0, frames_bad = 0, gaps = 0, reconnects = 0;
+        unsigned gain_tenths[8] = {};
+        char     hw_id[20] = {};
+        char     last_error[96] = {};
+        double   lambda_m = 0, ambiguity = 0;   // 현재 DAQ 중심주파수 기준
+        bool     measuring = false;
+        float    progress = 0.f;
+    };
+    void df_get_live(DFLive& out) const;
+    std::atomic<uint32_t> df_seq{0};
+
+    // 표시번호(freq_sorted_display_num) -> 배열 인덱스 -> 측정 요청.
+    // 키·패널 버튼·/df·CLI 가 전부 이 한 경로를 쓴다. 거절 사유는 항상 한 줄로
+    // 채팅/로그에 나간다 — 조용히 실패하면 운용자가 눌렀는지도 모른다.
+    bool df_request_by_display_num(int dnum);
+    void df_post_refusal(int dnum, const char* msg);
+    // pending_df_result 를 사람이 읽는 한 줄로. 접두사는 붙이지 않는다 —
+    // 채팅은 발신자 이름("DF")이, 로그는 호출부가 "[DF] " 를 붙인다.
+    // 양쪽이 같은 문자열을 쓰도록 여기 한 곳에서만 만든다.
+    //   detailed=false : 채팅용. 실패 사유는 세 문구로만 압축한다.
+    //   detailed=true  : 로그용. 압축 문구 뒤에 원인을 괄호로 덧붙인다.
+    void df_format_line(char* out, size_t n, bool detailed = false) const;
+    static const char* df_short_reason(const char* detail);
+    // 엔진 결과를 pending_df_result 로 옮긴다. 메인 루프가 매 프레임 부른다.
+    void df_pump();
+
+    // DF 측정 결과 — 엔진 스레드가 채우고 메인 루프가 exchange(false) 로 소비한다.
+    // pending_file_ctx 와 동일 관용구. 측정이 직렬화되므로 단일 슬롯으로 충분하다.
+    struct PendingDFResult {
+        std::atomic<bool> pending{false};
+        int   dnum = 0, arr_idx = -1;
+        float cf_mhz = 0, bw_khz = 0;
+        float bearing = 0, bearing_rel = 0, conf = 0, snr = 0, pwr = 0;
+        int   frames_used = 0, frames_discarded = 0;
+        bool  ok = false, overdrive = false;
+        char  err[80] = {};
+    } pending_df_result;
+
+    // 설정 패널이 그리는 "마지막 결과". UI 스레드만 읽고 쓴다.
+    bool  df_last_valid = false;
+    int   df_last_dnum = 0;
+    float df_last_cf_mhz = 0, df_last_bw_khz = 0;
+    float df_last_bearing = 0, df_last_bearing_rel = 0;
+    float df_last_conf = 0, df_last_snr = 0, df_last_pwr = 0;
+    float df_last_spectrum[360] = {};
     // 캡처 스레드에 LO 변경을 위임한다. wait=true 면 캡처 스레드가 실제로 적용할 때까지
     // 블록한다 (스케줄 녹화처럼 "바뀐 주파수로" 곧바로 녹화를 시작하는 호출자용).
     void set_frequency(float cf_mhz, bool wait=false);
@@ -1023,7 +1114,8 @@ public:
     // 계속 남았다. MSN 을 전체화면으로 바꿔 '밖'을 없앤 뒤 원래 규칙으로 복귀.
     bool overlay_blocking() const {
         return eid_panel_open || log_panel_open || lwf_modal_open
-            || sig_lib_panel_open || mission_modal_open || demod_panel_open;
+            || sig_lib_panel_open || mission_modal_open || demod_panel_open
+            || df_panel_open;
     }
 
     // 마우스가 메인창(##main) 이 아닌 별도 ImGui 창(MSN 모달·서브모달·팝업 등)
@@ -1071,6 +1163,26 @@ struct CapLifeGuard {
     ~CapLifeGuard(){ f->store(true); }
 };
 
+// ── 캡처 스레드 기동 (백엔드 디스패치) ────────────────────────────────────
+// 이 if/else 사슬은 예전에 10곳에 복붙돼 있었고 마지막 else 가 전부 RTL 이었다.
+// 백엔드를 하나 추가하면 전부 RTL 루프로 떨어져 null 핸들을 친다. 실제로
+// ui.cpp 의 /rx start 경로는 BLADERF/else 만 분기해서 Pluto 에서 RTL 루프가
+// 떴다. 한 곳으로 모아 그런 사고가 구조적으로 안 나게 한다.
+inline void bewe_spawn_capture(FFTViewer& v, std::thread& cap){
+    switch(v.hw.type){
+        case HWType::BLADERF: cap = std::thread(&FFTViewer::capture_and_process,        &v); return;
+        case HWType::PLUTO:   cap = std::thread(&FFTViewer::capture_and_process_pluto,  &v); return;
+        case HWType::RTLSDR:  cap = std::thread(&FFTViewer::capture_and_process_rtl,    &v); return;
+        case HWType::KRAKEN:  cap = std::thread(&FFTViewer::capture_and_process_kraken, &v); return;
+        case HWType::NONE:
+        default:
+            // 하드웨어가 없으면 아예 띄우지 않는다. 예전엔 여기서도 RTL 루프를
+            // 띄웠고 dev_rtl 이 null 이라 즉시 스트림 에러로 자멸했다.
+            bewe_log_push(2,"[SDR] no backend selected - capture thread not started\n");
+            return;
+    }
+}
+
 // ── USB 소프트 리셋 (sudo 불필요, udev rule 권한 사용) ────────────────────
 // USBDEVFS_RESET ioctl: 물리적으로 뽑았다 꽂는 것과 동일한 효과
 bool usb_reset_vidpid(uint16_t vid, uint16_t pid, const char* label);
@@ -1083,6 +1195,12 @@ inline bool sdr_usb_ids(HWType t, uint16_t* vid, uint16_t* pid, const char** lab
         case HWType::BLADERF: *vid=0x2cf0; *pid=0x5250; *label="BladeRF";     return true;
         case HWType::RTLSDR:  *vid=0x0bda; *pid=0x2838; *label="RTL-SDR";     return true;
         case HWType::PLUTO:   *vid=0x0456; *pid=0xb673; *label="ADALM-Pluto"; return true;
+        // KRAKEN: 이 모드에서 BEWE 는 USB 장치를 하나도 소유하지 않는다 —
+        // heimdall 의 rtl_daq.out 가 동글 5개를 잡고 있다. false 를 반환하면
+        // 모든 USB 리셋 경로가 무장해제된다 (전부 이 반환값이나 if(vid) 로 가드됨).
+        // 절대 여기에 0bda:2838 을 넣지 말 것 — 동글 5개가 전부 매칭되고
+        // 리셋 코드는 "첫 번째"를 잡는다 = 돌고 있는 DAQ 를 임의로 파괴한다.
+        case HWType::KRAKEN:  return false;
         default: return false;
     }
 }
@@ -1107,3 +1225,6 @@ int usb_deep_powercycle(uint16_t vid, uint16_t pid, int off_ms);
 
 // ── DEMOD 모듈 패널 렌더 (demod_panel.cpp) ────────────────────────────────
 void demod_draw_panel(FFTViewer& v, bool just_opened);
+
+// ── DF 설정 오버레이 렌더 (df_view.cpp) ───────────────────────────────────
+void df_draw_panel(FFTViewer& v, bool just_opened);

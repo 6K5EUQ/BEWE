@@ -46,18 +46,9 @@ void FFTViewer::broadcast_sched_list(){
     net_srv->broadcast_sched_sync(pkt);
 }
 
-// Overlap 검사 — pre-arm 윈도우 포함 [start - PRE_ARM, start+dur) 가 기존 active entry와 겹치는지
-bool FFTViewer::sched_has_overlap(time_t start, float dur) const {
-    time_t a0 = start - (time_t)SCHED_PRE_ARM_SEC;
-    time_t a1 = start + (time_t)dur;
-    for(const auto& e : sched_entries){
-        if(e.status == SchedEntry::DONE || e.status == SchedEntry::FAILED) continue;
-        time_t b0 = e.start_time - (time_t)SCHED_PRE_ARM_SEC;
-        time_t b1 = e.start_time + (time_t)e.duration_sec;
-        if(a0 < b1 && b0 < a1) return true;
-    }
-    return false;
-}
+// sched_has_overlap 은 fft_viewer.hpp 로 옮겨 인라인이 되었다 — JOIN(GUI)도
+// ADD 버튼 활성화 판정에 쓰는데, 이 파일은 두 타겟 모두에 컴파일되므로
+// 여기 정의를 남겨두면 중복 정의가 된다.
 
 void FFTViewer::sched_tick(){
     std::lock_guard<std::mutex> lk(sched_mtx);

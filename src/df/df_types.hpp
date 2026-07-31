@@ -1,0 +1,102 @@
+#pragma once
+// ── DF(방탐) UI 대면 어휘 ─────────────────────────────────────────────────
+// UI 계층이 아는 타입은 전부 여기 있다. DSP 내부 타입은 새어나가지 않는다.
+
+#include <cstdint>
+
+namespace df {
+
+// 지원하는 최대 배열 소자 수. 고정 크기 배열 여러 곳이 이걸 쓴다.
+inline constexpr int kMaxElements = 8;
+
+enum class Algo : uint8_t { Bartlett = 0, Capon = 1, Music = 2 };
+
+// 배열 소자 번호가 도는 방향. 물리 배선을 데스크에서 확정할 수 없어서 설정으로
+// 뺀다 — 실측(V8)에서 방위가 거울로 나오면 재빌드 없이 이걸 뒤집는다.
+//   CW  : 안테나 0,1,2,.. 이 위에서 볼 때 시계 방향 (0°, 72°, 144°, ...)
+//   CCW : 반시계 방향
+enum class Sense : uint8_t { CW = 0, CCW = 1 };
+
+enum class LinkState : uint8_t {
+    Down = 0,      // 소켓 없음
+    Connecting,    // 접속/핸드셰이크 중
+    Calibrating,   // 스트림은 오는데 아직 못 쓴다 (플래그 미충족 / CAL 버스트)
+    Streaming,     // 정상. DF 가능
+};
+
+enum class Status : uint8_t {
+    Ok = 0,
+    NoSignal,        // 수락 규칙이 거부 — 이 채널엔 잡음뿐
+    LinkDown,        // DAQ 연결 없음
+    NotCalibrated,   // delay_sync/iq_sync 미성립이 너무 오래
+    BandOutOfSpan,   // 요청 채널이 DAQ 의 ±fs/2 밖
+    DcOverlap,       // LO 누설 위에 얹혀 있어 쓸 빈이 너무 적다
+    TooFewChannels,  // active_ant_chs < 3
+    ArrayMismatch,   // 헤더의 M 이 설정된 소자 수와 다름
+    Timeout,         // 프레임 예산 안에 충분히 못 모음
+    BadRequest,      // 대역폭 0/음수 등
+    Cancelled,
+};
+
+const char* status_text(Status s);
+
+// ── 측정 요청 ─────────────────────────────────────────────────────────────
+struct Request {
+    double   center_hz    = 0.0;   // 채널 절대 중심주파수
+    double   bandwidth_hz = 0.0;   // 채널 폭
+    int      frames       = 3;     // 평균낼 "쓸 수 있는" DATA 프레임 수
+    Algo     algo         = Algo::Music;
+    int      signal_dim   = 1;     // MUSIC 모델 차수
+    uint32_t seq          = 0;     // Result 에 그대로 돌아온다
+    int      ui_tag       = -1;    // BEWE 채널 배열 인덱스. 엔진은 안 읽는다
+    int      ui_dnum      = 0;     // 화면 표시번호. 엔진은 안 읽는다
+};
+
+// ── 측정 결과 ─────────────────────────────────────────────────────────────
+struct Result {
+    uint32_t seq    = 0;
+    int      ui_tag = -1;
+    int      ui_dnum = 0;
+    Status   status = Status::Cancelled;
+
+    double bearing_deg     = 0;  // 최종 보고값 (heading offset 반영)
+    double bearing_rel_deg = 0;  // 안테나 0 기준, offset 반영 전 (진단용)
+    double confidence_db   = 0;  // Bartlett PAPR — 수락 판정에 쓰는 값
+    double eig_snr_db      = 0;  // 10log10((lmax-lmin)/lmin)
+    double power_dbfs      = 0;  // 채널 내 전력, full-scale = 1.0
+
+    double   center_hz = 0, bandwidth_hz = 0, effective_bw_hz = 0;
+    uint64_t daq_center_hz = 0, daq_fs_hz = 0;
+
+    int      frames_used = 0, frames_discarded = 0;
+    double   n_eff_looks = 0;
+    int      elements    = 0;
+    Algo     algo        = Algo::Music;
+    uint32_t overdrive_mask = 0;
+    double   ambiguity_ratio = 0;   // (2 r sin(pi/M)) / (lambda/2). >1 이면 격자엽
+
+    float    spectrum_db[360] = {}; // 보고 알고리즘, 최대 정규화 dB
+    int64_t  t_start_ms = 0, t_end_ms = 0;
+    char     note[96] = {};
+};
+
+// ── DAQ 링크 상태 (설정 패널·상태바가 폴링) ───────────────────────────────
+struct DaqStatus {
+    LinkState link   = LinkState::Down;
+    bool      usable = false;   // 마지막 프레임이 DF 에 쓸 수 있었나
+
+    uint32_t sync_state = 0, delay_sync_flag = 0, iq_sync_flag = 0;
+    uint32_t noise_source_state = 0, adc_overdrive_flags = 0;
+    uint32_t active_ant_chs = 0, cpi_length = 0;
+    uint64_t rf_center_hz = 0, sampling_hz = 0;
+    uint32_t if_gain_tenths[8] = {};
+    char     hardware_id[17] = {};
+
+    uint64_t frames_ok = 0, frames_cal = 0, frames_dummy = 0, frames_bad = 0;
+    uint64_t cpi_gaps = 0, reconnects = 0;
+    double   frame_rate_hz = 0, recv_mbps = 0;
+    int64_t  last_frame_wall_ms = 0;
+    char     last_error[96] = {};
+};
+
+} // namespace df

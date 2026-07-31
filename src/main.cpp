@@ -37,11 +37,11 @@ static void parse_args(int argc, char** argv){
         const char* a = argv[i];
         if(std::strcmp(a, "--sdr") == 0 && i+1 < argc){
             std::string v = argv[i+1];
-            if(v == "bladerf" || v == "rtlsdr" || v == "pluto"){
+            if(v == "bladerf" || v == "rtlsdr" || v == "pluto" || v == "kraken"){
                 g_sdr_force = v;
                 fprintf(stderr, "[BEWE] forcing SDR = %s\n", v.c_str());
             } else {
-                fprintf(stderr, "[BEWE] unknown --sdr '%s' (use bladerf|rtlsdr|pluto)\n", v.c_str());
+                fprintf(stderr, "[BEWE] unknown --sdr '%s' (use bladerf|rtlsdr|pluto|kraken)\n", v.c_str());
             }
             i++;
         } else if(starts_with(a, "--session-mode=")){

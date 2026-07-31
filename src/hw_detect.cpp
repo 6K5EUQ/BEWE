@@ -96,6 +96,15 @@ static bool detect_pluto(){
 // ── HW 자동 감지 후 초기화 ────────────────────────────────────────────────
 // g_sdr_force가 설정되면 그 장치만 시도. 아니면 우선순위: Pluto > BladeRF > RTL-SDR
 bool FFTViewer::initialize(float cf_mhz, float sr_msps){
+    // KrakenSDR 은 자동 감지 대상이 아니다. 명시 지정일 때만, 그리고 다른
+    // 프로브보다 먼저 처리한다 — 여기서 리턴해야 rtlsdr_get_device_count() 가
+    // 동글 5개를 열거하지도, detect_pluto() 가 "usb:" 폴백을 돌지도 않는다.
+    // (BEWE 가 heimdall 의 동글을 건드릴 여지를 구조적으로 없앤다.)
+    if(g_sdr_force == "kraken"){
+        bewe_log_push(0,"HW: KrakenSDR / heimdall DAQ (forced)\n");
+        return initialize_kraken(cf_mhz);
+    }
+
     // BladeRF 감지
     struct bladerf_devinfo* blade_list = nullptr;
     int n_blade = bladerf_get_device_list(&blade_list);

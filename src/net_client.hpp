@@ -148,6 +148,8 @@ public:
     std::atomic<int>      host_state{-1};
     std::atomic<uint8_t>  remote_sdr_temp_c{0};      // HOST SDR 온도 (°C, 0=미측정)
     std::atomic<uint8_t>  remote_sdr_state{0};        // 0=OK, 1=stream error
+    std::atomic<uint8_t>  remote_df_state{0};         // HOST DF: 0=불가 1=가능 2=준비중/측정중
+    std::atomic<int8_t>   remote_df_snr_thr{10};      // HOST 의 DF SNR 임계 (dB)
     std::atomic<uint8_t>  remote_iq_on{0};            // HOST IQ 롤링 상태 (0=off, 1=on)
     std::atomic<uint8_t>  remote_host_cpu{0};          // HOST CPU %
     std::atomic<uint8_t>  remote_host_ram{0};          // HOST RAM %
@@ -297,7 +299,14 @@ public:
     bool cmd_set_ch_pan(int idx, int pan);
     bool cmd_set_sq_thresh(int idx, float thr);
     bool cmd_set_autoscale();
-    bool cmd_set_ch_detect(int idx, bool on);  // JOIN → HOST: 채널 에너지 디텍션 토글
+    bool cmd_set_ch_detect(int idx, bool on);
+    bool cmd_df_measure(int dnum);
+    bool cmd_df_set_snr(int snr_db);
+    bool send_df_config(const PktDfConfig& c);
+    // HOST 가 방송한 정본 DF 설정. JOIN 패널이 이걸 그린다.
+    std::mutex   df_cfg_mtx;
+    PktDfConfig  df_cfg{};
+    std::atomic<bool> df_cfg_valid{false};  // JOIN → HOST: 채널 에너지 디텍션 토글
     bool cmd_toggle_recv(int ch_idx, bool enable);
     bool cmd_toggle_fft_recv(bool enable);  // central에서 이 JOIN으로 FFT 송신 토글 (audio/HB 무관)
     bool cmd_update_ch_range(int idx, float s, float e);

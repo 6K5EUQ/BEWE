@@ -34,13 +34,27 @@ static int effective_mode(const Channel& ch){
 }
 
 void save(const FFTViewer& v, const std::string& station){
-    char buf[256];
+    char buf[512];
     float cf = (float)(v.header.center_frequency / 1e6);
     float sr = (float)(v.header.sample_rate / 1e6);
+    // DF 설정. Kraken 백엔드가 아니어도 저장한다 — 설정을 잃으면 다음에
+    // --sdr kraken 으로 뜰 때 배열 반경부터 다시 넣어야 한다.
+    PktDfConfig dfc{}; v.df_get_cfg(dfc);
     std::string out;
     snprintf(buf, sizeof(buf),
-        "{\n  \"cf_mhz\":%.6f,\n  \"sr_msps\":%.6f,\n  \"gain_db\":%.2f,\n  \"channels\": [\n",
-        cf, sr, v.gain_db);
+        "{\n  \"cf_mhz\":%.6f,\n  \"sr_msps\":%.6f,\n  \"gain_db\":%.2f,\n"
+        "  \"df_radius_m\":%.6f,\n  \"df_heading_deg\":%.2f,\n  \"df_elements\":%d,\n"
+        "  \"df_algo\":%d,\n  \"df_sense\":%d,\n  \"df_avg_frames\":%d,\n  \"df_signal_dim\":%d,\n"
+        "  \"df_snr_thr_db\":%.2f,\n  \"df_dc_guard_hz\":%.1f,\n  \"df_c_papr\":%.2f,\n"
+        "  \"df_target_looks\":%d,\n  \"df_fft_size\":%d,\n  \"df_max_frames\":%d,\n"
+        "  \"df_enable_control\":%d,\n"
+        "  \"channels\": [\n",
+        cf, sr, v.gain_db,
+        (double)dfc.radius_m, (double)dfc.heading_deg, (int)dfc.elements, (int)dfc.algo,
+        (int)dfc.sense, (int)dfc.avg_frames, (int)dfc.signal_dim,
+        (double)dfc.snr_thr_db, (double)dfc.dc_guard_hz, (double)dfc.c_papr,
+        (int)dfc.target_looks, (int)dfc.fft_size, (int)dfc.max_frames,
+        (int)dfc.enable_control);
     out += buf;
 
     bool first = true;
@@ -118,6 +132,20 @@ Snapshot load(const std::string& station){
         if(key=="cf_mhz"){ double d=0; js.read_number(d); st.cf_mhz=(float)d; }
         else if(key=="sr_msps"){ double d=0; js.read_number(d); st.sr_msps=(float)d; }
         else if(key=="gain_db"){ double d=0; js.read_number(d); st.gain_db=(float)d; st.has_gain=true; }
+        else if(key=="df_radius_m"){    double d=0; js.read_number(d); st.df.radius_m=(float)d;        st.has_df=true; }
+        else if(key=="df_heading_deg"){ double d=0; js.read_number(d); st.df.heading_deg=(float)d;     st.has_df=true; }
+        else if(key=="df_elements"){    double d=0; js.read_number(d); st.df.elements=(uint8_t)d;   st.has_df=true; }
+        else if(key=="df_algo"){        double d=0; js.read_number(d); st.df.algo=(uint8_t)d;       st.has_df=true; }
+        else if(key=="df_sense"){       double d=0; js.read_number(d); st.df.sense=(uint8_t)d;      st.has_df=true; }
+        else if(key=="df_avg_frames"){  double d=0; js.read_number(d); st.df.avg_frames=(uint8_t)d; st.has_df=true; }
+        else if(key=="df_signal_dim"){  double d=0; js.read_number(d); st.df.signal_dim=(uint8_t)d; st.has_df=true; }
+        else if(key=="df_snr_thr_db"){  double d=0; js.read_number(d); st.df.snr_thr_db=(float)d;      st.has_df=true; }
+        else if(key=="df_dc_guard_hz"){ double d=0; js.read_number(d); st.df.dc_guard_hz=(float)d;     st.has_df=true; }
+        else if(key=="df_c_papr"){      double d=0; js.read_number(d); st.df.c_papr=(float)d;          st.has_df=true; }
+        else if(key=="df_target_looks"){double d=0; js.read_number(d); st.df.target_looks=(uint16_t)d; st.has_df=true; }
+        else if(key=="df_fft_size"){    double d=0; js.read_number(d); st.df.fft_size=(uint16_t)d;     st.has_df=true; }
+        else if(key=="df_max_frames"){  double d=0; js.read_number(d); st.df.max_frames=(uint8_t)d;    st.has_df=true; }
+        else if(key=="df_enable_control"){double d=0;js.read_number(d);st.df.enable_control=(uint8_t)d;st.has_df=true; st.has_df_enable_control=true; }
         else if(key=="channels"){
             if(!js.consume('[')) break;
             while(!js.peek(']')){
@@ -183,6 +211,12 @@ uint64_t fingerprint(const FFTViewer& v){
     h = mix(h, (uint64_t)v.header.center_frequency);
     h = mix(h, (uint64_t)v.header.sample_rate);
     h = mix(h, f2u(v.gain_db));
+    {   // DF 설정이 바뀌면 저장되게 fingerprint 에 넣는다.
+        double r=0, hd=0; int el=0, al=0, se=0, af=0, sd=0;
+        PktDfConfig d{}; v.df_get_cfg(d);
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(&d);
+        for(size_t i = 0; i < sizeof(d); i++) h = mix(h, raw[i]);
+    }
     for(int i=0;i<MAX_CHANNELS;i++){
         const Channel& ch = v.channels[i];
         if(!ch.filter_active) continue;
@@ -255,4 +289,26 @@ void apply_channels(FFTViewer& v, const Snapshot& st){
     v.update_dem_by_freq(v.header.center_frequency/1e6f);
 }
 
+} // namespace HostState
+
+namespace HostState {
+void apply_df(FFTViewer& v, const Snapshot& st){
+    if(!st.ok || !st.has_df) return;   // 구버전 파일 — 기본값을 그대로 둔다
+    // 구 파일엔 없던 필드는 0 으로 남는다. 0 이 유효하지 않은 항목만 되살린다.
+    PktDfConfig d = st.df;
+    if(d.elements == 0)     d.elements = 5;
+    if(d.avg_frames == 0)   d.avg_frames = 3;
+    if(d.max_frames < d.avg_frames) d.max_frames = 12;
+    if(d.signal_dim == 0)   d.signal_dim = 1;
+    if(d.target_looks == 0) d.target_looks = 2048;
+    if(d.fft_size == 0)     d.fft_size = 8192;
+    if(d.dc_guard_hz <= 0)  d.dc_guard_hz = 2000.0f;
+    if(d.c_papr <= 0)       d.c_papr = 30.0f;
+    if(d.radius_m <= 0)     d.radius_m = 0.175f;
+    // 키 자체가 없던 파일이면 켠 상태로 둔다. BEWE 주파수축에서 재튠하는 게
+    // 정상 사용법인데, 여기서 0 이 되면 재튠이 조용히 무시돼 원인을 못 찾는다.
+    if(!st.has_df_enable_control) d.enable_control = 1;
+    const_cast<Snapshot&>(st).df = d;
+    v.df_set_cfg(st.df);
+}
 } // namespace HostState

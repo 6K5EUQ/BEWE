@@ -4556,12 +4556,7 @@ void run_streaming_viewer(){
             // 초기화 성공 → 에러 래치 명시적 해제 (switch/reconnect 경로와 동일)
             v.sdr_stream_error.store(false);
             v.rx_stopped.store(false);
-            if(v.hw.type == HWType::BLADERF)
-                cap = std::thread(&FFTViewer::capture_and_process, &v);
-            else if(v.hw.type == HWType::PLUTO)
-                cap = std::thread(&FFTViewer::capture_and_process_pluto, &v);
-            else
-                cap = std::thread(&FFTViewer::capture_and_process_rtl, &v);
+            bewe_spawn_capture(v, cap);
         }
         v.mix_stop.store(false);
         v.mix_thr=std::thread(&FFTViewer::mix_worker,&v);
@@ -4681,6 +4676,22 @@ void run_streaming_viewer(){
                 bewe_log_push(0, "[CMD] Autoscale requested\n");
                 v.autoscale_req.store(true, std::memory_order_relaxed);  // 캡처 스레드가 처리
                 v.sq_recalib_req.store(true, std::memory_order_relaxed);
+            };
+            // JOIN 이 숫자키를 눌렀을 때. JOIN 에는 SDR 이 없으므로 HOST 가 대신 잰다.
+            // 표시번호는 CHANNEL_SYNC 로 동기화된 채널 배열에서 나온 값이라 양쪽이 같다.
+            // 결과·거절 사유는 df_pump 드레인이 broadcast_chat 으로 모두에게 돌려준다.
+            // SNR 임계는 HOST 소유다. JOIN 이 DF 탭에서 바꾸면 이 명령으로 들어오고,
+            // 적용 결과는 하트비트로 전원에게 되돌아간다.
+            srv->cb.on_df_set_config = [&](const PktDfConfig& c){
+                v.df_set_cfg(c);      // 적용 + 정본 재방송
+            };
+            srv->cb.on_df_set_snr = [&](int snr_db){
+                PktDfConfig c{}; v.df_get_cfg(c);
+                c.snr_thr_db = (float)snr_db;
+                v.df_set_cfg(c);
+            };
+            srv->cb.on_df_measure = [&](int dnum){
+                v.df_request_by_display_num(dnum);
             };
             srv->cb.on_set_ch_detect = [&](int idx, bool on){
                 bewe_log_push(0, "[CMD] CH%d detect %s\n", idx, on?"ON":"OFF");
@@ -5767,7 +5778,8 @@ void run_streaming_viewer(){
             if(el>=1.0f){
                 status_last=now;
                 uint8_t hwt = (v.hw.type==HWType::RTLSDR) ? 1 :
-                              (v.hw.type==HWType::PLUTO)  ? 2 : 0;
+                              (v.hw.type==HWType::PLUTO)  ? 2 :
+                              (v.hw.type==HWType::KRAKEN) ? 3 : 0;
                 v.net_srv->broadcast_status(
                     (float)(v.header.center_frequency/1e6),
                     v.gain_db, v.header.sample_rate, hwt);
@@ -5804,8 +5816,14 @@ void run_streaming_viewer(){
                 const char* sk = v.dev_blade ? "BladeRF" : v.pluto_ctx ? "Pluto" : v.dev_rtl ? "RTL-SDR" : "Unknown";
                 // 업로드 레이트 → JOIN 의 STATUS 패널 HOST 줄에 표시 (0.01KB/s 단위)
                 uint32_t h_up = kbps_to_x100(v.net_up_kbps.load());
+                const int dls = v.df_link_state();
+                const uint8_t df_st = (v.hw.type != HWType::KRAKEN) ? 0
+                                    : v.df_measuring()              ? 2
+                                    : (dls == 2)                    ? 1
+                                    : (dls == 1)                    ? 2 : 0;
                 v.net_srv->broadcast_heartbeat(hst, sdr_t_hb, sdr_st, iq_st, h_cpu, h_ram, h_ct, v.host_antenna, sk,
-                                               v.sysmon_bat.load(), h_up, v.sysmon_bat_ac.load());
+                                               v.sysmon_bat.load(), h_up, v.sysmon_bat_ac.load(), df_st,
+                                               (int8_t)lrint(v.df_snr_threshold()));
             }
         }
 
@@ -5834,12 +5852,7 @@ void run_streaming_viewer(){
             if(v.initialize(cur_cf, 0.f)){
                 v.set_gain(v.gain_db);
                 v.sdr_stream_error.store(false);
-                if(v.hw.type == HWType::BLADERF)
-                    cap = std::thread(&FFTViewer::capture_and_process, &v);
-                else if(v.hw.type == HWType::PLUTO)
-                    cap = std::thread(&FFTViewer::capture_and_process_pluto, &v);
-                else
-                    cap = std::thread(&FFTViewer::capture_and_process_rtl, &v);
+                bewe_spawn_capture(v, cap);
                 bewe_log_push(0, "[SDR] switched to %s\n", new_sdr.c_str());
             } else {
                 bewe_log_push(2, "[SDR] switch to %s FAILED\n", new_sdr.c_str());
@@ -5982,12 +5995,7 @@ void run_streaming_viewer(){
                 v.is_running = true;
                 if(v.initialize(cur_cf)){
                     v.set_gain(v.gain_db);
-                    if(v.hw.type == HWType::BLADERF)
-                        cap = std::thread(&FFTViewer::capture_and_process, &v);
-                    else if(v.hw.type == HWType::PLUTO)
-                        cap = std::thread(&FFTViewer::capture_and_process_pluto, &v);
-                    else
-                        cap = std::thread(&FFTViewer::capture_and_process_rtl, &v);
+                    bewe_spawn_capture(v, cap);
                     v.mix_stop.store(false);
                     v.mix_thr = std::thread(&FFTViewer::mix_worker, &v);
                     v.net_srv->broadcast_chat("SYSTEM", "RX start");
@@ -6122,12 +6130,7 @@ void run_streaming_viewer(){
                     // 이전 게인 복원
                     v.set_gain(v.gain_db);
                     // 캡처 스레드 재시작
-                    if(v.hw.type == HWType::BLADERF)
-                        cap = std::thread(&FFTViewer::capture_and_process, &v);
-                    else if(v.hw.type == HWType::PLUTO)
-                        cap = std::thread(&FFTViewer::capture_and_process_pluto, &v);
-                    else
-                        cap = std::thread(&FFTViewer::capture_and_process_rtl, &v);
+                    bewe_spawn_capture(v, cap);
                     // chassis reset으로 pause 걸린 경우: 1초 후 자동 해제
                     if(v.spectrum_pause.load())
                         chassis_unpause_timer = 1.f;
@@ -6364,7 +6367,7 @@ void run_streaming_viewer(){
         // 메인페이지(워터폴+스펙트럼) 단축키가 활성인지: 모달 오버레이(EID/LOG/HIST/LIB)가
         // 없을 때만 true. 우측 사이드 패널은 비모달이라 메인 단축키와 공존 허용.
         // 다른 모달이 떠있으면 그 창의 단축키만 동작.
-        bool main_kbd_active = !v.eid_panel_open && !v.log_panel_open
+        bool main_kbd_active = !v.df_panel_open && !v.eid_panel_open && !v.log_panel_open
                             && !v.lwf_modal_open && !v.sig_lib_panel_open
                             && !v.mission_modal_open && !v.demod_panel_open;
 
@@ -6483,6 +6486,18 @@ void run_streaming_viewer(){
 
 
             if(ImGui::IsKeyPressed(ImGuiKey_P,false)) toggle_freeze();
+
+            // 숫자 키 -> 그 표시번호의 채널 필터를 DF 측정 (Kraken 백엔드에서만).
+            // 0 = 표시번호 10. 표시번호는 freq_sorted_display_num 이 매 프레임
+            // 계산하는 주파수정렬 순위지 배열 인덱스가 아니다.
+            // 이 블록은 "선택된 채널이 있어야 하는" 아래 서브블록 바깥에 있어야
+            // 한다 — DF 는 채널을 고르지 않고도 눌러야 하기 때문.
+            if(!io.WantTextInput && !ImGui::IsAnyItemActive()){
+                int want = -1;
+                for(int k=0;k<10;k++)
+                    if(ImGui::IsKeyPressed((ImGuiKey)(ImGuiKey_0+k), false)){ want = (k==0)?10:k; break; }
+                if(want > 0) v.df_request_by_display_num(want);
+            }
             // (T 키 매핑 제거 — 사용자 요청. IQ rolling 은 항상 HOST 측에서 자동 관리)
             // 스페이스바: TM 토글 (진입/해제)
             // EID Audio 탭(mode 8) 활성 시에는 audio play/pause 전용 — TM 토글 비활성
@@ -6622,7 +6637,8 @@ void run_streaming_viewer(){
         };
         {
             static bool prev_eid=false, prev_log=false, prev_lwf=false,
-                        prev_side=false, prev_lib=false, prev_mission=false, prev_demod=false;
+                        prev_side=false, prev_lib=false, prev_mission=false, prev_demod=false,
+                        prev_df=false;
             bool side_now = v.right_panel_ratio > 0.01f;
             if(v.eid_panel_open != prev_eid){ v.eid_panel_open ? push_ov(1) : pop_ov(1); prev_eid=v.eid_panel_open; }
             if(v.log_panel_open != prev_log){ v.log_panel_open ? push_ov(2) : pop_ov(2); prev_log=v.log_panel_open; }
@@ -6631,6 +6647,7 @@ void run_streaming_viewer(){
             if(v.sig_lib_panel_open != prev_lib){ v.sig_lib_panel_open ? push_ov(5) : pop_ov(5); prev_lib=v.sig_lib_panel_open; }
             if(v.mission_modal_open != prev_mission){ v.mission_modal_open ? push_ov(6) : pop_ov(6); prev_mission=v.mission_modal_open; }
             if(v.demod_panel_open != prev_demod){ v.demod_panel_open ? push_ov(7) : pop_ov(7); prev_demod=v.demod_panel_open; }
+            if(v.df_panel_open != prev_df){ v.df_panel_open ? push_ov(8) : pop_ov(8); prev_df=v.df_panel_open; }
         }
         // STATUS(우측패널) 격리: 전체영역 오버레이(SA/LOG/HIST/LIB/DEMOD) 열려있으면
         // STATUS 토글·드래그·렌더 전부 차단. 내부 상태/백그라운드는 유지, 입력·표시만 막음.
@@ -8917,6 +8934,26 @@ void run_streaming_viewer(){
                 else           link_state = 1; // 초록: 연결됨 + heartbeat 수신 중
             }
 
+            // ── DF LED: 방탐 가용 상태 ───────────────────────────────────
+            // 초록 = heimdall 링크 + 캘리브레이션 완료 (지금 측정 가능)
+            // 노란 = 링크는 살아있는데 아직 못 쓴다 (캘리브레이션 중 / CAL 버스트),
+            //        또는 측정이 진행 중
+            // 빨강 = Kraken 백엔드가 아니거나 DAQ 가 없다
+            // JOIN 은 로컬 SDR 이 없으므로 항상 빨강 — DF 는 HOST 의 기능이다.
+            // JOIN 은 HOST 에 요청을 대신 보내므로 DF 를 쓸 수 있다. 다만 HOST 의
+            // 캘리브레이션 상태까지는 모르므로 초록 대신 노랑이다.
+            // df_link_state() 가 HOST/JOIN 양쪽을 같은 규약(0=down 1=준비중 2=가능)
+            // 으로 돌려주므로 분기하지 않는다. JOIN 은 HOST 가 하트비트로 보내준
+            // df_state 를 그대로 옮겨 담는다 — 그래서 방탐이 되는 상태면 양쪽 다 초록.
+            int df_state = 0;
+            if(v.net_cli || v.hw.type == HWType::KRAKEN){
+                const int ls = v.df_link_state();
+                if(v.df_measuring())      df_state = 2;   // 측정 중 = 노랑
+                else if(ls == 2)          df_state = 1;   // 가능 = 초록
+                else if(ls == 1)          df_state = 2;   // 캘리브레이션 중 = 노랑
+                else                      df_state = 0;   // 불가 = 빨강
+            }
+
             // ── AUD LED: 오디오 출력 상태 ────────────────────────────────
             // LOCAL/HOST: 복조채널 없음=빨간, 채널있고 스컬치 미통과=노란, 스컬치 통과+출력=초록
             // JOIN: 채널 없음=빨간, 채널있으나 수신 안됨=노란, 오디오 수신 중=초록
@@ -8999,6 +9036,24 @@ void run_streaming_viewer(){
                 rx2=x-14.0f;
                 return clicked;
             };
+            // 오른쪽 그룹의 오버레이 토글용. click_ind 와 같지만 mouse_blocked 를
+            // 보지 않는다 — df_panel_open 이 overlay_blocking() 에 들어가는 순간
+            // click_ind 로는 열어둔 패널을 이 바에서 다시 눌러 닫을 수 없다.
+            // (click_ind_left 가 mouse_blocked 를 무시하는 것과 같은 이유, 아래 주석 참조)
+            auto click_ind_ov=[&](float& rx2, const char* txt, int state) -> bool {
+                ImVec2 sz=ImGui::CalcTextSize(txt);
+                float x=rx2-sz.x;
+                ImU32 col = (state==1) ? IM_COL32(80,220,80,255)
+                          : (state==2) ? IM_COL32(255,200,0,255)
+                          :              IM_COL32(220,60,60,255);
+                if(state>0) dl->AddText(ImVec2(x+1,ty_b),col,txt);
+                dl->AddText(ImVec2(x,ty_b),col,txt);
+                bool clicked=ImGui::IsMouseClicked(ImGuiMouseButton_Left)&&
+                    io.MousePos.x>=x&&io.MousePos.x<=x+sz.x&&
+                    io.MousePos.y>=ty_b&&io.MousePos.y<=ty_b+sz.y;
+                rx2=x-14.0f;
+                return clicked;
+            };
 
             // ── 왼쪽>오른쪽: 서브프로그램 상태 인디케이터 (EID LOG DIGI) ─
             // 3-state: 0=닫힘(red), 1=열림+최상단(green), 2=열림+백그라운드(yellow)
@@ -9032,6 +9087,7 @@ void run_streaming_viewer(){
                 if(self != 4 && v.sig_lib_panel_open) return true;
                 if(self != 5 && v.mission_modal_open) return true;
                 if(self != 6 && v.demod_panel_open) return true;
+                if(self != 7 && v.df_panel_open) return true;
                 return false;
             };
             auto bar_try_toggle = [&](int self, bool& flag){
@@ -9100,6 +9156,12 @@ void run_streaming_viewer(){
             rx=draw_ind(rx,"FFT", fft_led);
 
             // LINK (3색) — 표시 전용
+            // DF: 클릭하면 설정 오버레이 토글. rx 가 왼쪽으로 행진하므로 여기에
+            // 넣어야 화면상 LINK 바로 오른쪽에 온다 (SDR LINK DF FFT WF ...).
+            // 위 주석의 "IQ/TM/FRZ 만 토글" 은 이제 DF 도 포함이다.
+            if(click_ind_ov(rx,"DF", df_state)){
+                bar_try_toggle(7, v.df_panel_open);
+            }
             rx=draw_ind(rx,"LINK", link_state);
 
             // SDR — 표시 전용
@@ -9113,6 +9175,26 @@ void run_streaming_viewer(){
         // ── mission_view LOCAL 우클릭 → main file_ctx 메뉴 트리거 옮김 ────
         // FFTViewer::pending_file_ctx 는 mission_view.cpp 가 set;
         // 여기서 소비해 메인 페이지와 동일 메뉴를 그 좌표에 띄움.
+        // ── DF 측정 결과 -> 채팅 + LOG (+ HOST 면 JOIN 에게도) ──────────
+        // 엔진 스레드가 pending_df_result 를 채우고 여기서 소비한다.
+        // host_chat_log/host_chat_mtx 가 이 함수의 지역변수라 드레인이 여기 있어야 한다.
+        v.df_pump();
+        if(v.pending_df_result.pending.exchange(false)){
+            auto& r = v.pending_df_result;
+            char line[256], logline[320];
+            v.df_format_line(line,    sizeof line,    /*detailed=*/false);
+            v.df_format_line(logline, sizeof logline, /*detailed=*/true);
+
+            { std::lock_guard<std::mutex> lk(host_chat_mtx);
+              LocalChatMsg lm{}; lm.is_error = !r.ok;
+              strncpy(lm.from,"DF",31); strncpy(lm.msg,line,255);
+              if((int)host_chat_log.size() >= 200) host_chat_log.erase(host_chat_log.begin());
+              host_chat_log.push_back(lm);
+              chat_scroll_bottom = true; }
+            bewe_log_push(r.ok?0:2, "[DF] %s\n", logline);
+            if(v.net_srv) v.net_srv->broadcast_chat("DF", line);
+        }
+
         if(v.pending_file_ctx.pending.exchange(false)){
             file_ctx.open      = true;
             file_ctx.x         = v.pending_file_ctx.x;
@@ -9749,10 +9831,7 @@ void run_streaming_viewer(){
                             v.is_running = true;
                             if(v.initialize(cur_cf)){
                                 v.set_gain(v.gain_db);
-                                if(v.hw.type == HWType::BLADERF)
-                                    cap = std::thread(&FFTViewer::capture_and_process, &v);
-                                else
-                                    cap = std::thread(&FFTViewer::capture_and_process_rtl, &v);
+                                bewe_spawn_capture(v, cap);
                                 v.mix_stop.store(false);
                                 v.mix_thr = std::thread(&FFTViewer::mix_worker, &v);
                                 push_local("SYSTEM", "RX start", false);
@@ -12635,6 +12714,11 @@ void run_streaming_viewer(){
         if(v.demod_panel_open) demod_draw_panel(v, !s_demod_prev);
         else v.ais_fullscreen=false;   // 패널 닫히면 AIS 전체화면 미러도 해제 (상단바 복귀)
         s_demod_prev = v.demod_panel_open;
+
+        // ── DF 설정 오버레이 (하단바 DF 로 토글) ─────────────────────────
+        { static bool s_df_prev = false;
+          if(v.df_panel_open) df_draw_panel(v, !s_df_prev);
+          s_df_prev = v.df_panel_open; }
 
         ImGui::Render();
         int dw2,dh2; glfwGetFramebufferSize(win,&dw2,&dh2);

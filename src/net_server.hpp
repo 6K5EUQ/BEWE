@@ -154,6 +154,9 @@ struct ServerCallbacks {
     std::function<void(int idx, float thr)>          on_set_sq_thresh;
     std::function<void()>                            on_set_autoscale;
     std::function<void(int idx, bool on)>            on_set_ch_detect;
+    std::function<void(int dnum)>                   on_df_measure;
+    std::function<void(int snr_db)>                 on_df_set_snr;
+    std::function<void(const PktDfConfig&)>         on_df_set_config;
     std::function<void(int ch_idx, uint8_t op_idx, bool enable)> on_toggle_recv;
     std::function<void(int idx, float s, float e)>   on_update_ch_range;
     std::function<void()>                            on_toggle_tm_iq;
@@ -313,7 +316,8 @@ public:
                              uint8_t host_cpu_pct = 0, uint8_t host_ram_pct = 0, uint8_t host_cpu_temp_c = 0,
                              const char* antenna = nullptr, const char* sdr_kind = nullptr,
                              uint8_t host_bat_pct = 255, uint32_t host_up_x100 = 0,
-                             uint8_t host_bat_ac = 2);
+                             uint8_t host_bat_ac = 2, uint8_t df_state = 0,
+                             int8_t df_snr_thr = 0);
 
     // DISK_STAT → all clients (HOST 측 recordings/missions 디스크 여유공간)
     void broadcast_disk_stat(uint64_t free_bytes, uint64_t total_bytes, const char* station);
@@ -338,6 +342,7 @@ public:
     void broadcast_db_list(const std::vector<DbFileEntry>& entries);
 
     // HW status → all clients
+    void broadcast_df_config(const PktDfConfig& c);
     void broadcast_status(float cf_mhz, float gain_db,
                           uint32_t sr, uint8_t hw_type);
 
