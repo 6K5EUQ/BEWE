@@ -254,6 +254,7 @@ void FFTViewer::handle_channel_interactions(float gx, float gw, float gy, float 
             if(net_cli) net_cli->audio[ci].clear();
             local_ch_out[ci] = 1;
             ch_created_by_me[ci] = false; ch_pending_create[ci] = false;
+            auto_df_on[ci] = false; auto_df_gate_prev[ci] = false; auto_df_last_t[ci] = 0.f;
             if(selected_ch==ci) selected_ch=-1;
         }
         return;
@@ -5083,6 +5084,25 @@ void run_streaming_viewer(){
         // ── 채널 스컬치 업데이트 (FFT 기반, 필터만 있으면 동작) ──────────
         v.update_channel_squelch();
 
+        // ── AUTO DF: 스컬치 게이트 닫힘→열림 순간에 DF 1회 요청 ───────────
+        // 엔진은 한 번에 한 채널만 재므로 경합하면 먼저 뜬 쪽이 이기고 나머지는
+        // 버린다 (df_request_by_display_num 이 "already running" 으로 거절).
+        // 채널당 쿨다운을 둬 연속 통신에서 요청이 쏟아지는 것을 막는다.
+        if(v.df_link_state() != 0){
+            float now_df = (float)ImGui::GetTime();
+            for(int ci=0; ci<MAX_CHANNELS; ci++){
+                if(!v.channels[ci].filter_active){ v.auto_df_gate_prev[ci]=false; continue; }
+                bool g = v.channels[ci].sq_gate.load();
+                bool rise = g && !v.auto_df_gate_prev[ci];
+                v.auto_df_gate_prev[ci] = g;
+                if(!rise || !v.auto_df_on[ci]) continue;
+                if(v.channels[ci].dem_paused.load()) continue;   // Holding = 가시대역 밖
+                if(now_df - v.auto_df_last_t[ci] < FFTViewer::AUTO_DF_COOLDOWN_S) continue;
+                v.auto_df_last_t[ci] = now_df;
+                v.df_request_by_display_num(v.freq_sorted_display_num(ci));
+            }
+        }
+
         // ── 가로 구분선 (항상 드래그 가능하도록 클램프) ──────────────────
         // div_y를 content_y+1 ~ content_y+content_h-div_h-1 사이로 클램프
         float div_y = content_y + sp_h;
@@ -5649,6 +5669,7 @@ void run_streaming_viewer(){
                                     if(v.net_cli) v.net_cli->audio[ci].clear();
                                     v.local_ch_out[ci]=1;
                                     v.ch_created_by_me[ci] = false; v.ch_pending_create[ci] = false;
+                                    v.auto_df_on[ci] = false; v.auto_df_gate_prev[ci] = false; v.auto_df_last_t[ci] = 0.f;
                                     if(v.selected_ch==ci) v.selected_ch=-1;
                                 };
                                 if(ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)){
@@ -5667,6 +5688,7 @@ void run_streaming_viewer(){
                                 if(v.net_cli) v.net_cli->audio[ci].clear();
                                 v.local_ch_out[ci]=1;
                                 v.ch_created_by_me[ci] = false; v.ch_pending_create[ci] = false;
+                                v.auto_df_on[ci] = false; v.auto_df_gate_prev[ci] = false; v.auto_df_last_t[ci] = 0.f;
                                 if(v.selected_ch==ci) v.selected_ch=-1;
                                 ImGui::PopID();
                                 return;
@@ -5683,6 +5705,19 @@ void run_streaming_viewer(){
                                 if(ImGui::SmallButton(lbl_out[bi])) set_local_out(ci,bi);
                                 if(active) ImGui::PopStyleColor();
                                 if(bi<3) ImGui::SameLine(0,2);
+                            }
+
+                            // AUTO DF — 이 기지가 DF 를 못 하면 M(뮤트)과 같은 빨강으로
+                            // 잠근다. 가능하면 끈 상태는 기본색, 켠 상태는 L+R 과 같은 초록.
+                            {
+                                ImGui::SameLine(0,6);
+                                bool df_ok = v.df_link_state() != 0;
+                                bool on    = df_ok && v.auto_df_on[ci];
+                                if(!df_ok)   ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(0.6f,0.1f,0.1f,1.f));
+                                else if(on)  ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(0.1f,0.55f,0.1f,1.f));
+                                if(ImGui::SmallButton("AUTO DF") && df_ok)
+                                    v.auto_df_on[ci] = !v.auto_df_on[ci];
+                                if(!df_ok || on) ImGui::PopStyleColor();
                             }
 
 

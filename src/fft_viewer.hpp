@@ -754,6 +754,12 @@ public:
     uint32_t srv_audio_mask[MAX_CHANNELS] = {};
     // JOIN: 오디오 녹음 시작 전 뮤트 상태 저장 (녹음 후 복원용)
     bool join_rec_was_muted[MAX_CHANNELS] = {};
+    // AUTO DF (각 창 로컬 — L/L+R/R/M 과 같은 성격, wire 로 동기화하지 않는다):
+    // 켠 채널은 스컬치 게이트가 닫힘→열림으로 바뀔 때 DF 를 1회 자동 요청한다.
+    bool  auto_df_on[MAX_CHANNELS] = {};
+    bool  auto_df_gate_prev[MAX_CHANNELS] = {};   // edge 검출용 직전 게이트 상태
+    float auto_df_last_t[MAX_CHANNELS] = {};      // 마지막 요청 시각 (ImGui::GetTime)
+    static constexpr float AUTO_DF_COOLDOWN_S = 10.0f;
 
     // 파일 전송 진행상태 (HOST: 전송 중, JOIN: 수신 중)
     struct FileXfer {
