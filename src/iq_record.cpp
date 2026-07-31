@@ -300,9 +300,11 @@ void FFTViewer::rec_worker(){
     }
     rec_filename = new_path;
 
+#ifdef BEWE_HOST_BUILD
     // Central archive 로 push (활성 미션 + Central 연결 시에만 실제 전송 — worker 가 검증)
     if(rec_frames.load() > 0)
         MissionPush::enqueue(rec_filename, MFS_IQ);
+#endif
 }
 
 void FFTViewer::start_rec(){
@@ -478,7 +480,9 @@ void FFTViewer::stop_audio_rec(int ch_idx){
             }
     }
     ch.audio_rec_path = new_path;
+#ifdef BEWE_HOST_BUILD
     MissionPush::enqueue(ch.audio_rec_path, MFS_AUDIO);
+#endif
     ch.audio_rec_path.clear();
 }
 
@@ -718,7 +722,9 @@ void FFTViewer::stop_iq_rec(int ch_idx){
             }
     }
     ch.iq_rec_path = new_path;
+#ifdef BEWE_HOST_BUILD
     MissionPush::enqueue(ch.iq_rec_path, MFS_IQ);
+#endif
     ch.iq_rec_path.clear();
 }
 

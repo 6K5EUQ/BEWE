@@ -72,12 +72,14 @@ void worker(FFTViewer& v, int ch_idx){
     // 한 샘플 출력: 로컬 ring(L/R/pan 재생) + 네트워크(구독 operator) — dem_worker 와 동형
     auto emit_audio = [&](float out){
         ch.push_audio(out);
+#ifdef BEWE_HOST_BUILD
         if(v.net_srv && (ch.audio_mask.load() & ~0x1u)){
             nbuf.push_back(out);
             if(nbuf.size()>=256){ uint32_t mask=(ch.audio_mask.load()>>1);
                 v.net_srv->send_audio(mask,(uint8_t)ch_idx,(int8_t)ch.pan,nbuf.data(),(uint32_t)nbuf.size());
                 nbuf.clear(); }
         }
+#endif
     };
     // 녹음 종료(헤더 frames 갱신 후 닫기) / 시작(통화별 새 WAV)
     auto rec_close = [&](){

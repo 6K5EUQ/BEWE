@@ -35,6 +35,9 @@ static bool starts_with(const char* s, const char* prefix){
 static void parse_args(int argc, char** argv){
     for(int i = 1; i < argc; i++){
         const char* a = argv[i];
+#ifdef BEWE_HOST_BUILD
+        // SDR 은 HOST 빌드만 연다. GUI(JOIN)는 하드웨어를 아예 링크하지 않으므로
+        // 이 플래그를 받아도 할 수 있는 게 없다.
         if(std::strcmp(a, "--sdr") == 0 && i+1 < argc){
             std::string v = argv[i+1];
             if(v == "bladerf" || v == "rtlsdr" || v == "pluto" || v == "kraken"){
@@ -45,12 +48,24 @@ static void parse_args(int argc, char** argv){
             }
             i++;
         } else if(starts_with(a, "--session-mode=")){
+#else
+        if(starts_with(a, "--session-mode=")){
+#endif
             std::string v = a + std::strlen("--session-mode=");
+#ifdef BEWE_HOST_BUILD
             if(v == "host" || v == "join"){
+#else
+            // GUI 는 JOIN 전용이다. host 세션은 cli_host 가 맡는다.
+            if(v == "join"){
+#endif
                 g_session_args.mode_set = true;
                 g_session_args.mode     = v;
             } else {
+#ifdef BEWE_HOST_BUILD
                 fprintf(stderr, "[BEWE] unknown --session-mode '%s' (use host|join)\n", v.c_str());
+#else
+                fprintf(stderr, "[BEWE] unknown --session-mode '%s' (use join)\n", v.c_str());
+#endif
             }
         } else if(starts_with(a, "--station-id=")){
             g_session_args.station_id = a + std::strlen("--station-id=");
@@ -63,8 +78,12 @@ static void parse_args(int argc, char** argv){
         } else if(std::strcmp(a, "--help") == 0 || std::strcmp(a, "-h") == 0){
             fprintf(stderr,
                 "BEWE options:\n"
-                "  --sdr bladerf|rtlsdr|pluto   force a specific SDR backend\n"
+#ifdef BEWE_HOST_BUILD
+                "  --sdr bladerf|rtlsdr|pluto|kraken  force a specific SDR backend\n"
                 "  --session-mode=host|join     internal: child-process boot mode\n"
+#else
+                "  --session-mode=join          internal: child-process boot mode\n"
+#endif
                 "  --station-id=<id>            internal: Central room id (JOIN)\n"
                 "  --station-name=<utf8>        internal: station display name\n"
                 "  --station-lat=<deg>          internal: station latitude (HOST)\n"

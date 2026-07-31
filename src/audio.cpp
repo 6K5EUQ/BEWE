@@ -51,21 +51,10 @@ void FFTViewer::mix_worker(){
                     else if(lco==2) { R+=smp; }
                     else            { L+=smp; R+=smp; }
                 }
-            } else {
-                for(int c=0;c<MAX_CHANNELS;c++){
-                    if(!channels[c].dem_run.load(std::memory_order_relaxed)) continue;
-                    if(net_srv && !(channels[c].audio_mask.load() & 0x1u)) continue;
-                    if(local_ch_out[c]==3) {
-                        float dummy; channels[c].pop_audio(dummy); continue;
-                    }
-                    float smp=0; channels[c].pop_audio(smp);
-
-                    int lco = local_ch_out[c];
-                    if(lco==0)      { L+=smp; }
-                    else if(lco==2) { R+=smp; }
-                    else            { L+=smp; R+=smp; }
-                }
             }
+            // (예전엔 여기 else 로 "로컬 복조 채널을 직접 믹스" 하는 arm 이 있었다.
+            //  GUI 는 JOIN 전용이라 오디오는 항상 net_cli 링에서 온다. HOST 는 위쪽
+            //  BEWE_HEADLESS early-return 으로 이 함수에 들어오지도 않는다.)
             // EID Audio 탭 재생: 활성 시 frame 단위로 합산 (로컬 ALSA만, 브로드캐스트 X)
             if(audio_player && audio_player->active() && !audio_player->paused()){
                 float pL=0, pR=0;

@@ -332,8 +332,10 @@ bool FFTViewer::mission_end(){
         }
     }
 
+#ifdef BEWE_HOST_BUILD
     // Mission File Push: 미션 종료 시점에 잔여 파일 모두 enqueue (race-safe)
     MissionPush::scan_mission_dir_enqueue(ended_year, ended_code);
+#endif
 
     {
         std::lock_guard<std::mutex> lk(mission_mtx);
@@ -677,7 +679,13 @@ static void fill_sync_entry(MissionSyncEntry& dst,
     memcpy(dst.antenna,  src.antenna,  sizeof(dst.antenna));
 }
 
+// JOIN 빌드에도 심볼은 남긴다 — 호출부(부팅/재접속 경로)가 공용 코드에 있고,
+// 방송할 서버가 없다는 사실은 여기서 한 번만 처리하는 게 호출부마다 가드하는
+// 것보다 안전하다.
 void FFTViewer::mission_broadcast_sync(){
+#ifndef BEWE_HOST_BUILD
+    return;
+#else
     if(!net_srv) return;
     PktMissionSync pkt{};
     {
@@ -709,6 +717,7 @@ void FFTViewer::mission_broadcast_sync(){
         pkt.history_count = (uint16_t)taken;
     }
     net_srv->broadcast_mission_sync(pkt);
+#endif
 }
 
 // ── Delete ──────────────────────────────────────────────────────────────

@@ -223,14 +223,18 @@ void FFTViewer::toggle_tm_iq(){
         tm_iq_on.store(false);
         tm_add_event_tag(2);
         tm_iq_was_stopped = true;
+#ifdef BEWE_HOST_BUILD
         if(net_srv) net_srv->broadcast_wf_event(0,(int64_t)time(nullptr),2,"IQ Stop");
+#endif
     } else {
         if(tm_iq_was_stopped){ tm_iq_close(); tm_iq_was_stopped = false; }
         tm_iq_open();
         if(tm_iq_file_ready){          // open 거부(디스크 예산 초과) 시 OFF 유지
             tm_iq_on.store(true);
             tm_add_event_tag(1);
+#ifdef BEWE_HOST_BUILD
             if(net_srv) net_srv->broadcast_wf_event(0,(int64_t)time(nullptr),1,"IQ Start");
+#endif
         }
     }
 }

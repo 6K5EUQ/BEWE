@@ -1,6 +1,8 @@
 #include "module_api.hpp"
 #include "fft_viewer.hpp"
-#include "net_server.hpp"   // CH_EDIT 적용 시 broadcast_channel_sync
+#ifdef BEWE_HOST_BUILD
+#include "net_server.hpp"   // CH_EDIT 적용 시 broadcast_channel_sync (HOST 만)
+#endif
 #include "kst_time.hpp"     // 오늘 누적 디코드수 시드 (저장 JSONL = KST 일자)
 #include "login.hpp"        // CH_ADD owner = login_get_id()
 #include <cstring>
@@ -304,6 +306,12 @@ void bewe_mod_rec_send(const char* id, uint64_t rec_id, uint32_t total, uint32_t
     bcast(id, BEWE_MK_REC_DATA, buf.data(), buf.size());
 }
 
+#ifdef BEWE_HOST_BUILD
+// ── 아래 4개(apply_ch_edit/add/del/tune_local)는 HOST 전용이다 ──────────────
+// 채널을 실제로 만들고 복조를 켜고 하드웨어를 재튠하는 코드라 demod.cpp /
+// net_server.cpp / SDR 백엔드가 있어야 한다. JOIN 빌드는 그 셋을 링크하지 않고,
+// 애초에 이 경로로 오지도 않는다 (아래 호출부는 전부 remote 분기에서 return).
+
 // ── CH_EDIT 로컬 적용 (HOST): geometry/mode 변경 + 디코더/오디오데모드 재시작 + 동기화 ──
 // 동작 중 디코더 정지 → s/e/mode 변경 → 오디오 데모드 재시작 → CHANNEL_SYNC 브로드캐스트
 // (Central 캐시 → 전 JOIN 의 다음 CH_LIST 폴링에 새 geometry 반영) → 디코더 새 band 재시작.
@@ -368,6 +376,7 @@ static void apply_ch_del_local(FFTViewer& v, int ch){
     v.local_ch_out[ch] = 1;
     if(v.net_srv) v.net_srv->broadcast_channel_sync(v.channels, MAX_CHANNELS);
 }
+#endif  // BEWE_HOST_BUILD (apply_ch_*_local)
 
 // ── 채널별 디코드 레이트 통계 (id|station|ch → 최근 60s 타임스탬프 deque) ──
 static std::mutex g_stat_mtx;
@@ -712,7 +721,9 @@ void bewe_mod_edit_ch(FFTViewer& v, const char* station, int ch, int mode, float
         send_up("*", BEWE_MK_CH_EDIT, &e, sizeof(e));   // mod_id 무관 (채널 op)
         return;
     }
+#ifdef BEWE_HOST_BUILD
     apply_ch_edit_local(v, ch, mode, lo, hi);
+#endif
 }
 
 // 채널 생성 (어느 기지든). 원격은 Central→해당 HOST 가 빈 슬롯 선택, LOCAL/HOST 는 즉시.
@@ -723,7 +734,9 @@ void bewe_mod_add_ch(FFTViewer& v, const char* station, int mode, float lo, floa
         send_up("*", BEWE_MK_CH_ADD, &e, sizeof(e));
         return;
     }
+#ifdef BEWE_HOST_BUILD
     apply_ch_add_local(v, mode, lo, hi);
+#endif
 }
 
 // 채널 삭제 (어느 기지든). 원격은 Central→해당 HOST, LOCAL/HOST 는 즉시.
@@ -734,7 +747,9 @@ void bewe_mod_del_ch(FFTViewer& v, const char* station, int ch){
         send_up("*", BEWE_MK_CH_DEL, &e, sizeof(e));
         return;
     }
+#ifdef BEWE_HOST_BUILD
     apply_ch_del_local(v, ch);
+#endif
 }
 
 // HOST: 채널 geometry/SR 변경 → 그 채널서 도는 디코더만 새 band 로 재시작 (mask 유지).
@@ -750,11 +765,13 @@ void bewe_mod_ch_retune(FFTViewer& v, int ch){
     }
 }
 
+#ifdef BEWE_HOST_BUILD
 // 기지 하드웨어 CF/SR 적용 (HOST 로컬). sr 먼저(재초기화) → cf. 0 인 필드는 건너뜀.
 static void apply_tune_local(FFTViewer& v, float cf_mhz, float sr_msps){
     if(sr_msps > 0.f){ v.pending_sr_msps = sr_msps; v.sr_change_req = true; }
     if(cf_mhz  > 0.f){ v.set_frequency(cf_mhz); }
 }
+#endif
 // 기지 CF/SR 변경 (어느 기지든). 원격은 Central→해당 HOST, LOCAL/HOST 는 즉시.
 void bewe_mod_tune(FFTViewer& v, const char* station, float cf_mhz, float sr_msps){
     if(g_send_up && v.remote_mode){
@@ -763,7 +780,9 @@ void bewe_mod_tune(FFTViewer& v, const char* station, float cf_mhz, float sr_msp
         send_up("*", BEWE_MK_TUNE, &t, sizeof(t));   // mod_id 무관 (기지 op)
         return;
     }
+#ifdef BEWE_HOST_BUILD
     apply_tune_local(v, cf_mhz, sr_msps);
+#endif
 }
 
 // ── 수신 라우팅 ─────────────────────────────────────────────────────────────
@@ -774,6 +793,9 @@ void bewe_mod_route(FFTViewer& v, bool host_side, const uint8_t* payload, size_t
     char id[9]={}; memcpy(id, h->mod_id, 8);
     const uint8_t* d = payload + sizeof(PktModulePipe);
     size_t n = h->data_len;
+#ifdef BEWE_HOST_BUILD
+    // 채널/기지 op 는 HOST 만 적용한다. JOIN 빌드는 host_side 가 항상 false 이므로
+    // 실행되지 않는 코드였고, 이제 링크되지도 않는다.
     // CH_EDIT 는 모듈 무관(채널 op) — find_mod 전에 처리
     if(host_side && h->kind==BEWE_MK_CH_EDIT && n>=sizeof(MpChEdit)){
         auto* e=reinterpret_cast<const MpChEdit*>(d);
@@ -805,6 +827,7 @@ void bewe_mod_route(FFTViewer& v, bool host_side, const uint8_t* payload, size_t
         apply_tune_local(v, t->cf_mhz, t->sr_msps);
         return;
     }
+#endif  // BEWE_HOST_BUILD (채널/기지 op)
     const BeweModule* m = find_mod(id);
     if(!m) return;   // 미설치 모듈 → 조용히 무시
 
