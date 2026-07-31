@@ -5279,17 +5279,13 @@ void run_streaming_viewer(){
                     else               snprintf(buf, n, "%.2fKB/s", kbps);
                 };
                 char rbuf[32], bbuf[24];
-                // 전원 표기: 방전 중이면 "Bat : n%", AC 연결이면 "AC : n%".
-                // UPS 는 붙어 있는데 게이지가 무응답(254)이면 "AC : UPS ERR",
-                // 배터리 자체가 없는 머신(255)이면 접두어만.
-                // ac 를 모를 때(2)는 각 경우의 상식적인 쪽으로: 퍼센트가 있으면 배터리 구동,
-                // 없으면 배터리 없는 AC 머신.
-                auto fmt_bat = [](char* buf, size_t n, int bat, int ac){
-                    const char* tag = (bat <= 100) ? (ac == 1 ? "AC" : "Bat")
-                                                   : (ac == 0 ? "Bat" : "AC");
-                    if(bat <= 100)      snprintf(buf, n, "%s : %d%%",    tag, bat);
-                    else if(bat == 254) snprintf(buf, n, "%s : UPS ERR", tag);
-                    else                snprintf(buf, n, "%s",           tag);
+                // 전원 표기: 배터리가 있으면 충·방전 구분 없이 "Bat : n%".
+                // UPS 는 붙어 있는데 게이지가 무응답(254)이면 "Bat : UPS ERR".
+                // 배터리 자체가 없는 머신(255)은 아무것도 표시하지 않는다.
+                auto fmt_bat = [](char* buf, size_t n, int bat){
+                    if(bat <= 100)      snprintf(buf, n, "Bat : %d%%",  bat);
+                    else if(bat == 254) snprintf(buf, n, "Bat : UPS ERR");
+                    else                buf[0] = '\0';
                 };
                 // HOST/JOIN 두 줄의 열을 픽셀 위치로 고정한다. 본문 폰트가 가변폭이라
                 // 공백 패딩으로는 자릿수(7% ↔ 26%)가 바뀔 때마다 뒤 항목이 밀린다.
@@ -5313,14 +5309,13 @@ void run_streaming_viewer(){
                 //   JOIN 창: 원격 HOST 가 heartbeat 로 보내온 값(remote_host_up_x100).
                 if(vv.net_cli){
                     fmt_rate(rbuf, sizeof(rbuf), vv.net_cli->remote_host_up_x100.load() / 100.0f);
-                    fmt_bat(bbuf, sizeof(bbuf), vv.net_cli->remote_host_bat.load(),
-                            vv.net_cli->remote_host_bat_ac.load());
+                    fmt_bat(bbuf, sizeof(bbuf), vv.net_cli->remote_host_bat.load());
                     status_row("HOST |", vv.net_cli->remote_host_cpu.load(),
                                vv.net_cli->remote_host_cpu_temp.load(),
                                vv.net_cli->remote_host_ram.load(), "Upload", rbuf, bbuf);
                 } else {
                     fmt_rate(rbuf, sizeof(rbuf), vv.net_up_kbps.load());
-                    fmt_bat(bbuf, sizeof(bbuf), vv.sysmon_bat.load(), vv.sysmon_bat_ac.load());
+                    fmt_bat(bbuf, sizeof(bbuf), vv.sysmon_bat.load());
                     status_row("HOST |", (int)vv.sysmon_cpu, vv.sysmon_cpu_temp_c.load(),
                                (int)vv.sysmon_ram, "Upload", rbuf, bbuf);
                 }
