@@ -465,8 +465,6 @@ struct __attribute__((packed)) ChSyncEntry {
     // ── 녹음 상태 (HOST → JOIN 동기화) ──
     uint32_t iq_rec_secs;     // IQ 녹음 경과 시간 (초)
     uint32_t audio_rec_secs;  // 오디오 녹음 경과 시간 (초)
-    uint32_t sq_active_secs;  // 스컬치 넘긴 시간 (초)
-    uint32_t sq_total_secs;   // 전체 경과 시간 (초)
     uint8_t  iq_rec_on;       // IQ 녹음 활성 (0/1)
     uint8_t  audio_rec_on;    // 오디오 녹음 활성 (0/1)
     uint8_t  _pad3[2];
@@ -481,7 +479,7 @@ struct __attribute__((packed)) PktChannelSync {
 
 // 중앙 릴레이(central_proto.hpp)의 CH_SYNC_ENTRY_SIZE와 반드시 일치해야 함.
 // 이 값이 바뀌면 central도 같이 고쳐야 함.
-static_assert(sizeof(ChSyncEntry) == 88, "ChSyncEntry size must match central/central_proto.hpp CH_SYNC_ENTRY_SIZE");
+static_assert(sizeof(ChSyncEntry) == 80, "ChSyncEntry size must match central/central_proto.hpp CH_SYNC_ENTRY_SIZE");
 
 // ── SCHED_SYNC: 예약 녹음 리스트 전체 스냅샷 (server → all) ───────────────
 static constexpr int MAX_SCHED_ENTRIES = 32;

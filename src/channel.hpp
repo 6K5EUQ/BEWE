@@ -301,8 +301,6 @@ struct Channel {
     int   sq_gate_hold = 0;      // gate hold 카운터 (프레임 단위)
     float sq_last_close_t = -10.f; // 게이트 마지막 닫힌 시점 (ImGui::GetTime)
     bool  sq_gate_prev = false;  // 이전 프레임 게이트 상태
-    float sq_active_time = 0.0f; // 스컬치 열린 누적 시간(초)
-    float sq_total_time  = 0.0f; // 전체 경과 시간 (프레임 기반 누적)
 
     // ── 에너지 디텍션 (Detect 모드) ───────────────────────────────────────
     // 복조 없는 채널을 선택하고 D키 → det_on. 그 채널 대역이 탐색 구간이 되고,
@@ -396,7 +394,6 @@ struct Channel {
         sq_calib_cnt=0;
         memset(sq_calib_buf, 0, sizeof(sq_calib_buf));
         sq_gate_hold=0;
-        sq_active_time=0; sq_total_time=0;
         dec_gate.store(true); dec_gate_until_ms.store(0);   // 디코더 게이트는 열림으로 리셋
         // detect
         det_on.store(false); det_locked.store(false);

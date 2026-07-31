@@ -357,17 +357,6 @@ void FFTViewer::update_channel_squelch(){
                 ch.dec_gate.store(now_ms < until, std::memory_order_relaxed);
             }
         }
-
-        // 스컬치 누적 시간 — 실벽시계 delta 사용 (Holding 중에는 정지)
-        if(ch.filter_active && !ch.dem_paused.load()){
-            if(!sdr_stream_error.load()){
-                ch.sq_total_time += real_dt;
-                if(gate) ch.sq_active_time += real_dt;
-            }
-        } else if(!ch.filter_active){
-            ch.sq_active_time = 0;
-            ch.sq_total_time = 0;
-        }
     }
     }  // data_mtx 해제
 

@@ -3062,8 +3062,6 @@ void run_streaming_viewer(){
                 // HOST 녹음 시간 동기화
                 v.channels[i].synced_iq_rec_secs   = sync.ch[i].iq_rec_secs;
                 v.channels[i].synced_audio_rec_secs= sync.ch[i].audio_rec_secs;
-                v.channels[i].sq_active_time       = (float)sync.ch[i].sq_active_secs;
-                v.channels[i].sq_total_time        = (float)sync.ch[i].sq_total_secs;
                 // JOIN 로컬 녹음 중이면 HOST 값으로 덮어쓰지 않음
                 if(!v.channels[i].iq_rec_on.load())
                     v.channels[i].iq_rec_on.store(sync.ch[i].iq_rec_on != 0);
@@ -5594,13 +5592,9 @@ void run_streaming_viewer(){
                             // 텍스트 (고정폭 정렬)
                             char label[96];
                             int dn=v.freq_sorted_display_num(ci);
-                            int act_s=(int)ch.sq_active_time, tot_s=(int)ch.sq_total_time;
-                            if(act_s<0) act_s=0; if(tot_s<0) tot_s=0;
                             snprintf(label,sizeof(label),
-                                "[%2d] %-5s %10.3f MHz %6.0fkHz  [%02d:%02d:%02d / %02d:%02d:%02d]",
-                                dn,mlabel,cf_mhz,bw_khz,
-                                act_s/3600,(act_s/60)%60,act_s%60,
-                                tot_s/3600,(tot_s/60)%60,tot_s%60);
+                                "[%2d] %-5s %10.3f MHz %6.0fkHz",
+                                dn,mlabel,cf_mhz,bw_khz);
                             ImGui::PushID(ci*1000+700);
                             ImGui::PushStyleColor(ImGuiCol_Text,tc_v);
                             // gate open 또는 최근 활동이면 볼드 효과 (1px offset)
