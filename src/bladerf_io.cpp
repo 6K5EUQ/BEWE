@@ -9,60 +9,137 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cerrno>
+#include <string>
+#include <mutex>
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <linux/usbdevice_fs.h>
 
+// ── BEWE 가 소유한 RTL 동글 시리얼 ────────────────────────────────────────
+// 왜 필요한가: 0bda:2838 은 KrakenSDR 환경에서 5개가 동시에 꽂혀 있다. 예전
+// 구현은 "첫 번째 매칭"을 리셋했는데, 그건 BEWE 가 연 동글이라는 보장이 전혀
+// 없다 — 실제로 열거 순서·sysfs 경로 순서·시리얼 순서가 전부 불일치한다.
+// heimdall DAQ 가 돌고 있으면 남의 동글을 뽑는 셈이 되어 방탐이 통째로 죽는다.
+static std::string g_owned_rtl_serial;
+static std::mutex  g_owned_rtl_mtx;
+
+void rtl_set_owned_serial(const char* s){
+    std::lock_guard<std::mutex> lk(g_owned_rtl_mtx);
+    g_owned_rtl_serial = (s && *s) ? s : "";
+}
+const char* rtl_owned_serial(){
+    // 반환 포인터는 다음 set 까지만 유효하다. 호출부는 즉시 쓰고 버린다.
+    std::lock_guard<std::mutex> lk(g_owned_rtl_mtx);
+    static thread_local std::string snap;
+    snap = g_owned_rtl_serial;
+    return snap.c_str();
+}
+
+// ── sysfs USB 장치 조회 ──────────────────────────────────────────────────
+// /dev/bus/usb 노드는 descriptor 에 시리얼 "인덱스"만 담고 문자열은 없다.
+// sysfs 는 serial 을 텍스트 파일로 주므로 시리얼 스코프에는 이쪽만 쓸 수 있다.
+static bool read_sysfs_line(const char* path, char* out, size_t n){
+    FILE* f = fopen(path, "r");
+    if(!f) return false;
+    bool ok = fgets(out, (int)n, f) != nullptr;
+    fclose(f);
+    if(!ok) return false;
+    out[strcspn(out, "\r\n")] = 0;
+    return true;
+}
+
+struct UsbDevRef {
+    char dir[288]  = {};   // /sys/bus/usb/devices/<X-Y>  (base 20 + '/' + d_name 255 + NUL)
+    char node[64]  = {};   // /dev/bus/usb/NNN/MMM
+    char serial[64]= {};
+};
+
+// vid/pid 로 후보를 모은다 (인터페이스 노드·루트허브 제외). 최대 max 개.
+static int usb_find_by_vidpid(uint16_t vid, uint16_t pid, UsbDevRef* out, int max){
+    const char* base = "/sys/bus/usb/devices";
+    DIR* d = opendir(base);
+    if(!d) return 0;
+    int n = 0;
+    struct dirent* e;
+    while(n < max && (e = readdir(d))){
+        if(e->d_name[0] == '.') continue;
+        if(strchr(e->d_name, ':') || strncmp(e->d_name, "usb", 3) == 0) continue;
+        char p[512], buf[64];
+        snprintf(p, sizeof(p), "%s/%s/idVendor", base, e->d_name);
+        if(!read_sysfs_line(p, buf, sizeof(buf)) || (uint16_t)strtoul(buf,nullptr,16) != vid) continue;
+        snprintf(p, sizeof(p), "%s/%s/idProduct", base, e->d_name);
+        if(!read_sysfs_line(p, buf, sizeof(buf)) || (uint16_t)strtoul(buf,nullptr,16) != pid) continue;
+
+        UsbDevRef& r = out[n];
+        snprintf(r.dir, sizeof(r.dir), "%s/%s", base, e->d_name);
+        snprintf(p, sizeof(p), "%s/serial", r.dir);
+        if(!read_sysfs_line(p, r.serial, sizeof(r.serial))) r.serial[0] = 0;
+        int bus = 0, dev = 0;
+        snprintf(p, sizeof(p), "%s/busnum", r.dir);
+        if(read_sysfs_line(p, buf, sizeof(buf))) bus = atoi(buf);
+        snprintf(p, sizeof(p), "%s/devnum", r.dir);
+        if(read_sysfs_line(p, buf, sizeof(buf))) dev = atoi(buf);
+        if(bus <= 0 || dev <= 0) continue;
+        snprintf(r.node, sizeof(r.node), "/dev/bus/usb/%03d/%03d", bus, dev);
+        n++;
+    }
+    closedir(d);
+    return n;
+}
+
+// 후보 중 "건드려도 되는 것" 하나를 고른다.
+//   1) 소유 시리얼이 있으면 그것만.
+//   2) 없고 후보가 정확히 1개면 그것 (모호하지 않음).
+//   3) 없고 후보가 여러 개면 거부 — 동전 던지기로 남의 장비를 리셋하지 않는다.
+// 반환: 인덱스, 또는 -1(거부/없음).
+static int usb_pick_owned(const UsbDevRef* c, int n, uint16_t vid, uint16_t pid,
+                          const char* label, const char* tag){
+    if(n == 0){
+        bewe_log_push(2,"[%s] %s (%04x:%04x) not found in sysfs\n", tag, label, vid, pid);
+        return -1;
+    }
+    const bool is_rtl = (vid == 0x0bda && pid == 0x2838);
+    const char* own = is_rtl ? rtl_owned_serial() : "";
+    if(own && *own){
+        for(int i=0;i<n;i++) if(strcmp(c[i].serial, own) == 0) return i;
+        bewe_log_push(2,"[%s] owned %s serial '%s' is gone (%d present) - refusing\n",
+                      tag, label, own, n);
+        return -1;
+    }
+    if(n == 1) return 0;
+    bewe_log_push(2,"[%s] %d x %s present and BEWE owns none of them - refusing.\n"
+                    "      Resetting an arbitrary one would kill someone else's device\n"
+                    "      (e.g. a running heimdall DAQ). Set BEWE_RTL_SERIAL.\n",
+                  tag, n, label);
+    return -1;
+}
+
 // ── USB 소프트 리셋 (USBDEVFS_RESET ioctl) ───────────────────────────────
-// vid/pid 장치를 /dev/bus/usb에서 찾아 리셋
 // 효과: 물리적으로 뽑았다 꽂는 것과 동일 (드라이버 unbind>reenumerate)
 // sudo 불필요 - udev rule로 plugdev 그룹에 rw 권한 부여됨
 bool usb_reset_vidpid(uint16_t want_vid, uint16_t want_pid, const char* label){
-    // /dev/bus/usb/NNN/MMM 파일 순회해서 vendor/product 매칭
-    DIR* bus_dir = opendir("/dev/bus/usb");
-    if(!bus_dir){ perror("[USBreset] opendir /dev/bus/usb"); return false; }
+    UsbDevRef cand[16];
+    int n = usb_find_by_vidpid(want_vid, want_pid, cand, 16);
+    int i = usb_pick_owned(cand, n, want_vid, want_pid, label, "USBreset");
+    if(i < 0) return false;
 
-    struct dirent* bus_ent;
-    bool found = false;
-    while(!found && (bus_ent = readdir(bus_dir))){
-        if(bus_ent->d_name[0] == '.') continue;
-        char bus_path[64];
-        snprintf(bus_path, sizeof(bus_path), "/dev/bus/usb/%s", bus_ent->d_name);
-        DIR* dev_dir = opendir(bus_path);
-        if(!dev_dir) continue;
-        struct dirent* dev_ent;
-        while(!found && (dev_ent = readdir(dev_dir))){
-            if(dev_ent->d_name[0] == '.') continue;
-            char dev_path[128];
-            snprintf(dev_path, sizeof(dev_path), "%s/%s", bus_path, dev_ent->d_name);
-            int fd = open(dev_path, O_RDWR);
-            if(fd < 0) continue;
-
-            // USB descriptor: byte 8=vendor(LE16), byte 10=product(LE16)
-            uint8_t desc[18] = {};
-            if(read(fd, desc, sizeof(desc)) == (ssize_t)sizeof(desc)){
-                uint16_t vid = (uint16_t)(desc[8]  | (desc[9]  << 8));
-                uint16_t pid = (uint16_t)(desc[10] | (desc[11] << 8));
-                if(vid == want_vid && pid == want_pid){
-                    bewe_log_push(0,"[USBreset] found %s at %s - issuing USBDEVFS_RESET\n",
-                                  label, dev_path);
-                    if(ioctl(fd, USBDEVFS_RESET, nullptr) == 0){
-                        bewe_log_push(0,"[USBreset] reset OK\n");
-                        found = true;
-                    } else {
-                        perror("[USBreset] ioctl USBDEVFS_RESET");
-                    }
-                }
-            }
-            close(fd);
-        }
-        closedir(dev_dir);
+    bewe_log_push(0,"[USBreset] %s at %s (serial '%s') - issuing USBDEVFS_RESET\n",
+                  label, cand[i].node, cand[i].serial);
+    int fd = open(cand[i].node, O_WRONLY);
+    if(fd < 0){
+        bewe_log_push(2,"[USBreset] open %s failed: %s\n", cand[i].node, strerror(errno));
+        return false;
     }
-    closedir(bus_dir);
-    if(!found) bewe_log_push(0,"[USBreset] %s not found in /dev/bus/usb\n", label);
-    return found;
+    int rc = ioctl(fd, USBDEVFS_RESET, nullptr);
+    close(fd);
+    if(rc != 0){
+        bewe_log_push(2,"[USBreset] ioctl USBDEVFS_RESET failed: %s\n", strerror(errno));
+        return false;
+    }
+    bewe_log_push(0,"[USBreset] reset OK\n");
+    return true;
 }
 
 bool bladerf_usb_reset(){ return usb_reset_vidpid(0x2cf0, 0x5250, "BladeRF"); }
@@ -78,45 +155,16 @@ bool bladerf_usb_reset(){ return usb_reset_vidpid(0x2cf0, 0x5250, "BladeRF"); }
 // 케이블을 뽑았다 꽂는 것과 같은 경로다. 드론 탑재라 사람이 못 뽑는 기지에서
 // 이게 유일한 상위 복구 수단이다.
 //
-// sysfs 경로는 /dev/bus/usb 노드가 아니라 /sys/bus/usb/devices/<X-Y>/ 이고,
-// idVendor/idProduct 가 텍스트 파일(16진 4자리)로 들어있다.
-static bool read_sysfs_hex4(const char* path, uint16_t* out){
-    int fd = open(path, O_RDONLY);
-    if(fd < 0) return false;
-    char buf[16] = {};
-    ssize_t n = read(fd, buf, sizeof(buf)-1);
-    close(fd);
-    if(n <= 0) return false;
-    *out = (uint16_t)strtoul(buf, nullptr, 16);
-    return true;
-}
-
+// 장치 선택은 usb_reset_vidpid 와 동일한 규칙을 쓴다 (usb_pick_owned).
+// 이쪽이 더 위험하다 — authorized 0 은 드라이버를 떼어내고, 재승인에 실패하면
+// 장치가 아예 안 보이는 상태로 남는다. 남의 동글에 이걸 하면 복구가 어렵다.
 int usb_deep_powercycle(uint16_t vid, uint16_t pid, int off_ms){
-    const char* base = "/sys/bus/usb/devices";
-    DIR* d = opendir(base);
-    if(!d){ bewe_log_push(2,"[PWRCYCLE] opendir %s failed\n", base); return 1; }
+    UsbDevRef cand[16];
+    int n = usb_find_by_vidpid(vid, pid, cand, 16);
+    int idx = usb_pick_owned(cand, n, vid, pid, "device", "PWRCYCLE");
+    if(idx < 0) return 1;
 
-    char dev_dir[256] = {};
-    struct dirent* e;
-    while((e = readdir(d))){
-        if(e->d_name[0] == '.') continue;
-        // 인터페이스 노드(3-1:1.0)와 루트허브(usb3)는 건너뛴다 — 장치 노드만 본다.
-        if(strchr(e->d_name, ':') || strncmp(e->d_name, "usb", 3) == 0) continue;
-        char p[512]; uint16_t v = 0, pd = 0;
-        snprintf(p, sizeof(p), "%s/%s/idVendor", base, e->d_name);
-        if(!read_sysfs_hex4(p, &v) || v != vid) continue;
-        snprintf(p, sizeof(p), "%s/%s/idProduct", base, e->d_name);
-        if(!read_sysfs_hex4(p, &pd) || pd != pid) continue;
-        snprintf(dev_dir, sizeof(dev_dir), "%s/%s", base, e->d_name);
-        break;
-    }
-    closedir(d);
-
-    if(!dev_dir[0]){
-        bewe_log_push(2,"[PWRCYCLE] device %04x:%04x not found in %s\n", vid, pid, base);
-        return 1;
-    }
-
+    const char* dev_dir = cand[idx].dir;
     char auth[512];
     snprintf(auth, sizeof(auth), "%s/authorized", dev_dir);
     if(access(auth, W_OK) != 0){
@@ -133,7 +181,8 @@ int usb_deep_powercycle(uint16_t vid, uint16_t pid, int off_ms){
         return w == 1;
     };
 
-    bewe_log_push(0,"[PWRCYCLE] %s: deauthorize (%04x:%04x)\n", dev_dir, vid, pid);
+    bewe_log_push(0,"[PWRCYCLE] %s: deauthorize (%04x:%04x, serial '%s')\n",
+                  dev_dir, vid, pid, cand[idx].serial);
     if(!write_auth("0")){
         bewe_log_push(2,"[PWRCYCLE] write 0 failed: %s\n", strerror(errno));
         return 3;

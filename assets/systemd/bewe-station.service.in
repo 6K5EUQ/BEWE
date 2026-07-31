@@ -39,6 +39,13 @@ Type=simple
 User=@USER@
 PermissionsStartOnly=true
 WorkingDirectory=@HOME@/BEWE/build-cli
+# RTL-SDR 동글 고정 (선택). 동글이 여러 개 꽂힌 기지에서는 반드시 지정한다 —
+# 안 하면 열거 인덱스 0 을 여는데, 그게 어느 물리 동글인지는 보장되지 않는다
+# (열거 순서 · sysfs 경로 순서 · 시리얼 순서가 전부 불일치한다).
+#   Environment=BEWE_RTL_SERIAL=1004    특정 동글로 고정. 못 찾으면 아무것도 안 연다
+#   Environment=BEWE_RTL_SERIAL=none    RTL 백엔드 완전 비활성
+# KrakenSDR 기지는 동글 5개가 전부 heimdall DAQ 소유라 'none' 이어야 한다.
+# BEWE 가 하나라도 집으면 DAQ 체인이 기동에 실패한다.
 # cli_host 는 stdin 으로 로그인 4줄을 받는다: ID / PW / Tier / 위치번호.
 # stdin 은 FIFO 로 연다. 로그인 4줄을 먼저 흘려보낸 뒤 FIFO 를 계속 재개방해
 # 운용 중 명령 주입(/ch, /hist check, /chassis 1 reset ...)이 가능하게 한다.

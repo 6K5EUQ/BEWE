@@ -1087,10 +1087,13 @@ inline bool sdr_usb_ids(HWType t, uint16_t* vid, uint16_t* pid, const char** lab
     }
 }
 
-// ── RTL-SDR USB 소프트 리셋 (VID:PID 0bda:2838) ───────────────────────────
-// rtlsdr_read_sync 가 wedge된 커널 sync-URB 큐에서 영구 hang 할 때, 단순 reopen
-// 으로는 안 풀리고 포트 re-enumeration 만 복구됨. USBDEVFS_RESET ioctl 사용.
-bool rtl_usb_reset();
+// ── BEWE 가 실제로 연 RTL 동글의 EEPROM 시리얼 ────────────────────────────
+// 0bda:2838 은 KrakenSDR 처럼 동일 동글이 여러 개 꽂힌 환경에서 유일하지 않다.
+// "첫 번째 매칭"으로 리셋하면 남의 동글(= 돌고 있는 heimdall DAQ)을 파괴한다.
+// initialize_rtlsdr 이 open 성공 직후 채우고, close/실패 시 비운다.
+// 비어 있으면 리셋 함수들이 후보 개수를 세서 1개일 때만 진행한다.
+void        rtl_set_owned_serial(const char* s);   // nullptr/"" => 소유 없음
+const char* rtl_owned_serial();                    // 항상 유효한 C 문자열
 
 // ── USB 딥 파워사이클 (/powercycle) ───────────────────────────────────────
 // USBDEVFS_RESET 은 장치 핸들을 거치므로 펌웨어 링크가 죽으면(BladeRF NIOS II

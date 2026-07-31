@@ -9,56 +9,13 @@
 #include <chrono>
 #include <thread>
 #include <rtl-sdr.h>
-#include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <sys/ioctl.h>
-#include <linux/usbdevice_fs.h>
 
-#ifndef USBDEVFS_RESET
-#define USBDEVFS_RESET _IO('U', 20)
-#endif
-
-// RTL-SDR (0bda:2838) USB 포트 re-enumeration. sysfs 로 busnum/devnum 찾아
-// /dev/bus/usb 노드에 USBDEVFS_RESET ioctl. udev(plugdev) 권한이면 sudo 불필요.
-// rtlsdr_read_sync 가 wedge 돼 hang 할 때 유일하게 복구되는 경로.
-bool rtl_usb_reset(){
-    const char* base = "/sys/bus/usb/devices";
-    DIR* d = opendir(base);
-    if(!d){ fprintf(stderr,"[RTL] usb_reset: opendir %s failed\n", base); return false; }
-    bool ok = false;
-    struct dirent* e;
-    while((e = readdir(d)) != nullptr){
-        if(e->d_name[0]=='.') continue;
-        char p[600]; char vid[16]={}, pid[16]={};
-        snprintf(p,sizeof(p),"%s/%s/idVendor",base,e->d_name);
-        FILE* f=fopen(p,"r"); if(!f) continue;
-        bool gv = fgets(vid,sizeof(vid),f)!=nullptr; fclose(f); if(!gv) continue;
-        snprintf(p,sizeof(p),"%s/%s/idProduct",base,e->d_name);
-        f=fopen(p,"r"); if(!f) continue;
-        bool gp = fgets(pid,sizeof(pid),f)!=nullptr; fclose(f); if(!gp) continue;
-        if(strncmp(vid,"0bda",4)!=0 || strncmp(pid,"2838",4)!=0) continue;
-        int bus=0, dev=0;
-        snprintf(p,sizeof(p),"%s/%s/busnum",base,e->d_name);
-        f=fopen(p,"r"); if(f){ if(fscanf(f,"%d",&bus)!=1) bus=0; fclose(f); }
-        snprintf(p,sizeof(p),"%s/%s/devnum",base,e->d_name);
-        f=fopen(p,"r"); if(f){ if(fscanf(f,"%d",&dev)!=1) dev=0; fclose(f); }
-        if(bus<=0 || dev<=0) continue;
-        char node[64]; snprintf(node,sizeof(node),"/dev/bus/usb/%03d/%03d",bus,dev);
-        int fd=open(node,O_WRONLY);
-        if(fd>=0){
-            int r=ioctl(fd,USBDEVFS_RESET,0);
-            fprintf(stderr,"[RTL] USB reset %s rc=%d\n",node,r);
-            close(fd);
-            ok=(r==0);
-        } else {
-            fprintf(stderr,"[RTL] usb_reset: open %s failed\n", node);
-        }
-        break;
-    }
-    closedir(d);
-    return ok;
-}
+// (v13.19.0) rtl_usb_reset() 제거. 호출처가 하나도 없는 죽은 코드였고, 동작도
+// "첫 번째 0bda:2838" 을 잡는 방식이라 KrakenSDR 처럼 동글 5개가 꽂힌 환경에선
+// 남의 장치를 리셋했다. 살아있는 리셋 경로는 bladerf_io.cpp 의
+// usb_reset_vidpid() / usb_deep_powercycle() 이고, 둘 다 소유 시리얼로 스코프된다.
 
 // RTL-SDR V4 고정 파라미터
 static constexpr uint32_t RTL_SAMPLE_RATE = 2560000;  // 2.56 MSPS (3.2M 은 USB/Pi 에서 샘플드롭 잦음)
@@ -72,17 +29,55 @@ bool FFTViewer::initialize_rtlsdr(float cf_mhz){
 
     // 디바이스 선택: BEWE_RTL_SERIAL(시리얼) > BEWE_RTL_INDEX(인덱스) > 0(기본).
     // 멀티 동글 환경(예: DGS-4)에서 특정 동글을 시리얼로 고정. 단일 동글은 기본 0.
+    //
+    // BEWE_RTL_SERIAL=none|off|- 은 "이 기지에서 RTL 을 절대 열지 마라"는 뜻이다.
+    // KrakenSDR 이 꽂힌 기지에서 필요하다 — 동글 5개는 heimdall DAQ 소유라
+    // BEWE 가 하나라도 집으면 방탐 체인이 통째로 못 뜬다.
     int dev_idx = 0;
     if(const char* s = getenv("BEWE_RTL_SERIAL")){
+        if(strcmp(s,"none")==0 || strcmp(s,"off")==0 || strcmp(s,"-")==0){
+            bewe_log_push(2,"RTL-SDR: disabled by BEWE_RTL_SERIAL=%s\n", s);
+            rtl_set_owned_serial(nullptr);
+            return false;
+        }
         int gi = rtlsdr_get_index_by_serial(s);
-        if(gi >= 0){ dev_idx = gi; bewe_log_push(0,"RTL-SDR: serial '%s' -> idx %d\n", s, gi); }
-        else        bewe_log_push(0,"RTL-SDR: serial '%s' not found, fallback idx 0\n", s);
+        if(gi < 0){
+            // 예전엔 여기서 idx 0 으로 조용히 폴백했다. 고정이 고정이 아니었고,
+            // 동글이 여러 개면 "아무거나 하나"를 집는 결과가 됐다 — 실제로 이게
+            // heimdall DAQ 의 동글을 강탈해 DAQ 기동 실패를 일으켰다.
+            // 명시 지정이 안 맞으면 아무것도 열지 않는다.
+            bewe_log_push(2,"RTL-SDR: serial '%s' not found among %u device(s) - "
+                            "refusing to open an arbitrary one\n", s, dev_count);
+            rtl_set_owned_serial(nullptr);
+            return false;
+        }
+        dev_idx = gi;
+        bewe_log_push(0,"RTL-SDR: serial '%s' -> idx %d\n", s, gi);
     } else if(const char* xi = getenv("BEWE_RTL_INDEX")){
         dev_idx = atoi(xi);
         bewe_log_push(0,"RTL-SDR: idx %d (env)\n", dev_idx);
     }
     int r = rtlsdr_open(&dev_rtl, dev_idx);
-    if(r < 0){ fprintf(stderr,"RTL-SDR: open failed idx %d (%d)\n", dev_idx, r); return false; }
+    if(r < 0){
+        fprintf(stderr,"RTL-SDR: open failed idx %d (%d)\n", dev_idx, r);
+        rtl_set_owned_serial(nullptr);
+        return false;
+    }
+
+    // 실제로 연 동글의 EEPROM 시리얼을 기록한다. USB 리셋/파워사이클이 이걸로
+    // 대상을 좁힌다 — 없으면 후보가 2개 이상일 때 리셋 자체를 거부한다.
+    // (동글 5개짜리 KrakenSDR 환경에서 "첫 번째"를 잡으면 남의 DAQ 가 죽는다.)
+    {
+        char mfr[256]={}, prod[256]={}, ser[256]={};
+        if(rtlsdr_get_device_usb_strings((uint32_t)dev_idx, mfr, prod, ser) == 0 && ser[0]){
+            rtl_set_owned_serial(ser);
+            bewe_log_push(0,"RTL-SDR: idx %d serial '%s' (USB reset scoped to it)\n", dev_idx, ser);
+        } else {
+            rtl_set_owned_serial(nullptr);
+            bewe_log_push(2,"RTL-SDR: idx %d serial unreadable - USB reset will refuse "
+                            "if more than one 0bda:2838 is present\n", dev_idx);
+        }
+    }
 
     // 샘플레이트 설정
     r = rtlsdr_set_sample_rate(dev_rtl, RTL_SAMPLE_RATE);
