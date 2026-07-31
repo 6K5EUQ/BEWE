@@ -336,8 +336,10 @@ Split roles: HOST is CLI-only, GUI is JOIN-only (v13.20.0)
 - [x] Phase 3 CMake 절단 + 헤더 가드 — GUI 에서 SDR·NetServer·복조·DF 엔진 소스 14개 드롭,
       `fft_viewer.hpp` 의 `net_server.hpp` include 와 `net_srv` 멤버를 `BEWE_HOST_BUILD` 로 가드
 - [x] Phase 4.3 `set_hist_state_fn` 버그픽스 (cli_host 로 이식, GUI 사본 삭제)
-- [ ] **Phase 4.1 `/notch` CLI (미완)**
-- [ ] **Phase 4.2 `/tm save` CLI (미완 — 4.2 상세 표의 어댑터로 구현할 것)**
+- [x] Phase 4.1 `/notch add|list|del` CLI + `HostState` 영속화 (`notches` 배열, 상한 32)
+- [x] Phase 4.2 `/tm save <ch> [sec_ago]` CLI — 4.2 상세 표의 어댑터로 구현
+      (freeze_idx=current_fft_idx → tm_offset=sec_ago → `tm_update_display()` → selected_ch → `tm_rec_start()`,
+       실패 시 selected_ch 원복. TM IQ off / 미션 IDLE / 이미 녹음중 / 비활성 채널은 사유를 찍고 거절)
 - [ ] Phase 5 선택 (별도 커밋)
 
 ## 검증 결과 (`v13.20.0` 시점)

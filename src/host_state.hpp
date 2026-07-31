@@ -33,6 +33,12 @@ struct ChanSnap {
     float    det_s = 0, det_e = 0;   // 탐색 대역 (s/e 는 lock 중이면 좁아진 현재 폭)
 };
 
+// 노치필터 (파워스펙트럼에서 특정 대역을 표시/스컬치 계산에서 제외).
+// CLI 는 /notch 로 만들고, 재시작해도 남아야 한다 — 노치는 보통 상시 존재하는
+// 스퍼/간섭원을 가리려고 거는 것이라 매번 다시 잡게 하면 쓸모가 없다.
+struct NotchSnap { float lo = 0, hi = 0; };
+static constexpr int MAX_NOTCHES = 32;
+
 struct Snapshot {
     bool     ok = false;             // 파일이 있고 파싱됨
     float    cf_mhz = 0;
@@ -47,6 +53,9 @@ struct Snapshot {
     // 값만 보고는 구분할 수 없다. 키를 실제로 봤는지 따로 기록한다.
     bool        has_df_enable_control = false;
     PktDfConfig df{};      // 전체 DF 설정. 필드가 늘어도 여기만 손대면 된다.
+    // 노치. 구버전 파일엔 없으므로 n_notches=0 → 아무것도 복원하지 않는다.
+    int       n_notches = 0;
+    NotchSnap notches[MAX_NOTCHES];
 };
 
 // 현재 v 의 persistent 상태를 station 별 파일에 기록 (tmp+rename 으로 원자적).
@@ -65,5 +74,8 @@ void apply_channels(FFTViewer& v, const Snapshot& st);
 // DF 설정 복원. 채널과 분리한 이유는 SDR 백엔드와 무관하게 항상 적용해야 하기
 // 때문이다 (Kraken 이 아니어도 설정은 보존된다).
 void apply_df(FFTViewer& v, const Snapshot& st);
+
+// 노치 복원. DF 와 같은 이유로 채널과 분리한다 — 하드웨어·채널과 무관하다.
+void apply_notches(FFTViewer& v, const Snapshot& st);
 
 } // namespace HostState

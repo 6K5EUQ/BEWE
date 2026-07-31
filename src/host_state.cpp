@@ -94,6 +94,25 @@ void save(const FFTViewer& v, const std::string& station){
         out += dmods;          // 모듈 id 는 안전 문자 (escaping 불필요)
         out += "\"}";
     }
+    out += "\n  ],\n";
+
+    // 노치 — 순수 대역 목록. EMA 상태(lo_lvl 등)는 렌더가 매 프레임 다시 잡으므로
+    // 저장하지 않는다.
+    out += "  \"notches\": [\n";
+    {
+        std::lock_guard<std::mutex> lk(const_cast<FFTViewer&>(v).notches_mtx);
+        bool nfirst = true;
+        int written = 0;
+        for(const auto& n : v.notches){
+            if(written >= MAX_NOTCHES) break;
+            if(!nfirst) out += ",\n";
+            nfirst = false;
+            snprintf(buf, sizeof(buf), "    {\"lo\":%.6f,\"hi\":%.6f}",
+                     n.freq_lo_mhz, n.freq_hi_mhz);
+            out += buf;
+            written++;
+        }
+    }
     out += "\n  ]\n}\n";
 
     std::string dir = BEWEPaths::data_dir();
@@ -146,6 +165,24 @@ Snapshot load(const std::string& station){
         else if(key=="df_fft_size"){    double d=0; js.read_number(d); st.df.fft_size=(uint16_t)d;     st.has_df=true; }
         else if(key=="df_max_frames"){  double d=0; js.read_number(d); st.df.max_frames=(uint8_t)d;    st.has_df=true; }
         else if(key=="df_enable_control"){double d=0;js.read_number(d);st.df.enable_control=(uint8_t)d;st.has_df=true; st.has_df_enable_control=true; }
+        else if(key=="notches"){
+            if(!js.consume('[')) break;
+            while(!js.peek(']')){
+                if(!js.consume('{')) break;
+                NotchSnap n;
+                std::string k;
+                while(js.read_key(k)){
+                    if(k=="lo"){ double d=0; js.read_number(d); n.lo=(float)d; }
+                    else if(k=="hi"){ double d=0; js.read_number(d); n.hi=(float)d; }
+                    else { double d; js.read_number(d); }
+                    if(js.peek('}')) break;
+                }
+                js.consume('}');
+                if(st.n_notches < MAX_NOTCHES && n.hi > n.lo)
+                    st.notches[st.n_notches++] = n;
+            }
+            js.consume(']');
+        }
         else if(key=="channels"){
             if(!js.consume('[')) break;
             while(!js.peek(']')){
@@ -229,6 +266,10 @@ uint64_t fingerprint(const FFTViewer& v){
         h = mix(h, f2u(ch.sq_threshold.load()));
         for(int k=0;k<32 && ch.owner[k]; k++) h = mix(h, (uint64_t)(unsigned char)ch.owner[k]);
     }
+    {   // 노치 추가/삭제도 저장 트리거
+        std::lock_guard<std::mutex> lk(const_cast<FFTViewer&>(v).notches_mtx);
+        for(const auto& n : v.notches){ h = mix(h, f2u(n.freq_lo_mhz)); h = mix(h, f2u(n.freq_hi_mhz)); }
+    }
     // 디코드 모듈 on/off 변경도 감지 → 토글 시 저장 트리거
     for(const auto& m : bewe_modules()){
         if(!m.target_modes) continue;
@@ -310,5 +351,18 @@ void apply_df(FFTViewer& v, const Snapshot& st){
     if(!st.has_df_enable_control) d.enable_control = 1;
     const_cast<Snapshot&>(st).df = d;
     v.df_set_cfg(st.df);
+}
+
+void apply_notches(FFTViewer& v, const Snapshot& st){
+    if(!st.ok || st.n_notches <= 0) return;
+    std::lock_guard<std::mutex> lk(v.notches_mtx);
+    v.notches.clear();
+    for(int i=0;i<st.n_notches;i++){
+        FFTViewer::NotchFilter n;
+        n.freq_lo_mhz = st.notches[i].lo;
+        n.freq_hi_mhz = st.notches[i].hi;
+        v.notches.push_back(n);   // EMA 상태는 기본값 — 첫 프레임에 스스로 잡는다
+    }
+    bewe_log_push(0,"[HostState] restored %d notch(es)\n", st.n_notches);
 }
 } // namespace HostState

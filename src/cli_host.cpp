@@ -769,6 +769,9 @@ void run_cli_host(){
     // DF 설정은 initialize() 보다 먼저 넣어야 한다 — Kraken 백엔드가 기동할 때
     // 이 설정으로 엔진을 띄우기 때문. 채널 복원(apply_channels)보다 이르다.
     HostState::apply_df(v, saved_state);
+    // 노치도 캡처 시작 전에 넣는다 — 첫 프레임부터 스컬치 계산이 제외 대역을 알아야
+    // 한다 (안 그러면 상시 스퍼가 첫 캘리브레이션에 섞여 임계가 올라간다).
+    HostState::apply_notches(v, saved_state);
     if(saved_state.ok){
         if(saved_state.cf_mhz >= 0.1f && saved_state.cf_mhz <= 6000.f) cf = saved_state.cf_mhz;
         if(saved_state.sr_msps >= 0.1f && saved_state.sr_msps <= 61.44f) init_sr = saved_state.sr_msps;
@@ -3057,6 +3060,99 @@ void run_cli_host(){
                     bewe_log_push(0,"  Unknown /ch subcommand. Try: /ch help\n");
                 }
                 fflush(stdout);
+            } else if(line == "/notch" || line.rfind("/notch ", 0) == 0){
+                // /notch add <lo_MHz> <hi_MHz>  /  /notch list  /  /notch del <n>
+                // 노치는 순수 로컬 표시/스컬치 제외 대역이다 — 와이어에 없다(JOIN 은
+                // 자기 화면에 자기 노치를 건다). HostState 에 저장돼 재시작에도 남는다.
+                std::string sub = line.size() > 6 ? line.substr(6) : "";
+                while(!sub.empty() && sub.front() == ' ') sub.erase(sub.begin());
+                if(sub.empty() || sub == "help"){
+                    bewe_log_push(0,"  Usage: /notch add <lo_MHz> <hi_MHz>\n");
+                    bewe_log_push(0,"         /notch list\n");
+                    bewe_log_push(0,"         /notch del <n>\n");
+                } else if(sub.rfind("add", 0) == 0){
+                    float lo=0, hi=0;
+                    if(sscanf(sub.c_str()+3, "%f %f", &lo, &hi) != 2){
+                        bewe_log_push(0,"  Usage: /notch add <lo_MHz> <hi_MHz>\n");
+                    } else {
+                        if(lo > hi){ float t=lo; lo=hi; hi=t; }
+                        if(lo < 0.f || hi > 6000.f || hi - lo < 1e-6f){
+                            bewe_log_push(0,"  Invalid range: %.6f ~ %.6f MHz\n", lo, hi);
+                        } else {
+                            std::lock_guard<std::mutex> lk(v.notches_mtx);
+                            if((int)v.notches.size() >= HostState::MAX_NOTCHES){
+                                bewe_log_push(0,"  Notch limit reached (max %d)\n", HostState::MAX_NOTCHES);
+                            } else {
+                                FFTViewer::NotchFilter n;
+                                n.freq_lo_mhz = lo; n.freq_hi_mhz = hi;
+                                v.notches.push_back(n);
+                                bewe_log_push(0,"[CMD:CLI] notch%d add %.6f ~ %.6f MHz (%.2f kHz)\n",
+                                              (int)v.notches.size()-1, lo, hi, (hi-lo)*1e3f);
+                            }
+                        }
+                    }
+                } else if(sub == "list"){
+                    std::lock_guard<std::mutex> lk(v.notches_mtx);
+                    if(v.notches.empty()) bewe_log_push(0,"  No notches.\n");
+                    for(size_t i=0;i<v.notches.size();i++)
+                        bewe_log_push(0,"  notch%d  %.6f ~ %.6f MHz  (%.2f kHz)\n",
+                                      (int)i, v.notches[i].freq_lo_mhz, v.notches[i].freq_hi_mhz,
+                                      (v.notches[i].freq_hi_mhz - v.notches[i].freq_lo_mhz)*1e3f);
+                } else if(sub.rfind("del", 0) == 0){
+                    int idx=-1;
+                    std::lock_guard<std::mutex> lk(v.notches_mtx);
+                    if(sscanf(sub.c_str()+3, "%d", &idx) != 1 || idx < 0 || idx >= (int)v.notches.size()){
+                        bewe_log_push(0,"  Usage: /notch del <n>  (0~%d)\n", (int)v.notches.size()-1);
+                    } else {
+                        v.notches.erase(v.notches.begin() + idx);
+                        bewe_log_push(0,"[CMD:CLI] notch%d deleted\n", idx);
+                    }
+                } else {
+                    bewe_log_push(0,"  Unknown /notch subcommand. Try: /notch help\n");
+                }
+                fflush(stdout);
+            } else if(line == "/tm" || line.rfind("/tm ", 0) == 0){
+                // /tm save <ch> [sec_ago] — TM 롤링 IQ 버퍼에서 과거 구간을 잘라 녹음.
+                // GUI 는 스페이스바로 뷰를 얼리고 R 을 누르지만 CLI 엔 뷰가 없다.
+                // 그 뷰 상태(freeze idx / offset / 선택 채널)를 인자로 대신 세운다.
+                std::string sub = line.size() > 3 ? line.substr(3) : "";
+                while(!sub.empty() && sub.front() == ' ') sub.erase(sub.begin());
+                if(sub.empty() || sub == "help" || sub.rfind("save", 0) != 0){
+                    bewe_log_push(0,"  Usage: /tm save <ch> [sec_ago]   (ch = /ch list index, default 0s = live)\n");
+                } else {
+                    int ch = -1; float sec_ago = 0.f;
+                    int na = sscanf(sub.c_str()+4, "%d %f", &ch, &sec_ago);
+                    if(na < 1 || ch < 0 || ch >= MAX_CHANNELS){
+                        bewe_log_push(0,"  Usage: /tm save <ch> [sec_ago]  (ch 0~%d)\n", MAX_CHANNELS-1);
+                    } else if(!v.channels[ch].filter_active){
+                        bewe_log_push(0,"  CH%d not active\n", ch);
+                    } else if(!v.tm_iq_on.load() || !v.tm_iq_file_ready){
+                        bewe_log_push(0,"  TM IQ rolling is off - nothing buffered (JOIN can toggle it)\n");
+                    } else if(v.mission_state != Mission::State::ACTIVE){
+                        bewe_log_push(0,"  No ACTIVE mission - recordings have nowhere to go\n");
+                    } else if(v.rec_on.load()){
+                        bewe_log_push(0,"  Already recording (CH%d) - stop it first\n", v.rec_ch);
+                    } else {
+                        if(sec_ago < 0.f) sec_ago = 0.f;
+                        // GUI 의 스페이스바 진입과 같은 상태를 만든다: 지금을 freeze 로
+                        // 잡고 tm_update_display 가 offset->display_idx 를 계산하게 한다.
+                        v.tm_freeze_idx = v.current_fft_idx;
+                        v.tm_offset     = sec_ago;
+                        v.tm_update_display();
+                        int prev_sel = v.selected_ch;
+                        v.selected_ch = ch;
+                        bool ok = v.tm_rec_start();
+                        if(!ok){
+                            v.selected_ch = prev_sel;
+                            bewe_log_push(2,"  TM save refused (requested %.1fs ago, available %.1fs)\n",
+                                          sec_ago, v.tm_max_sec);
+                        } else {
+                            bewe_log_push(0,"[CMD:CLI] TM save CH%d %.1fs ago (window %.1fs)\n",
+                                          ch, v.tm_offset, v.tm_max_sec);
+                        }
+                    }
+                }
+                fflush(stdout);
             } else if(line.rfind("/mission", 0) == 0){
                 // /mission start [comment]  /  /mission end  /  /mission status
                 // 채팅 경로와 동일한 헬퍼를 쓴다 (동작 어긋남 방지).
@@ -3078,6 +3174,10 @@ void run_cli_host(){
                 bewe_log_push(0,"  /ch add <CF> <BW> [mode] - Create channel filter (CF MHz, BW kHz, mode none|am|fm)\n");
                 bewe_log_push(0,"  /ch list         - List active channel filters\n");
                 bewe_log_push(0,"  /ch del <n>      - Delete channel filter n\n");
+                bewe_log_push(0,"  /notch add <lo> <hi> - Mask a band (MHz) from display + squelch\n");
+                bewe_log_push(0,"  /notch list      - List notches\n");
+                bewe_log_push(0,"  /notch del <n>   - Delete notch n\n");
+                bewe_log_push(0,"  /tm save <ch> [sec_ago] - Save TM rolling IQ for a channel\n");
                 bewe_log_push(0,"  /mission start   - Begin a new mission\n");
                 bewe_log_push(0,"  /mission end     - End active mission\n");
                 bewe_log_push(0,"  /mission status  - Show current mission state\n");
