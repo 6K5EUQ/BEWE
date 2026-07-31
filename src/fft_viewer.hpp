@@ -1,7 +1,11 @@
 #pragma once
 #include "config.hpp"
 #include "bewe_paths.hpp"
-#include "net_server.hpp"
+#ifdef BEWE_HOST_BUILD
+#include "net_server.hpp"   // HOST 전용. JOIN(GUI) 빌드는 NetServer 를 아예 모른다 —
+                            // 이 가드가 서버 코드의 GUI 재유입을 컴파일 단계에서 막는다.
+                            // (net_protocol/channel/config 는 바로 아래 net_client 가 공급.)
+#endif
 #include "net_client.hpp"
 #include "hw_config.hpp"
 #include "channel.hpp"
@@ -699,7 +703,9 @@ public:
     std::atomic<bool> spectrum_pause{false};
 
     // ── Network ──────────────────────────────────────────────────────────
-    NetServer*  net_srv   = nullptr;  // HOST 모드
+#ifdef BEWE_HOST_BUILD
+    NetServer*  net_srv   = nullptr;  // HOST 모드 (JOIN 빌드엔 존재하지 않는다)
+#endif
     NetClient*  net_cli   = nullptr;  // CONNECT 모드
     bool        remote_mode = false;  // true = CONNECT 모드 (하드웨어 없음)
     char        host_name[32] = {};   // 접속한 유저 ID (표시용)

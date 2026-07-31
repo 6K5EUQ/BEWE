@@ -76,15 +76,13 @@ pid_t spawn_session_child(const std::string& mode,
     return pid;
 }
 
-void reap_finished_children(std::vector<ChildSession>& sessions,
-                            pid_t&                     active_host_pid){
+void reap_finished_children(std::vector<ChildSession>& sessions){
     for(;;){
         int status = 0;
         pid_t pid = waitpid(-1, &status, WNOHANG);
         if(pid <= 0) break;
         for(auto it = sessions.begin(); it != sessions.end(); ++it){
             if(it->pid == pid){
-                if(active_host_pid == pid) active_host_pid = 0;
                 sessions.erase(it);
                 break;
             }

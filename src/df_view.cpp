@@ -9,7 +9,7 @@
 // HOST 로 요청만 보낸다 — 측정을 실제로 하는 쪽과 화면이 어긋나지 않게.
 
 #include "fft_viewer.hpp"
-#include "net_server.hpp"
+
 #include "imgui.h"
 #include <cmath>
 #include <cstdio>
@@ -155,18 +155,8 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     help("When on, changing the frequency in BEWE sends FREQ to heimdall (:5001).\n"
          "heimdall then recalibrates from scratch - a few seconds with no DF.\n"
          "Sample rate is owned by daq_chain_config.ini and cannot be set here.");
-    if(!is_join && L.link > 0){
-        static float retune_mhz = 0.f;
-        if(retune_mhz <= 0.f) retune_mhz = (float)L.daq_cf_mhz;
-        ImGui::SetNextItemWidth(160);
-        ImGui::InputFloat("center (MHz)", &retune_mhz, 0.1f, 1.0f, "%.4f");
-        ImGui::SameLine();
-        if(ImGui::Button("Apply##daqfreq") && retune_mhz > 0.f)
-            v.set_frequency(retune_mhz, false);
-        ImGui::SameLine();
-        if(ImGui::Button("Now##daqfreqnow")) retune_mhz = (float)L.daq_cf_mhz;
-        ImGui::TextDisabled("  the BEWE frequency box does the same thing");
-    }
+    // (DAQ 직접 재튠 위젯은 HOST 전용이었다. GUI 는 JOIN 뿐이라 삭제 —
+    //  JOIN 은 상단 주파수 박스가 HOST 로 SET_FREQ 를 보내고 HOST 가 DAQ 를 돌린다.)
 
     // ── 배열 기하 ───────────────────────────────────────────────────────
     ImGui::Dummy(ImVec2(0,8)); ImGui::Separator();

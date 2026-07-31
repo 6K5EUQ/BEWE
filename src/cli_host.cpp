@@ -2022,6 +2022,19 @@ void run_cli_host(){
                     st.channel_count = (uint8_t)cnt;
                     st.bat_pct = v.sysmon_bat.load();
                 });
+                // Central 상태페이지의 live-HIST 정보. 예전엔 GUI-HOST 만 이걸 걸어서,
+                // 무인 기지(cli_host)는 상태페이지에 HIST 가 비어 보였다.
+                central_cli.set_hist_state_fn([](CentralHostHistInfo& hi) -> bool {
+                    PktLwfLiveStart lst{};
+                    if(!LongWaterfall::snapshot_live_start(lst)) return false;
+                    memcpy(hi.filename, lst.filename, sizeof(hi.filename));
+                    hi.start_utc_unix = lst.start_utc_unix;
+                    hi.center_freq_hz = lst.center_freq_hz;
+                    hi.sample_rate_hz = (uint32_t)lst.sample_rate_hz;
+                    hi.fft_size       = lst.fft_size;
+                    hi.row_rate_hz    = lst.row_rate_hz;
+                    return true;
+                });
                 if(rfd >= 0)
                     bewe_log_push(0,"[BEWE CLI] Central relay connected\n");
                 else

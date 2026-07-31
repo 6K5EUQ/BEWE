@@ -23,8 +23,7 @@ pid_t spawn_session_child(const std::string& mode,
 
 // Reap any child processes that have exited (non-blocking). Removes them
 // from `sessions` and clears `active_host_pid` if the dead child was HOST.
-void reap_finished_children(std::vector<ChildSession>& sessions,
-                            pid_t&                     active_host_pid);
+void reap_finished_children(std::vector<ChildSession>& sessions);
 
 // Send SIGTERM to all live children. Used when the parent globe exits.
 void kill_all_children(const std::vector<ChildSession>& sessions);

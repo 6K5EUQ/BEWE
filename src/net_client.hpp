@@ -238,7 +238,9 @@ public:
     }
 
     // ── Chat ──────────────────────────────────────────────────────────────
-    struct ChatMsg { char from[32]; char msg[256]; };
+    // is_error 는 와이어에 없다 — 로컬에서 만든 시스템/거절 메시지를 빨갛게
+    // 그리기 위한 표시용 필드다 (수신 CHAT 패킷은 항상 false).
+    struct ChatMsg { char from[32]; char msg[256]; bool is_error = false; };
     std::mutex              chat_mtx;
     std::vector<ChatMsg>    chat_log;
     static constexpr int    CHAT_LOG_MAX = 200;

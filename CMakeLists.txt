@@ -150,55 +150,39 @@ else()
         ${IMGUI_BACKENDS_PATH}/imgui_impl_opengl3.cpp
     )
 
+    # GUI = JOIN 전용. HOST 쪽 소스(SDR 백엔드·NetServer·복조·녹음 엔진·DF 엔진)는
+    # 여기 없다 — 링크 단계에서 아예 불가능하게 만드는 것이 이 분리의 핵심이다.
+    # (HOST 는 build-cli 의 cli_host.cpp 하나뿐이다.)
     add_executable(BEWE
         src/main.cpp
         src/fft_viewer.cpp
-        src/bladerf_io.cpp
-        src/demod.cpp
         src/module_registry.cpp
         src/demod_panel.cpp
         ${BEWE_MODULE_SRCS}
         ${MBELIB_SRCS}
         src/iq_record.cpp
-        src/sched_record.cpp
         src/mission.cpp
-        src/mission_push.cpp
-        src/hist_check.cpp
         src/audio.cpp
         src/audio_playback.cpp
         src/ui.cpp
         src/timemachine.cpp
-        src/region_save.cpp
         src/sa_compute.cpp
         src/eid_compute.cpp
-        src/rtlsdr_io.cpp
-        src/hw_detect.cpp
         src/login.cpp
-        src/net_server.cpp
         src/net_client.cpp
-        src/net_stream.cpp
         src/globe.cpp
         src/sat_tle.cpp
         src/SGP4.cpp
         src/MathTimeLib.cpp
         src/sat_view.cpp
         src/central_client.cpp
-        src/host_band_plan.cpp
         src/host_band_categories.cpp
         src/long_waterfall.cpp
         src/long_waterfall_view.cpp
         src/sig_lib_view.cpp
         src/mission_view.cpp
-        src/pluto_io.cpp
-        src/kraken_io.cpp
         src/df_view.cpp
-        src/df/heimdall_client.cpp
-        src/df/df_linalg.cpp
-        src/df/df_manifold.cpp
-        src/df/df_xspec.cpp
-        src/df/df_estimator.cpp
-        src/df/df_engine.cpp
-        src/df/df_selftest.cpp
+        src/df_join.cpp
         src/session_spawn.cpp
         ${IMGUI_SOURCES}
     )
