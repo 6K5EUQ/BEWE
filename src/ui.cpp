@@ -5158,9 +5158,8 @@ void run_streaming_viewer(){
         if(right_visible && !fs_overlay_active){
             float rpx  = vdiv_x + vdiv_w;
             float rp_w = disp_w - rpx;
-            const float SUBBAR_H = TOPBAR_H * 0.5f;
-            float rp_content_y = content_y + SUBBAR_H;
-            float rp_content_h = content_h - SUBBAR_H;
+            float rp_content_y = content_y;
+            float rp_content_h = content_h;
 
             // right_panel_x 갱신
             v.right_panel_x = rpx;
@@ -5174,22 +5173,6 @@ void run_streaming_viewer(){
 
             // ── SA 픽셀 준비되면 GL 업로드 ──────────────────────────────
             if(v.sa_pixel_ready.load()){ v.sa_upload_texture(); v.sa_anim_timer=0.0f; }
-
-            // ── 서브바 배경 ──────────────────────────────────────────────
-            dl->AddRectFilled(ImVec2(rpx,content_y),ImVec2(disp_w,rp_content_y),IM_COL32(35,35,40,255));
-            dl->AddLine(ImVec2(rpx,rp_content_y-1),ImVec2(disp_w,rp_content_y-1),IM_COL32(60,60,70,255),1);
-
-            float btn_y = content_y + (SUBBAR_H - ImGui::GetFontSize())/2;
-            auto subbar_btn = [&](float bx, const char* lbl, bool active, ImU32 col_on) -> bool {
-                ImVec2 tsz = ImGui::CalcTextSize(lbl);
-                bool hov = io.MousePos.x>=bx && io.MousePos.x<=bx+tsz.x+2 &&
-                           io.MousePos.y>=content_y && io.MousePos.y<rp_content_y
-                           && !mouse_blocked;
-                ImU32 col = active ? col_on
-                          : (hov ? IM_COL32(160,160,180,255) : IM_COL32(110,110,130,255));
-                dl->AddText(ImVec2(bx, btn_y), col, lbl);
-                return hov && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
-            };
 
             // 공통: 시스템 상태 + 안테나 렌더링 (STATUS에서 호출)
             auto draw_system_status = [&](FFTViewer& vv, const char* tag){
@@ -5349,12 +5332,6 @@ void run_streaming_viewer(){
                 }
             };
 
-            // ── STATUS 버튼 (v4.0: ARCHIVE/SCHED는 mission 창으로 통합 — 버튼 제거) ──
-            float btn_x = rpx + 6;
-            if(subbar_btn(btn_x, "STATUS", stat_open, IM_COL32(80,255,160,255))){
-                stat_open = !stat_open;
-                if(stat_open) v.sched_panel_open = false;
-            }
             v.sched_panel_open = false;
 
             // ── 패널 콘텐츠 영역 ─────────────────────────────────────────
@@ -5468,16 +5445,7 @@ void run_streaming_viewer(){
                     ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar|
                     ImGuiWindowFlags_NoDecoration);
 
-                // ── 탭 바 ─────────────────────────────────────────────────
-                ImGui::PushStyleColor(ImGuiCol_Tab,            ImVec4(0.12f,0.12f,0.16f,1.f));
-                ImGui::PushStyleColor(ImGuiCol_TabHovered,     ImVec4(0.20f,0.30f,0.45f,1.f));
-                ImGui::PushStyleColor(ImGuiCol_TabActive,      ImVec4(0.15f,0.40f,0.65f,1.f));
-                if(ImGui::BeginTabBar("##stat_tabs")){
-
-                // ══════════════════════════════════════════════════════════
-                // ── STATUS 탭 ─────────────────────────────────────────────
-                // ══════════════════════════════════════════════════════════
-                if(ImGui::BeginTabItem("STATUS")){
+                {
                     ImGui::BeginChild("##link_scroll", ImVec2(0,0), false,
                         ImGuiWindowFlags_HorizontalScrollbar);
 
@@ -6148,12 +6116,7 @@ void run_streaming_viewer(){
                     ImGui::Spacing();
 
                     ImGui::EndChild(); // ##link_scroll
-                    ImGui::EndTabItem();
-                } // LINK tab
-
-                ImGui::EndTabBar();
-                } // BeginTabBar
-                ImGui::PopStyleColor(3); // Tab colors
+                }
 
                 ImGui::End();
                 ImGui::PopStyleColor();
