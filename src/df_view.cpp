@@ -193,6 +193,7 @@ struct FixSolution {
     double lat = 0, lon = 0;      // lon: 동경 양수
     double maj_km = 0, min_km = 0, orient_deg = 0;
     double sig_deg_used = 0;      // 이 fix 에 실제로 쓴 평균 방위 불확도 (표시용)
+    bool   crossing = false;      // 실제 교차인가 (false = 종방향은 추정 못 함)
 };
 
 // ── 측정 하나의 방위 불확도 (도) ──────────────────────────────────────────
@@ -225,9 +226,10 @@ double df_bearing_sigma_deg(const FFTViewer::DFFix& f){
     return std::min(std::max(sig, kFloorDeg), kMaxDeg);
 }
 
-FixSolution df_solve_fix(const FFTViewer::DFFix* const* sel, int n){
+// lob_km: 광선 표시 길이. LOB 이 하나뿐일 때 **종방향 사전분포**로 쓴다 (아래 참조).
+FixSolution df_solve_fix(const FFTViewer::DFFix* const* sel, int n, double lob_km){
     FixSolution out;
-    if(n < 2) return out;
+    if(n < 1) return out;
     if(n > FFTViewer::DF_HIST_MAX) n = FFTViewer::DF_HIST_MAX;
 
     // 좌표가 없는 fix 는 통째로 제외한다. 지도의 광선/마커도 같은 조건으로
@@ -245,20 +247,17 @@ FixSolution df_solve_fix(const FFTViewer::DFFix* const* sel, int n){
         ssig[m] = df_bearing_sigma_deg(*sel[i]) * D2R;
         m++;
     }
-    if(m < 2) return out;
+    if(m < 1) return out;
 
-    // 기지가 전부 같은 자리면 교점이 기하학적으로 의미가 없다. 그래도 풀면
-    // 방위가 조금씩 다른 LOB 들이 기지 자신에서 만나 "기지 위에 표적이 있다"는
-    // 자신만만한 가짜 fix 가 나온다 — 정지 기지에서 같은 채널을 반복 측정하는
-    // 가장 흔한 사용법에서 바로 나온다. 서로 떨어진 위치가 최소 2곳 필요하다.
-    {
-        bool distinct = false;
-        for(int i = 1 ; i < m && !distinct; i++)
-            for(int j = 0; j < i && !distinct; j++)
-                if(std::abs(slat[i]-slat[j]) > 1e-4 || std::abs(slon[i]-slon[j]) > 1e-4)
-                    distinct = true;
-        if(!distinct) return out;
-    }
+    // 기지가 전부 같은 자리인가 (= 교차가 아예 없는가). 예전엔 여기서 포기했는데,
+    // 그러면 LOB 이 하나이거나 한 기지에서 반복 측정한 경우 아무것도 안 그렸다.
+    // 실제로는 **횡방향은 이미 제약돼 있다** — 모르는 건 선을 따라 얼마나 먼가뿐이다.
+    // 그 사실을 아주 길쭉한 타원으로 보여주는 게 맞다 (아래 종방향 사전분포).
+    bool distinct = false;
+    for(int i = 1 ; i < m && !distinct; i++)
+        for(int j = 0; j < i && !distinct; j++)
+            if(std::abs(slat[i]-slat[j]) > 1e-4 || std::abs(slon[i]-slon[j]) > 1e-4)
+                distinct = true;
 
     double lat0 = 0, lon0 = 0;
     for(int i = 0; i < m; i++){ lat0 += slat[i]; lon0 += slon[i]; }
@@ -282,6 +281,19 @@ FixSolution df_solve_fix(const FFTViewer::DFFix* const* sel, int n){
     }
     n = m;
 
+    // 실제 교차가 있는가 = 서로 다른 위치 + 방위가 유의하게 갈림. 없으면 종방향은
+    // 사전분포만으로 정해지므로, 중심을 광선 중점에 두어 타원이 선 위에 얹히게 한다.
+    bool crossing = distinct;
+    if(crossing){
+        double mx_ang = 0.0;
+        for(int i = 1; i < n; i++){
+            double da = std::fabs(sbrg[i] - sbrg[0]);
+            while(da > 180.0) da = 360.0 - da;
+            mx_ang = std::max(mx_ang, da);
+        }
+        if(mx_ang < 2.0) crossing = false;   // 사실상 평행 — 교점을 못 믿는다
+    }
+
     double ex = 0, ey = 0;
     double A[4] = {0,0,0,0};
     for(int pass = 0; pass < 3; pass++){
@@ -301,8 +313,29 @@ FixSolution df_solve_fix(const FFTViewer::DFFix* const* sel, int n){
             a11 += w*px[i]*px[i]; a12 += w*px[i]*py[i]; a22 += w*py[i]*py[i];
             b1  += w*px[i]*c;     b2  += w*py[i]*c;
         }
+
+        // ── 종방향 사전분포 ────────────────────────────────────────────────
+        // LOB 하나로 만든 A = w·ppᵀ 는 rank 1 이라 역행렬이 없다 (횡방향만 제약,
+        // 종방향은 완전 무제약). 예전엔 여기서 det≈0 을 보고 포기했는데, 그건
+        // "아무것도 모른다" 가 아니라 "선을 따라 어디인지만 모른다" 다 — 횡방향은
+        // 이미 방위 정밀도만큼 좁혀져 있다.
+        //
+        // 그래서 각 광선의 진행방향에 유한한 사전분포(표준편차 = 표시 길이의 절반)를
+        // 넣는다. 운용자가 정한 LOB 길이가 곧 "이 안 어딘가"라는 뜻이므로 자연스럽고,
+        // 결과는 횡으로 좁고 종으로 그 길이만큼 긴 타원이 된다.
+        // 교차가 실제로 있으면 그쪽 정보가 훨씬 강해 이 항은 무시할 만큼 묻힌다.
+        {
+            const double Lp = std::max(lob_km * 0.5, 1.0);
+            const double wp = 1.0 / (Lp * Lp);
+            for(int i = 0; i < n; i++){
+                const double cc = dx_[i]*sx[i] + dy_[i]*sy[i] + (crossing ? 0.0 : lob_km * 0.5);
+                a11 += wp*dx_[i]*dx_[i]; a12 += wp*dx_[i]*dy_[i]; a22 += wp*dy_[i]*dy_[i];
+                b1  += wp*dx_[i]*cc;     b2  += wp*dy_[i]*cc;
+            }
+        }
+
         const double det = a11*a22 - a12*a12;
-        if(std::abs(det) < 1e-9) return out;    // 거의 평행한 LOB — 교점이 무의미
+        if(std::abs(det) < 1e-12) return out;
         ex = ( a22*b1 - a12*b2) / det;
         ey = (-a12*b1 + a11*b2) / det;
         A[0]=a11; A[1]=a12; A[2]=a12; A[3]=a22;
@@ -315,6 +348,7 @@ FixSolution df_solve_fix(const FFTViewer::DFFix* const* sel, int n){
         const double t = (ex - sx[i])*dx_[i] + (ey - sy[i])*dy_[i];
         if(t <= 0.0) return out;   // 이 LOB 의 뒤쪽 — 교점 아님
     }
+    out.crossing = crossing;
 
     // 공분산 = A^-1. 2x2 대칭 고유분해로 1σ 반축.
     const double det = A[0]*A[3] - A[1]*A[2];
@@ -824,8 +858,8 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             }
         }
         // 교차 fix
-        if(selected.size() >= 2){
-            FixSolution fx = df_solve_fix(selected.data(), (int)selected.size());
+        if(!selected.empty()){
+            FixSolution fx = df_solve_fix(selected.data(), (int)selected.size(), lob_km);
             if(fx.ok){
                 const ImVec2 cp = P(fx.lat, fx.lon);
                 const double clat = std::cos(fx.lat * D2R);
@@ -882,13 +916,22 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 // 기본 줌에서 타원 자체가 1px 미만이라 **그 글로우가 곧 "동그라미"로
                 // 보인다** — 실제 오차 크기와 무관한 고정 크기 원이 오차타원 행세를
                 // 한다. 타원이 안 보일 만큼 작으면 작다는 사실이 보여야 맞다.
-                dl->AddLine(ImVec2(cp.x-7,cp.y), ImVec2(cp.x+7,cp.y), IM_COL32(255,240,160,230), 1.6f);
-                dl->AddLine(ImVec2(cp.x,cp.y-7), ImVec2(cp.x,cp.y+7), IM_COL32(255,240,160,230), 1.6f);
+                if(fx.crossing){
+                    dl->AddLine(ImVec2(cp.x-7,cp.y), ImVec2(cp.x+7,cp.y), IM_COL32(255,240,160,230), 1.6f);
+                    dl->AddLine(ImVec2(cp.x,cp.y-7), ImVec2(cp.x,cp.y+7), IM_COL32(255,240,160,230), 1.6f);
+                }
                 char lb[96];
                 // 라벨은 언제나 실제 95% 크기를 적는다 (화면에서 키웠든 아니든).
-                snprintf(lb, sizeof lb, "FIX %.4fN %.4fE  95%% %.2f x %.2f km  (%.1f deg)%s",
-                         fx.lat, fx.lon, maj_km, min_km, fx.sig_deg_used,
-                         tiny ? "  [<]" : "");
+                // 교차가 없으면 "FIX" 라고 쓰면 안 된다 — 위치가 정해진 게 아니라
+                // 선을 따라 어디인지만 모르는 상태다. 종방향 크기는 LOB 길이에서
+                // 온 가정값이므로 그렇게 읽히게 라벨을 나눈다.
+                if(fx.crossing)
+                    snprintf(lb, sizeof lb, "FIX %.4fN %.4fE  95%% %.2f x %.2f km  (%.1f deg)%s",
+                             fx.lat, fx.lon, maj_km, min_km, fx.sig_deg_used,
+                             tiny ? "  [<]" : "");
+                else
+                    snprintf(lb, sizeof lb, "LOB only  cross-track 95%% %.2f km  (%.1f deg)",
+                             min_km, fx.sig_deg_used);
                 dl->AddText(ImVec2(cp.x + 10, cp.y - 16), IM_COL32(255,240,160,240), lb);
             }
         }
