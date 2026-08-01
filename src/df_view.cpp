@@ -374,8 +374,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     static int    meas_ch    = 0;          // 0 = 자동(선택 채널)
     static uint32_t last_seq  = 0;    // 마지막으로 본 df_hist_seq (개수 아님)
     static int      last_vis_n = 0;   // 직전 프레임 가시행 수 (tail-follow 용)
-    static int64_t banner_until = 0;
-    static char   banner[96] = {};
     // 수동 LOB 입력 (다른 기지의 방위를 손으로 넣어 교차 fix 를 만든다).
     // 기지는 이름으로 기억한다 — 목록은 unordered_map 순회로 매 프레임 다시
     // 만들어지므로 인덱스를 붙들면 다른 기지를 가리키게 된다.
@@ -385,30 +383,14 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
 
     if(just_opened){ mv.big = false; }
 
-    // ── 거절/진단 배너 ────────────────────────────────────────────────────
-    // 예전엔 상세 사유가 LOG 오버레이로만 갔는데, LOG 는 DF 와 상호배타라 DF 를
-    // 닫아야만 이유를 읽을 수 있었다. 새 결과가 들어오면 여기 8초 띄운다.
-    // 감지 키는 개수가 아니라 push 시퀀스다 — df_hist_n 은 64 에서 포화하므로
-    // 링이 한 번 차고 나면 개수 비교는 영원히 거짓이 되고 배너가 죽는다.
-    if(v.df_hist_seq != last_seq){
-        if(v.df_hist_n > 0){
-            const FFTViewer::DFFix& f = v.df_hist_at(v.df_hist_n - 1);
-            // 수동 LOB 은 사용자가 방금 입력한 값이라 알릴 게 없다.
-            if(!f.manual_lob && (f.kind != 0 || f.note[0])){
-                snprintf(banner, sizeof banner, "CH%u  %s", (unsigned)f.dnum,
-                         f.note[0] ? f.note : "no result");
-                banner_until = now_ms_local() + 8000;
-            }
-        }
-        last_seq = v.df_hist_seq;
-    }
-    const bool banner_on = (banner[0] && now_ms_local() < banner_until);
+    // 새 결과 도착 감지 (tail-follow 판정용). 개수가 아니라 push 시퀀스로 본다 —
+    // df_hist_n 은 64 에서 포화하므로 링이 한 번 차면 개수 비교가 영원히 거짓이 된다.
+    if(v.df_hist_seq != last_seq) last_seq = v.df_hist_seq;
 
     // ══════════════════ 헤더 스트립 ══════════════════
     const float W  = ImGui::GetContentRegionAvail().x;
     const float Hh = ImGui::GetContentRegionAvail().y;
     const float HDR = 30.f;
-    const float BAN = banner_on ? 22.f : 0.f;
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f,0.12f,0.16f,1.f));
     ImGui::BeginChild("##df_hdr", ImVec2(W, HDR), false,
@@ -509,7 +491,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         ROWY();
         if(ImGui::Button("CLEAR", ImVec2(60,0))){
             v.df_hist_n = 0; v.df_hist_head = 0; sel.clear();
-            v.df_last_valid = false; banner[0] = 0;
+            v.df_last_valid = false;
             last_seq = v.df_hist_seq; last_vis_n = 0;
         }
         ImGui::SameLine(0, 4);
@@ -524,15 +506,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     ImGui::EndChild();
     ImGui::PopStyleColor();
 
-    if(banner_on){
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.22f,0.16f,0.05f,1.f));
-        ImGui::BeginChild("##df_ban", ImVec2(W, BAN), false, ImGuiWindowFlags_NoScrollbar);
-        ImGui::SetCursorPos(ImVec2(10, 2));
-        ImGui::TextColored(ImVec4(1.f,0.78f,0.25f,1.f), "%s", banner);
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-    }
-
     // Kraken 이 아닌 로컬 HOST 면 여기서 끝. (원인 + 조치라 정보다)
     if(!is_join && v.hw.type != HWType::KRAKEN){
         lob_popup = false;   // 여기서 소비 안 하면 다음에 열 때 팝업이 튀어나온다
@@ -545,7 +518,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     // 헤더/배너는 child 라 각각 뒤에 ItemSpacing 이 붙는다. 그만큼 빼지 않으면
     // 배너가 켜질 때 본문이 창 밖으로 밀려 아래가 잘린다.
     const float SPY = ImGui::GetStyle().ItemSpacing.y;
-    float body_h = Hh - HDR - BAN - SPY * (banner_on ? 2.f : 1.f);
+    float body_h = Hh - HDR - SPY;
     if(body_h < 120.f) body_h = 120.f;
 
     // ══════════════════ 가시 목록 (필터 + 정렬) ══════════════════
@@ -656,8 +629,13 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 {
                     const bool bad = (f.kind != 0) || f.imbalance || f.overdrive_mask;
                     ImVec4 nc = bad ? ImVec4(1.f,0.6f,0.35f,1.f) : ImVec4(0.65f,0.65f,0.65f,1.f);
+                    // 성공했는데 특별히 알릴 게 없으면 엔진이 note 에 "ok" 를 채운다
+                    // (status_text(Status::Ok)). 그건 방위·SNR 이 이미 말해주는 사실이라
+                    // 행마다 반복하면 정작 봐야 할 진단 문구가 묻힌다.
+                    const bool plain_ok = (f.kind == 0) && (strcmp(f.note, "ok") == 0);
                     char nb[96];
-                    snprintf(nb, sizeof nb, "%s%s", f.origin ? "[A] " : "", f.note);
+                    snprintf(nb, sizeof nb, "%s%s", f.origin ? "[A] " : "",
+                             plain_ok ? "" : f.note);
                     modview::cell_left(nb, &nc);
                 }
             }
@@ -753,7 +731,10 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         modview_map::MapPoint mp;
         mp.lat = sla + (half * std::cos(f.bearing_deg * D2R)) / KM_PER_DEG_LAT;
         mp.lon = slo + (half * std::sin(f.bearing_deg * D2R)) / (KM_PER_DEG_LAT * (clat > 0.05 ? clat : 0.05));
-        mp.heading = (float)f.bearing_deg;
+        // 진행방향 삼각형(AIS 선박 마커)을 쓰지 않는다. 방향은 LOB 광선이 이미
+        // 보여주고, 삼각형은 "그쪽으로 움직이는 접촉물"처럼 읽혀 오해를 준다 —
+        // 이 점은 표적 위치가 아니라 광선 위의 클릭 손잡이(LOB 중점)일 뿐이다.
+        mp.heading = -1.f;
         mp.id      = (uint64_t)f.t_end_ms;
         const bool is_sel = sel.selected(key_of(vis[p]));
         mp.selected = is_sel;
