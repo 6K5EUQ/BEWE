@@ -4322,6 +4322,27 @@ void run_streaming_viewer(){
                             && !v.lwf_modal_open && !v.sig_lib_panel_open
                             && !v.mission_modal_open && !v.demod_panel_open;
 
+        // ── F: DF 창 토글 ────────────────────────────────────────────────
+        // F 는 선택 채널의 FM 복조 토글이기도 하다 (아래 A/F 블록). 채널이
+        // 선택돼 있으면 그쪽이 우선이고, 선택이 없을 때만 DF 창을 여닫는다.
+        //
+        // main_kbd_active 블록 **밖**이어야 한다. 그 플래그는 df_panel_open 이면
+        // false 라, 안에 두면 F 로 열 수는 있어도 닫을 수가 없다.
+        if(!io.WantTextInput && !ImGui::IsAnyItemActive()
+           && !(sci >= 0 && v.channels[sci].filter_active)
+           && ImGui::IsKeyPressed(ImGuiKey_F, false)){
+            if(v.df_panel_open){
+                v.df_panel_open = false;
+            } else {
+                // 하단바 토글과 같은 상호배제 규칙 — 다른 전체영역 오버레이가
+                // 열려 있으면 열지 않는다 (bar_other_open(7) 과 동일 조건).
+                bool other = v.eid_panel_open || v.log_panel_open || v.lwf_modal_open
+                          || v.sig_lib_panel_open || v.mission_modal_open
+                          || v.demod_panel_open;
+                if(!other) v.df_panel_open = true;
+            }
+        }
+
         // ── FRZ / TM 토글 (P 키·스페이스바 = 하단바 FRZ·TM 클릭, 완전 동일 동작) ──
         // 키 핸들러와 하단바 양쪽에서 호출하므로 여기서 한 번만 정의한다.
         auto toggle_freeze = [&](){
@@ -4427,25 +4448,6 @@ void run_streaming_viewer(){
                 for(int k=0;k<10;k++)
                     if(ImGui::IsKeyPressed((ImGuiKey)(ImGuiKey_0+k), false)){ want = (k==0)?10:k; break; }
                 if(want > 0) v.df_request_by_display_num(want);
-            }
-            // ── F: DF 창 토글 ────────────────────────────────────────────
-            // F 는 선택 채널의 FM 복조 토글이기도 하다 (아래 A/F 블록). 채널이
-            // 선택돼 있으면 그쪽이 우선이고, 선택이 없을 때만 DF 창을 여닫는다.
-            // 패널이 열린 상태에서도 F 로 닫혀야 하므로 main_kbd_active 게이트
-            // 바깥에 둔다 (그 플래그는 오버레이가 열리면 false 다).
-            if(!io.WantTextInput && !ImGui::IsAnyItemActive()
-               && !(sci >= 0 && v.channels[sci].filter_active)
-               && ImGui::IsKeyPressed(ImGuiKey_F, false)){
-                if(v.df_panel_open){
-                    v.df_panel_open = false;
-                } else {
-                    // 하단바 토글과 같은 상호배제 규칙 — 다른 전체영역 오버레이가
-                    // 열려 있으면 열지 않는다 (bar_other_open(7) 과 동일 조건).
-                    bool other = v.eid_panel_open || v.log_panel_open || v.lwf_modal_open
-                              || v.sig_lib_panel_open || v.mission_modal_open
-                              || v.demod_panel_open;
-                    if(!other) v.df_panel_open = true;
-                }
             }
             // (T 키 매핑 제거 — 사용자 요청. IQ rolling 은 항상 HOST 측에서 자동 관리)
             // 스페이스바: TM 토글 (진입/해제)

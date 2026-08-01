@@ -452,7 +452,11 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     };
 
     // ══════════════════ 좌: 이력표 | 스플리터 | 우: 지도 ══════════════════
-    const float setup_w = setup_open ? 340.f : 0.f;
+    // 이 프레임의 레이아웃에 쓸 값. SETUP 버튼은 이 계산보다 **뒤**에서 눌리므로,
+    // 누른 그 프레임에 setup_open 을 바로 읽으면 지도 폭은 옛 값(패널 없음)인데
+    // 패널만 그려져 지도 위에 겹친다. 토글은 다음 프레임부터 반영한다.
+    const bool  setup_shown = setup_open;
+    const float setup_w = setup_shown ? 340.f : 0.f;
     float tw, mapw;
     if(mv.big){ tw = 0.f; mapw = W - setup_w - (setup_w > 0 ? 4.f : 0.f); }
     else {
@@ -849,7 +853,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     }
 
     // ══════════════════ 설정 창 (기본 닫힘) ══════════════════
-    if(setup_open){
+    if(setup_shown){
         ImGui::SameLine(0, 4);
         // JOIN 이 HOST 정본을 아직 못 받았으면 못 만지게 막는다. 안 막으면
         // df_default_pkt 하드코딩 기본값이 첫 조작에서 통째로 HOST 를 덮어쓴다
