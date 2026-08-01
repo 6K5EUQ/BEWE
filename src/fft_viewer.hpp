@@ -1003,6 +1003,10 @@ public:
     //   df_set_cfg : HOST/LOCAL 은 즉시 적용 + 방송, JOIN 은 HOST 로 요청만
     void df_get_cfg(PktDfConfig& out) const;
     void df_set_cfg(const PktDfConfig& c);
+    // KrakenSDR 튜너 게인 (RTL 이산 스텝 인덱스). 5채널 동시 적용이고, DAQ 가
+    // 받으면 재캘리브레이션을 돌려 수 초간 DF 가 멈춘다. HOST(CLI) 전용 —
+    // JOIN 은 df_set_cfg 의 gain_idx 로 HOST 에 요청만 한다.
+    bool df_set_gain_index(int idx, char* err, size_t errn);
     // 설정이 바뀌었을 때 HOST 가 정본을 뿌린다 (JOIN 접속 시에도).
     void df_broadcast_cfg() const;
     double df_snr_threshold() const;   // 편의 접근 (수락 규칙 표시용)

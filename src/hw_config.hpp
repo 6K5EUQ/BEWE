@@ -53,6 +53,22 @@ struct HWConfig {
         372, 386, 402, 421, 434, 439, 445, 480, 496
     };
 
+    // tenths → 가장 가까운 이산 스텝의 **인덱스** (와이어로 1바이트에 싣는 값).
+    static int rtl_gain_index(int tenths){
+        int best = 0, best_diff = abs(tenths - RTL_GAINS_TENTHS[0]);
+        for(int i=1;i<RTL_GAIN_STEPS;i++){
+            int d = abs(tenths - RTL_GAINS_TENTHS[i]);
+            if(d < best_diff){ best_diff=d; best=i; }
+        }
+        return best;
+    }
+    // 인덱스 → tenths (범위 밖이면 클램프)
+    static int rtl_gain_tenths_at(int idx){
+        if(idx < 0) idx = 0;
+        if(idx >= RTL_GAIN_STEPS) idx = RTL_GAIN_STEPS - 1;
+        return RTL_GAINS_TENTHS[idx];
+    }
+
     // 연속 dB 값 → RTL-SDR 가장 가까운 이산값(0.1dB 단위 정수) 반환
     static int rtl_snap_gain(float db){
         int tenths = (int)(db * 10.0f + 0.5f);

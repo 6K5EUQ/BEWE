@@ -30,6 +30,10 @@ bool FFTViewer::df_measuring()    const { return false; }
 void FFTViewer::df_stop_engine()        {}
 
 bool FFTViewer::df_submit(double, double, int, int, bool){ return false; }
+bool FFTViewer::df_set_gain_index(int, char* err, size_t errn){
+    if(err) snprintf(err, errn, "no DF engine on this build");
+    return false;   // JOIN 은 엔진이 없다 — 요청은 df_set_cfg(gain_idx) 로 간다
+}
 
 // HOST 가 방송한 DF_RESULT 를 소비한다. 세대 카운터를 보고 변화가 있을 때만
 // 옮기므로 패널이 닫혀 있어도 쌓이지 않는다 (한 칸 슬롯 = 항상 최신).

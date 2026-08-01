@@ -1040,6 +1040,17 @@ void run_cli_host(){
     // SNR 임계는 HOST 소유다. JOIN 이 DF 탭에서 바꾸면 이 명령으로 들어오고,
     // 적용 결과는 하트비트로 전원에게 되돌아간다.
     srv->cb.on_df_set_config = [&](const PktDfConfig& c){
+        // 게인은 엔진 설정이 아니라 DAQ 명령이라 따로 처리한다 (255 = 요청 없음).
+        // 현재값과 같으면 보내지 않는다 — 매번 보내면 그때마다 재캘리브레이션이
+        // 돌아 DF 가 수 초씩 멈춘다.
+        if(c.gain_idx != 255){
+            PktDfConfig cur{}; v.df_get_cfg(cur);
+            if(c.gain_idx != cur.gain_idx){
+                char gerr[128] = {};
+                if(!v.df_set_gain_index((int)c.gain_idx, gerr, sizeof gerr))
+                    bewe_log_push(2, "[Kraken] gain change failed: %s\n", gerr);
+            }
+        }
         v.df_set_cfg(c);          // 적용 + 정본 재방송
     };
     srv->cb.on_df_set_snr = [&](int snr_db){
@@ -3099,6 +3110,30 @@ void run_cli_host(){
                     v.df_request_by_display_num(atoi(sub.c_str()));
                 else
                     bewe_log_push(0,"  Usage: /df <filter number>   (the number drawn on the filter)\n");
+                fflush(stdout);
+            } else if(line == "/gain" || line.rfind("/gain ", 0) == 0){
+                // /gain            — 현재 튜너 게인
+                // /gain <dB>       — 가장 가까운 RTL 이산 스텝으로 설정 (5채널 동시)
+                // KrakenSDR 전용. DAQ 가 받으면 재캘리브레이션을 돌려 수 초간 DF 정지.
+                std::string sub = line.size() > 5 ? line.substr(5) : "";
+                while(!sub.empty() && sub.front() == ' ') sub.erase(sub.begin());
+                if(v.hw.type != HWType::KRAKEN){
+                    bewe_log_push(0,"  /gain is KrakenSDR only (gain is owned by the SDR elsewhere)\n");
+                } else if(sub.empty()){
+                    PktDfConfig cur{}; v.df_get_cfg(cur);
+                    bewe_log_push(0,"  tuner gain = %.1f dB (step %u/%d)\n",
+                                  HWConfig::rtl_gain_tenths_at(cur.gain_idx)/10.0f,
+                                  (unsigned)cur.gain_idx, HWConfig::RTL_GAIN_STEPS - 1);
+                } else {
+                    const int idx = HWConfig::rtl_gain_index((int)(atof(sub.c_str())*10.0 + 0.5));
+                    char gerr[128] = {};
+                    if(v.df_set_gain_index(idx, gerr, sizeof gerr)){
+                        // 정본을 JOIN 들에게 되돌린다 (슬라이더가 실제값으로 스냅).
+                        PktDfConfig cur{}; v.df_get_cfg(cur); v.df_set_cfg(cur);
+                    } else {
+                        bewe_log_push(2,"  gain change failed: %s\n", gerr);
+                    }
+                }
                 fflush(stdout);
             } else if(line == "/ch" || line.rfind("/ch ", 0) == 0){
                 // /ch add <CF_MHz> <BW_kHz> [none|am|fm]  /  /ch list  /  /ch del <n>

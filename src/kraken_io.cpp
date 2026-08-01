@@ -730,6 +730,7 @@ static void cfg_to_pkt(const df::Config& c, PktDfConfig& p){
     p.max_frames     = (uint8_t)c.max_frames;
     p.signal_dim     = (uint8_t)c.signal_dim;
     p.enable_control = c.enable_control ? 1 : 0;
+    p.gain_idx       = 255;   // 정본 송신 시엔 아래 df_get_cfg 가 실제값으로 채운다
 }
 
 static void pkt_to_cfg(const PktDfConfig& p, df::Config& c){
@@ -751,8 +752,34 @@ static void pkt_to_cfg(const PktDfConfig& p, df::Config& c){
 
 void FFTViewer::df_get_cfg(PktDfConfig& out) const {
     auto& K = kst();
-    std::lock_guard<std::mutex> lk(K.cfg_mtx);
-    cfg_to_pkt(K.cfg, out);
+    { std::lock_guard<std::mutex> lk(K.cfg_mtx); cfg_to_pkt(K.cfg, out); }
+    // 게인은 df::Config 가 아니라 DAQ 가 들고 있다 (heimdall 소유). 상태에서
+    // 실제 값을 읽어 인덱스로 바꿔 실어 보낸다 — JOIN 슬라이더가 현재값에서
+    // 출발하려면 이 정본이 필요하다. ch0 기준 (5채널은 항상 같은 게인).
+    if(K.engine && K.engine->running()){
+        const df::DaqStatus st = K.engine->status();
+        out.gain_idx = (uint8_t)HWConfig::rtl_gain_index((int)st.if_gain_tenths[0]);
+    }
+}
+
+// 게인 적용. heimdall 은 5채널을 한 번에 받는다 — 채널마다 다르면 위상 기준이
+// 깨져 방위가 통째로 틀어지므로 전 소자에 같은 값을 쓴다. DAQ 는 이 명령을 받으면
+// 노이즈소스로 재캘리브레이션을 돌리므로 수 초간 DF 가 멈춘다 (Streaming -> Calibrating).
+bool FFTViewer::df_set_gain_index(int idx, char* err, size_t errn){
+    auto& K = kst();
+    if(!K.engine || !K.engine->running()){
+        if(err) snprintf(err, errn, "DF engine is not running");
+        return false;
+    }
+    const int n = std::max(1, std::min((int)K.engine->status().active_ant_chs, 8));
+    const int tenths = HWConfig::rtl_gain_tenths_at(idx);
+    uint32_t per_ch[8];
+    for(int i = 0; i < n; i++) per_ch[i] = (uint32_t)tenths;
+    if(!K.engine->set_gain_tenths(per_ch, n, err, errn)) return false;
+    gain_db = (float)tenths / 10.0f;   // 표시용 — 실제 정본은 다음 DAQ 상태에서 온다
+    bewe_log_push(0, "[Kraken] gain -> %.1f dB (all %d ch) - DAQ recalibrating\n",
+                  gain_db, n);
+    return true;
 }
 
 void FFTViewer::df_set_cfg(const PktDfConfig& in){

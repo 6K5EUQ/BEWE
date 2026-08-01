@@ -680,7 +680,10 @@ struct __attribute__((packed)) PktDfConfig {
     uint8_t  max_frames;      // CAL 버스트를 만났을 때의 상한
     uint8_t  signal_dim;      // MUSIC 모델 차수
     uint8_t  enable_control;  // :5001 로 FREQ/GAIN 을 보낼지
-    uint8_t  _pad;
+    // KrakenSDR 튜너 게인. RTL 은 이산 스텝(29단계)이라 dB 가 아니라 그 표의
+    // 인덱스를 싣는다 — 반올림 왕복으로 값이 흔들리지 않고 1 바이트에 들어간다.
+    // 255 = 미지정(변경 요청 아님). 구 _pad 자리라 구조체 크기는 그대로 32 B.
+    uint8_t  gain_idx;
 };
 
 // ── DF_RESULT (HOST → JOIN) ───────────────────────────────────────────────
