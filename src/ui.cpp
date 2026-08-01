@@ -3841,6 +3841,7 @@ void run_streaming_viewer(){
 
     // ── 채팅/오퍼레이터 UI 상태 ──────────────────────────────────────────
     bool  chat_open        = false;
+    bool  chat_was_open    = false; // 직전 프레임 열림 상태 (열리는 순간에만 포커스 탈취)
     bool  chat_focus_input = false; // 채팅창 입력 포커스 상태 (외부 키 핸들러에서 접근)
     ChatInputCB chat_cb;            // 커서 끝 이동 / 자동완성 적용 상태
     bool  chat_in_was_active = false; // 직전 프레임 입력칸 활성 (팝업 표시 판정)
@@ -4404,7 +4405,11 @@ void run_streaming_viewer(){
             // 계산하는 주파수정렬 순위지 배열 인덱스가 아니다.
             // 이 블록은 "선택된 채널이 있어야 하는" 아래 서브블록 바깥에 있어야
             // 한다 — DF 는 채널을 고르지 않고도 눌러야 하기 때문.
-            if(!io.WantTextInput && !ImGui::IsAnyItemActive()){
+            // df_panel_open 을 여기서 한 번 더 본다. main_kbd_active 는 프레임
+            // 맨 앞에서 뜬 스냅샷이라, 하단바 DF 를 클릭해 패널을 여는 그 프레임엔
+            // 아직 false 로 남아 있다 — 그 상태로 숫자를 누르면 여기서 한 번,
+            // 같은 프레임에 열린 DF 패널의 핸들러에서 또 한 번 발사됐다.
+            if(!v.df_panel_open && !io.WantTextInput && !ImGui::IsAnyItemActive()){
                 int want = -1;
                 for(int k=0;k<10;k++)
                     if(ImGui::IsKeyPressed((ImGuiKey)(ImGuiKey_0+k), false)){ want = (k==0)?10:k; break; }
@@ -6846,13 +6851,30 @@ void run_streaming_viewer(){
                                            io.DisplaySize.y-CH-TOPBAR_H-10));
             ImGui::SetNextWindowSize(ImVec2(CW,CH));
             ImGui::SetNextWindowBgAlpha(0.92f);
-            ImGui::SetNextWindowFocus();
+            // ── 포커스와 z-order 를 분리한다 ──────────────────────────────
+            // 예전엔 매 프레임 무조건 SetNextWindowFocus() 를 불렀다. 그게 채팅을
+            // 맨 위로 올려주긴 했지만 동시에 **포커스를 계속 뺏어서**, 채팅을 켜 둔
+            // 내내 io.WantTextInput 이 true 로 굳고 메인페이지 단축키가 전부 죽었다.
+            // 주파수 하나 바꾸려 해도 채팅을 닫았다 다시 켜야 했다.
+            //
+            // 그렇다고 포커스를 그냥 안 잡으면 이번엔 채팅이 묻힌다 — ImGui 의
+            // z-order 는 제출 순서가 아니라 g.Windows 순서라 포커스 이벤트로만
+            // 바뀌고, DF/SA/LOG 는 자기 열릴 때 SetNextWindowFocus() 로 맨 위에
+            // 올라온 뒤 0.97 불투명으로 화면을 덮는다.
+            //
+            // 그래서 둘을 나눈다: 포커스는 열리는 순간에만, z-order 는 매 프레임.
+            // BringWindowToDisplayFront 는 g.Windows 순서만 바꾸고 ActiveId·NavWindow
+            // 는 안 건드리므로 단축키가 살아 있는 채로 채팅이 항상 보인다.
+            if(!chat_was_open) ImGui::SetNextWindowFocus();
             ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,8.f);
             ImGui::PushStyleColor(ImGuiCol_WindowBg,ImVec4(0.05f,0.07f,0.12f,1.f));
             ImGui::PushStyleColor(ImGuiCol_FrameBg,ImVec4(0.10f,0.12f,0.20f,1.f));
             ImGui::Begin("##chat",nullptr,
                 ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|
                 ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar);
+
+            // 매 프레임 맨 앞으로 (포커스는 안 건드린다 — 위 주석 참조).
+            ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
 
             ImGui::TextColored(ImVec4(0.4f,0.7f,1.f,1.f),"Chat");
             ImGui::Separator();
@@ -6918,6 +6940,10 @@ void run_streaming_viewer(){
                                chat_input_callback, &chat_cb))
                 send_chat_msg=true;
             chat_in_was_active = ImGui::IsItemActive(); // 다음 프레임 팝업 표시 판정
+            // ESC 로 입력칸을 빠져나오는 건 ImGui InputText 가 이미 한다
+            // (imgui_widgets.cpp 의 is_cancel → ClearActiveID). 별도 핸들러를 두면
+            // 그때는 이미 비활성이라 도달하지 않는다. 그래서 채팅창을 열어 둔 채
+            // ESC 한 번이면 메인 단축키로 돌아간다.
 
             if(send_chat_msg && chat_input[0]){
                 std::string chat_str = chat_input;
@@ -7007,6 +7033,7 @@ void run_streaming_viewer(){
             ImGui::End();
             ImGui::PopStyleColor(2); ImGui::PopStyleVar();
         }
+        chat_was_open = chat_open;
 
 
         // ╔══════════════════════════════════════════════════════════════════╗

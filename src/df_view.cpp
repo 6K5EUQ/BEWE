@@ -23,6 +23,7 @@
 #include "modules/common/modview_map.hpp"
 
 #include "imgui.h"
+#include <imgui_internal.h>   // BringWindowToDisplayFront / DC.CurrLineTextBaseOffset
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -321,6 +322,26 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     if(win_focus && !typing && ImGui::IsKeyPressed(ImGuiKey_Escape, false))
         v.df_panel_open = false;
 
+    // ── 숫자키 측정 (메인페이지와 동일 동작) ──────────────────────────────
+    // 메인 핸들러(ui.cpp)는 `main_kbd_active` 안에 있어 DF 패널이 열리면 죽는다
+    // (오버레이 격리 규칙). 그런데 DF 는 자기 기능이라 자기 창에서 막힐 이유가
+    // 없다 — 같은 핸들러를 여기 둬서 메인/DF 두 곳 모두에서 눌린다.
+    // 0 = 표시번호 10. 표시번호는 freq_sorted_display_num 이 매 프레임 계산하는
+    // 주파수정렬 순위지 배열 인덱스가 아니다.
+    //
+    // **win_focus 로 게이트하지 않는다.** 채팅창은 별도 루트 윈도우라 그쪽이
+    // 포커스를 쥐면 win_focus 가 false 가 되고, 그러면 "채팅 보면서 DF 숫자키"
+    // 라는 요구가 그대로 깨진다. 대신 글자 입력 중인지(typing)와 위젯이 활성인지
+    // 만 본다 — DF 패널이 열려 있다는 사실 자체가 이 코드가 도는 조건이다.
+    if(!typing && !ImGui::IsAnyItemActive()){
+        for(int k = 0; k < 10; k++){
+            if(!ImGui::IsKeyPressed((ImGuiKey)(ImGuiKey_0 + k), false)) continue;
+            const int want = (k == 0) ? 10 : k;
+            v.df_request_by_display_num(want, /*from_auto=*/false);
+            break;
+        }
+    }
+
     FFTViewer::DFLive L{};
     v.df_get_live(L);
     const bool is_join = (v.net_cli != nullptr);
@@ -394,12 +415,28 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     {
         const float VCEN = 16.5f, GAP = 8.f;
-        ImGui::SetCursorPos(ImVec2(GAP, VCEN - ImGui::GetTextLineHeight()*0.5f));
+        // ── 이 줄의 모든 프레임 위젯은 스스로 세로중심을 다시 잡아야 한다 ──
+        // ImGui 의 SameLine 은 CursorPos.y 를 CursorPosPrevLine.y 로 되돌리는데,
+        // ItemSize 가 그 값을 **줄의 첫 아이템** 기준으로 고정해 둔다 (line_y1).
+        // 중간 아이템에 SetCursorPosY 를 걸어도 line_y1 은 안 움직인다. 즉 이 줄의
+        // 원점은 맨 앞 제목 텍스트의 Y(텍스트 중심)에 박혀 있고, 버튼·콤보·입력창
+        // (프레임 높이가 더 큼)은 그대로 두면 전부 3px 아래로 처진다.
+        // 그래서 위젯마다 이 헬퍼를 부른다. 새 위젯을 추가할 때도 빠뜨리지 말 것.
+        auto ROWY = [&]{ ImGui::SetCursorPosY(VCEN - ImGui::GetFrameHeight()*0.5f); };
+        // 텍스트는 한 겹 더 있다: TextEx 가 그릴 때 CurrLineTextBaseOffset 을 더하는데,
+        // 앞선 프레임 위젯들이 그 값을 FramePadding.y 로 올려놓는다. 그래서 목표 Y 에서
+        // 그만큼 미리 빼야 실제로 줄 중앙에 놓인다.
+        auto ROWT = [&]{
+            const float off = ImGui::GetCurrentWindow()->DC.CurrLineTextBaseOffset;
+            ImGui::SetCursorPosY(VCEN - ImGui::GetTextLineHeight()*0.5f - off);
+        };
+
+        ImGui::SetCursorPos(ImVec2(GAP, 0.f)); ROWT();
         ImGui::TextColored(ImVec4(0.9f,0.9f,0.9f,1.f), "DIRECTION FINDING");
 
         const bool df_ok = v.df_link_state() != 0;
         ImGui::SameLine(0, GAP*2);
-        ImGui::SetCursorPosY(VCEN - ImGui::GetFrameHeight()*0.5f);
+        ROWY();
         ImGui::BeginDisabled(!df_ok);
         if(ImGui::Button("MEASURE")){
             int dn = meas_ch;
@@ -410,6 +447,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
 
         // 채널 선택 — 표시번호는 주파수 정렬 순위다 (배열 인덱스가 아님)
         ImGui::SameLine(0, 4);
+        ROWY();
         ImGui::SetNextItemWidth(150);
         {
             char cur[48];
@@ -437,6 +475,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         for(int i = 0; i < MAX_CHANNELS; i++)
             if(v.channels[i].filter_active && v.auto_df_on[i]) auto_n++;
         ImGui::SameLine(0, GAP);
+        ROWY();
         if(auto_n > 0){
             char lb[32]; snprintf(lb, sizeof lb, "AUTO %d OFF", auto_n);
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f,0.55f,0.1f,1.f));
@@ -448,15 +487,17 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         }
 
         ImGui::SameLine(0, GAP);
+        ROWY();
         if(ImGui::Button("+ LOB")) lob_popup = true;
 
         ImGui::SameLine(0, GAP);
+        ROWY();
         ImGui::SetNextItemWidth(180);
         ImGui::InputText("##df_filter", filter, sizeof filter);
 
         ImGui::SameLine(0, GAP);
         char cnt[32]; snprintf(cnt, sizeof cnt, "%d fix", v.df_hist_n);
-        ImGui::SetCursorPosY(VCEN - ImGui::GetTextLineHeight()*0.5f);
+        ROWT();
         ImGui::TextDisabled("%s", cnt);
 
         // 우측: CLEAR + SETUP. 창이 좁으면 왼쪽 위젯 위로 겹치므로 현재 커서
@@ -465,13 +506,14 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         const float rx = W - RM - 70.f - 4.f - 60.f;
         ImGui::SameLine();
         ImGui::SetCursorPosX(std::max(rx, ImGui::GetCursorPosX() + 8.f));
-        ImGui::SetCursorPosY(VCEN - ImGui::GetFrameHeight()*0.5f);
+        ROWY();
         if(ImGui::Button("CLEAR", ImVec2(60,0))){
             v.df_hist_n = 0; v.df_hist_head = 0; sel.clear();
             v.df_last_valid = false; banner[0] = 0;
             last_seq = v.df_hist_seq; last_vis_n = 0;
         }
         ImGui::SameLine(0, 4);
+        ROWY();
         // 클릭 전 상태를 스냅샷해서 push/pop 가드를 고정한다. `if(setup_open)` 을
         // 양쪽에 쓰면 버튼이 그 조건 자체를 뒤집어 컬러 스택이 매 토글마다 깨진다.
         const bool setup_hi = setup_open;
