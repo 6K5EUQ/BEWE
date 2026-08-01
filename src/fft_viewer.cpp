@@ -328,7 +328,10 @@ void FFTViewer::df_push_fix(const DFFix& f){
 }
 
 void FFTViewer::df_apply_result(const PktDfResult& r, const uint8_t* spec_q){
-    // 이력에는 성공/거절을 모두 남긴다 — "왜 안 나왔나" 가 표에서 바로 보여야 한다.
+    // 거절(kind != 0)은 이력에 남기지 않는다. AUTO DF 가 열린 채널을 주기적으로
+    // 재면서 "no signal" 만 초당 몇 줄씩 쌓여, 정작 봐야 할 측정값을 표 밖으로
+    // 밀어낸다 (이력은 DF_HIST_MAX 링이라 실제로 밀려 사라진다).
+    if(r.kind != 0) return;
     DFFix f{};
     f.t_end_ms       = r.t_end_ms;
     f.bearing_deg    = r.bearing_deg;

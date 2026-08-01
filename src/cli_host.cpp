@@ -2203,11 +2203,13 @@ void run_cli_host(){
             v.df_format_line(line,    sizeof line,    /*detailed=*/false);
             v.df_format_line(logline, sizeof logline, /*detailed=*/true);
             bewe_log_push(r.ok?0:2, "[DF] %s\n", logline);
-            // AUTO DF 발사분은 채팅으로 보내지 않는다. 채널당 10초 쿨다운이라
-            // 필터 10개면 최악 분당 60줄이고, 그게 **모든 기지**의 대화 로그를
-            // 덮는다. 운용자가 직접 누른 측정만 방송한다 — 남이 볼 이유가 있는
-            // 건 그쪽뿐이다. 자동분은 구조화된 DF_RESULT 로만 간다.
-            if(v.net_srv && !r.from_auto) v.net_srv->broadcast_chat("DF", line);
+            // 채팅으로는 **성공한 수동 측정만** 내보낸다.
+            //  - 자동(AUTO DF) 분: 채널당 쿨다운이 5초라 필터가 몇 개만 돼도
+            //    분당 수십 줄이 되고, 그게 모든 기지의 대화 로그를 덮는다.
+            //  - 실패(no signal / Not Available): 요청한 본인 말고는 볼 이유가
+            //    없는데, 신호가 약한 채널 하나가 대화창을 통째로 채운다.
+            // 둘 다 구조화된 DF_RESULT 와 로컬 로그에는 그대로 남는다.
+            if(v.net_srv && !r.from_auto && r.ok) v.net_srv->broadcast_chat("DF", line);
             PktDfResult p{};
             df_fill_result_pkt(v, p);
             if(v.net_srv) v.net_srv->broadcast_df_result(p, r.has_spec ? r.spec_q : nullptr);

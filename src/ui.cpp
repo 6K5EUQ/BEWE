@@ -6583,9 +6583,12 @@ void run_streaming_viewer(){
             v.df_format_line(line,    sizeof line,    /*detailed=*/false);
             v.df_format_line(logline, sizeof logline, /*detailed=*/true);
 
-            if(v.net_cli){
+            // 채팅창에는 성공한 측정만 넣는다. 실패(no signal / Not Available)는
+            // AUTO DF 가 도는 동안 끝없이 쌓여 대화 로그를 통째로 덮는다.
+            // 사유가 필요하면 로그에 그대로 남아 있다 (바로 아래 줄).
+            if(v.net_cli && r.ok){
                 std::lock_guard<std::mutex> lk(v.net_cli->chat_mtx);
-                NetClient::ChatMsg lm{}; lm.is_error = !r.ok;
+                NetClient::ChatMsg lm{}; lm.is_error = false;
                 strncpy(lm.from,"DF",31); strncpy(lm.msg,line,255);
                 if((int)v.net_cli->chat_log.size() >= 200)
                     v.net_cli->chat_log.erase(v.net_cli->chat_log.begin());
