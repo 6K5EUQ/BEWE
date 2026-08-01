@@ -5523,17 +5523,10 @@ void run_streaming_viewer(){
 
                             float cf_mhz=(ch.s+ch.e)/2.0f;
                             float bw_khz=(ch.e-ch.s)*1000.0f;
-                            const char* mnames[]={"--","AM","FM","MAG"};
-                            // Holding: stop_dem이 ch.mode를 NONE으로 지우므로 dem_paused_mode를 표시
-                            int mi_raw = is_holding ? (int)ch.dem_paused_mode : (int)ch.mode;
-                            int mi = mi_raw; if(mi<0||mi>3) mi=0;
                             // 디코더 활성이면 mode 무관 'DEMOD'/보라 우선 (HOST/LOCAL 한정)
                             bool has_dec = !is_holding && bewe_mod_ch_decode_on(v.remote_mode, ci);
                             // Detect: 감시 중이면 'DET', 신호를 잡으면 그때의 실제 모드(AM/FM) 표시
-                            bool det_armed  = !is_holding && ch.det_on.load() && !ch.det_locked.load();
                             bool det_locked = !is_holding && ch.det_locked.load();
-                            const char* mlabel = has_dec ? "DEMOD"
-                                               : det_armed ? "DET" : mnames[mi];
 
                             // ── 채널 색상 (draw_all_channels와 동일) ──────
                             bool is_arec = !is_holding && ch.audio_rec_on.load();
@@ -5614,9 +5607,11 @@ void run_streaming_viewer(){
                             // 텍스트 (고정폭 정렬)
                             char label[96];
                             int dn=v.freq_sorted_display_num(ci);
+                            // 모드는 아래 AM/FM/DET 버튼이 보여주므로 라벨에서 뺐다.
+                            // (상태 색·볼드는 그대로라 어느 채널이 도는지는 여전히 보인다.)
                             snprintf(label,sizeof(label),
-                                "[%2d] %-5s %10.3f MHz %6.0fkHz",
-                                dn,mlabel,cf_mhz,bw_khz);
+                                "[%2d] %10.3f MHz %6.0fkHz",
+                                dn,cf_mhz,bw_khz);
                             ImGui::PushID(ci*1000+700);
                             ImGui::PushStyleColor(ImGuiCol_Text,tc_v);
                             // gate open 또는 최근 활동이면 볼드 효과 (1px offset)
@@ -5721,7 +5716,38 @@ void run_streaming_viewer(){
                                 if(!df_ok || on) ImGui::PopStyleColor();
                             }
 
-
+                            // AM / FM / DET — L/L+R/R/M 과 같은 방식 (현재 선택만 초록).
+                            // 같은 버튼을 다시 누르면 해제(복조 없음)다. DET 는 모드가
+                            // 아니라 "무엇을 복조할지 스스로 찾는" 상태라 별개 축으로 둔다.
+                            {
+                                ImGui::SameLine(0,6);
+                                const bool det_on = ch.det_on.load();
+                                auto set_mode_btn = [&](Channel::DemodMode m){
+                                    if(det_on){   // 탐지 중이면 먼저 해제해야 모드가 고정된다
+                                        if(v.net_cli) v.net_cli->cmd_set_ch_detect(ci, false);
+                                        else          v.set_channel_detect(ci, false);
+                                    }
+                                    const int nm = (ch.mode == m) ? 0 : (int)m;   // 재클릭 = 해제
+                                    if(v.net_cli) v.net_cli->cmd_set_ch_mode(ci, nm);
+                                };
+                                struct { const char* lbl; Channel::DemodMode m; } mb[2] = {
+                                    {"AM", Channel::DM_AM}, {"FM", Channel::DM_FM} };
+                                for(int bi=0; bi<2; bi++){
+                                    const bool act = !det_on && (ch.mode == mb[bi].m);
+                                    if(act) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f,0.55f,0.1f,1.f));
+                                    if(ImGui::SmallButton(mb[bi].lbl)) set_mode_btn(mb[bi].m);
+                                    if(act) ImGui::PopStyleColor();
+                                    ImGui::SameLine(0,2);
+                                }
+                                // DET: 무장하면 보라 (스펙트럼/DEMOD 창의 DETECT 와 같은 색)
+                                if(det_on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f,0.2f,0.7f,1.f));
+                                if(ImGui::SmallButton("DET")){
+                                    const bool on2 = !det_on;
+                                    if(v.net_cli) v.net_cli->cmd_set_ch_detect(ci, on2);
+                                    else          v.set_channel_detect(ci, on2);
+                                }
+                                if(det_on) ImGui::PopStyleColor();
+                            }
 
                             ImGui::PopID();
                     }; // end render_channel_row
