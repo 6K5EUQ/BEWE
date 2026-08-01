@@ -5032,7 +5032,10 @@ void run_streaming_viewer(){
                 if(v.channels[ci].dem_paused.load()) continue;   // Holding = 가시대역 밖
                 if(now_df - v.auto_df_last_t[ci] < FFTViewer::AUTO_DF_COOLDOWN_S) continue;
                 v.auto_df_last_t[ci] = now_df;
-                v.df_request_by_display_num(v.freq_sorted_display_num(ci));
+                // from_auto=true — HOST 까지 따라가 결과를 채팅 방송에서 뺀다.
+                // 자동분까지 방송하면 채널 10개 x 10초 쿨다운에서 최악 분당 60줄이
+                // 모든 기지의 대화 로그를 덮는다.
+                v.df_request_by_display_num(v.freq_sorted_display_num(ci), /*from_auto=*/true);
             }
         }
 

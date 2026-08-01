@@ -628,6 +628,69 @@ static long long read_io_ms(){
     fclose(f); return sum;
 }
 
+// ── DF 와이어 패킷 채우기 ────────────────────────────────────────────────
+// v13.20 의 역할 분리 이후 GUI 는 DF 엔진을 링크하지 않는다. 그래서 JOIN 은
+// 방위를 채팅 한 줄로만 받았고, 설정 패널의 결과 블록·극좌표 플롯·진행바가
+// 전부 죽은 코드였다. 이 두 함수가 df::Result / DaqStatus 를 와이어로 옮긴다.
+static void df_fill_result_pkt(const FFTViewer& v, PktDfResult& p){
+    const auto& r = v.pending_df_result;
+    p.kind             = r.ok ? 0 : 1;
+    p.dnum             = (uint8_t)std::max(0, std::min(255, r.dnum));
+    p.elements         = (uint8_t)std::max(0, std::min(255, r.elements));
+    p.algo             = (uint8_t)std::max(0, std::min(255, r.algo));
+    p.overdrive_mask   = (uint8_t)(r.overdrive ? 1 : 0);
+    p.has_spectrum     = r.has_spec ? 1 : 0;
+    p.frames_used      = (uint8_t)std::max(0, std::min(255, r.frames_used));
+    p.frames_discarded = (uint8_t)std::max(0, std::min(255, r.frames_discarded));
+    p.origin           = r.from_auto ? 1 : 0;
+    p.imbalance        = r.imbalance ? 1 : 0;
+    p.alt_n            = (uint8_t)std::max(0, std::min(2, r.alt_n));
+    p.bearing_deg      = r.bearing;
+    p.bearing_rel_deg  = r.bearing_rel;
+    p.snr_db           = r.snr;
+    p.conf_db          = r.conf;
+    p.algo_papr_db     = r.algo_papr;
+    p.power_dbfs       = r.pwr;
+    p.cf_mhz           = r.cf_mhz;
+    p.bw_khz           = r.bw_khz;
+    p.eff_bw_khz       = r.eff_bw_khz;
+    p.n_eff_looks      = r.n_eff;
+    p.ambiguity        = r.ambiguity;
+    p.diag_spread_db   = r.diag_spread_db;
+    p.alt_deg[0]=r.alt_deg[0]; p.alt_deg[1]=r.alt_deg[1];
+    p.alt_db[0] =r.alt_db[0];  p.alt_db[1] =r.alt_db[1];
+    // 측정 순간의 배열 위치를 결과마다 싣는다. 디렉터리가 "지금" 생각하는
+    // 위치가 아니어야 한다 — DGS-X 는 드론 탑재라 매 측정마다 다르고, 이 8바이트가
+    // 단일 이동 기지만으로 교차 fix 를 가능하게 한다.
+    p.station_lat = v.station_lat;
+    p.station_lon = -v.station_lon;   // 내부는 서경 양수, 와이어는 동경 양수
+    p.t_end_ms    = r.t_end_ms;
+    p.dur_ms      = (uint16_t)std::max(0, std::min(65535, r.dur_ms));
+    snprintf(p.note, sizeof p.note, "%s", r.err);
+}
+
+static void df_fill_status_pkt(const FFTViewer& v, PktDfStatus& s){
+    FFTViewer::DFLive L{};
+    v.df_get_live(L);
+    s.link = (uint8_t)L.link;  s.usable = L.usable ? 1 : 0;
+    s.sync_state = (uint8_t)L.sync_state; s.delay_sync = (uint8_t)L.delay_sync;
+    s.iq_sync = (uint8_t)L.iq_sync;       s.noise_src  = (uint8_t)L.noise_src;
+    s.channels = (uint8_t)L.channels;     s.overdrive  = (uint8_t)L.overdrive;
+    s.measuring = L.measuring ? 1 : 0;
+    s.progress_pct = (uint8_t)std::max(0, std::min(100, (int)(L.progress * 100.f + 0.5f)));
+    s.meas_dnum = (uint8_t)std::max(0, std::min(255, v.df_last_dnum));
+    s.daq_cf_mhz = (float)L.daq_cf_mhz;  s.daq_fs_msps = (float)L.daq_fs_msps;
+    s.frame_rate_hz = (float)L.frame_rate_hz; s.recv_mbps = (float)L.recv_mbps;
+    s.lambda_m = (float)L.lambda_m;      s.ambiguity = (float)L.ambiguity;
+    // 64비트 카운터는 표시용이라 32비트로 자른다 (43억 프레임 = 60년).
+    s.frames_ok = (uint32_t)L.frames_ok;  s.frames_cal = (uint32_t)L.frames_cal;
+    s.frames_bad = (uint32_t)L.frames_bad; s.gaps = (uint32_t)L.gaps;
+    s.reconnects = (uint32_t)L.reconnects;
+    for(int i = 0; i < 8; i++) s.gain_tenths[i] = (uint16_t)L.gain_tenths[i];
+    snprintf(s.hw_id, sizeof s.hw_id, "%s", L.hw_id);
+    snprintf(s.last_error, sizeof s.last_error, "%s", L.last_error);
+}
+
 // ── Prompt helper (with default value) ───────────────────────────────────
 static std::string prompt_input(const char* label, const char* def=nullptr){
     if(def && def[0])
@@ -984,8 +1047,8 @@ void run_cli_host(){
         c.snr_thr_db = (float)snr_db;
         v.df_set_cfg(c);
     };
-    srv->cb.on_df_measure = [&](int dnum){
-        v.df_request_by_display_num(dnum);
+    srv->cb.on_df_measure = [&](int dnum, bool from_auto){
+        v.df_request_by_display_num(dnum, from_auto);
     };
     srv->cb.on_set_ch_detect = [&](int idx, bool on){
         v.set_channel_detect(idx, on);
@@ -2140,7 +2203,31 @@ void run_cli_host(){
             v.df_format_line(line,    sizeof line,    /*detailed=*/false);
             v.df_format_line(logline, sizeof logline, /*detailed=*/true);
             bewe_log_push(r.ok?0:2, "[DF] %s\n", logline);
-            if(v.net_srv) v.net_srv->broadcast_chat("DF", line);
+            // AUTO DF 발사분은 채팅으로 보내지 않는다. 채널당 10초 쿨다운이라
+            // 필터 10개면 최악 분당 60줄이고, 그게 **모든 기지**의 대화 로그를
+            // 덮는다. 운용자가 직접 누른 측정만 방송한다 — 남이 볼 이유가 있는
+            // 건 그쪽뿐이다. 자동분은 구조화된 DF_RESULT 로만 간다.
+            if(v.net_srv && !r.from_auto) v.net_srv->broadcast_chat("DF", line);
+            PktDfResult p{};
+            df_fill_result_pkt(v, p);
+            if(v.net_srv) v.net_srv->broadcast_df_result(p, r.has_spec ? r.spec_q : nullptr);
+            // HOST 도 같은 함수로 자기 이력 링을 채운다. 헤드리스라 그려지지는
+            // 않지만(측정당 460 B), 두 arm 이 같은 코드를 지나야 필드가 갈라지지
+            // 않는다 — 나중에 HOST CLI 에 /df hist 를 붙일 때도 그대로 쓴다.
+            v.df_apply_result(p, r.has_spec ? r.spec_q : nullptr);
+        }
+        // ── DF DAQ 상태 방송 (2초, Kraken HOST 만) ───────────────────────
+        // 비-Kraken 기지는 아무것도 안 보낸다 — 함대 대부분이 여기 해당하므로
+        // 비용이 정확히 0 이다. 하트비트에 얹지 않은 이유는 156 B 를 모든 JOIN 이
+        // 3초마다 파싱하게 만드는데 정작 DF 패널은 보통 닫혀 있기 때문이다.
+        if(v.hw.type == HWType::KRAKEN && v.net_srv){
+            static auto df_stat_last = clk::now();
+            if(std::chrono::duration<float>(clk::now() - df_stat_last).count() >= 2.0f){
+                df_stat_last = clk::now();
+                PktDfStatus s{};
+                df_fill_status_pkt(v, s);
+                v.net_srv->broadcast_df_status(s);
+            }
         }
         // 절대 데드라인 pacing — 기존 dt 기반 계산은 dt 에 이전 iteration 의 poll
         // sleep 이 포함되어 sleep/no-sleep 교대 발생, 실 루프가 ~95Hz 였음.

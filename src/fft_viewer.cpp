@@ -316,6 +316,65 @@ float FFTViewer::audio_play_pos_sec() const {
     return audio_player ? audio_player->position_sec() : 0.f;
 }
 
+// ── DF 결과 적용 (HOST/JOIN 공용) ─────────────────────────────────────────
+// 이 파일은 DF 를 건드리는 것 중 **양 타깃에 모두 링크되는 유일한 TU** 다
+// (kraken_io.cpp 는 CLI 전용, df_join.cpp/df_view.cpp 는 GUI 전용). HOST 의
+// df_pump 와 JOIN 의 df_pump 가 각자 필드를 옮기면 반드시 갈라지므로 한 함수만 둔다.
+void FFTViewer::df_push_fix(const DFFix& f){
+    df_hist[df_hist_head] = f;
+    df_hist_head = (df_hist_head + 1) % DF_HIST_MAX;
+    if(df_hist_n < DF_HIST_MAX) df_hist_n++;
+}
+
+void FFTViewer::df_apply_result(const PktDfResult& r, const uint8_t* spec_q){
+    // 이력에는 성공/거절을 모두 남긴다 — "왜 안 나왔나" 가 표에서 바로 보여야 한다.
+    DFFix f{};
+    f.t_end_ms       = r.t_end_ms;
+    f.bearing_deg    = r.bearing_deg;
+    f.bearing_rel_deg= r.bearing_rel_deg;
+    f.snr_db         = r.snr_db;
+    f.conf_db        = r.conf_db;
+    f.power_dbfs     = r.power_dbfs;
+    f.cf_mhz         = r.cf_mhz;
+    f.bw_khz         = r.bw_khz;
+    f.ambiguity      = r.ambiguity;
+    f.station_lat    = r.station_lat;
+    f.station_lon    = r.station_lon;
+    f.alt_deg[0]=r.alt_deg[0]; f.alt_deg[1]=r.alt_deg[1];
+    f.alt_db[0] =r.alt_db[0];  f.alt_db[1] =r.alt_db[1];
+    f.dnum           = r.dnum;
+    f.elements       = r.elements;
+    f.algo           = r.algo;
+    f.overdrive_mask = r.overdrive_mask;
+    f.kind           = r.kind;
+    f.frames_used    = r.frames_used;
+    f.frames_discarded = r.frames_discarded;
+    f.alt_n          = r.alt_n;
+    f.origin         = r.origin;
+    f.imbalance      = r.imbalance;
+    f.has_spec       = (r.has_spectrum && spec_q) ? 1 : 0;
+    memcpy(f.note, r.note, sizeof f.note);
+    f.note[sizeof f.note - 1] = 0;
+    if(f.has_spec) memcpy(f.spec_q, spec_q, 360);
+    df_push_fix(f);
+
+    // 설정 패널의 "마지막 결과" 블록은 성공분만 갱신한다. 거절이 들어올 때마다
+    // 극좌표 플롯이 지워지면 직전에 잘 나온 방위를 눈으로 비교할 수 없다.
+    if(r.kind == 0){
+        df_last_valid       = true;
+        df_last_dnum        = r.dnum;
+        df_last_cf_mhz      = r.cf_mhz;
+        df_last_bw_khz      = r.bw_khz;
+        df_last_bearing     = r.bearing_deg;
+        df_last_bearing_rel = r.bearing_rel_deg;
+        df_last_conf        = r.conf_db;
+        df_last_snr         = r.snr_db;
+        df_last_pwr         = r.power_dbfs;
+        if(f.has_spec)
+            for(int i = 0; i < 360; i++) df_last_spectrum[i] = -0.5f * (float)spec_q[i];
+    }
+}
+
 #ifdef BEWE_HEADLESS
 // ── CLI 링크 스텁 ─────────────────────────────────────────────────────────
 // sa_compute / eid_compute / audio_playback TU 는 GUI 전용이라 CLI 빌드에서

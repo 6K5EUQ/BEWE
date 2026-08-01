@@ -17,10 +17,20 @@ struct Estimate {
     double bearing_deg   = 0;    // 안테나 0 기준, heading offset 적용 전
     double confidence_db = 0;    // Bartlett PAPR — 수락 판정에 쓰는 값
     double algo_papr_db  = 0;    // 보고 알고리즘의 PAPR
-    double eig_snr_db    = 0;    // 10log10((lmax - lmin)/lmin)
+    double eig_snr_db    = 0;    // 10log10((lmax - noise_mean)/noise_mean)
     double power_dbfs    = 0;    // Re(tr R)/M
     double eval[kMaxElements] = {};
     float  spectrum_db[kAngleBins] = {};   // 보고 알고리즘, 최대 정규화 dB
+
+    // 주엽 밖 국소최대 상위 2개 (모호집합). alt_db 는 피크 대비 dB (<=0).
+    double alt_deg[2] = {};
+    double alt_db[2]  = { -999.0, -999.0 };
+    int    alt_n      = 0;
+
+    double diag_spread_db = 0;   // max/min diag(R) 비 (dB). 소자 전력 불균형
+    bool   imbalance = false;    // 중앙값 대비 10배 밖으로 벗어난 소자가 있다
+    int    eig_sweeps = 0;       // Jacobi 스윕 수. <0 이면 실패, 상한이면 미수렴
+
     bool   ok = false;           // 수락 규칙 통과 여부
 };
 

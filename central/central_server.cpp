@@ -1170,7 +1170,14 @@ void CentralServer::dispatch_to_joins(std::shared_ptr<HostRoom> room,
                     bewe_type == 0x3D ||                 // LWF_LIVE_ROW (행 누락 = stream 깨짐)
                     bewe_type == 0x3E ||                 // LWF_LIVE_STOP
                     bewe_type == 0x3F ||                 // LWF_LIVE_REQ (JOIN→host opt-in)
-                    bewe_type == 0x40);                  // LWF_DELETE_REQ (JOIN→host)
+                    bewe_type == 0x40 ||                 // LWF_DELETE_REQ (JOIN→host)
+                    // DF 는 전부 드롭 불가다. 설정은 정본이라 한 번 놓치면 JOIN 이
+                    // 하드코딩 기본값을 든 채로 남고, 결과는 사건 그 자체라
+                    // 유실되면 그 측정이 통째로 없던 일이 된다. 셋 다 저빈도
+                    // 소형 패킷이라 ctrl 큐에 부담이 안 된다.
+                    bewe_type == 0x5F ||                 // DF_CONFIG (정본 설정)
+                    bewe_type == 0x60 ||                 // DF_RESULT (측정 결과)
+                    bewe_type == 0x61);                  // DF_STATUS (DAQ 판독, 2s)
     // joins 스냅샷 후 lock 해제 — enqueue_file이 BLOCK 될 수 있어 joins_mtx 잡고 있으면 안 됨
     static thread_local std::vector<std::shared_ptr<JoinEntry>> targets;
     targets.clear();

@@ -55,14 +55,27 @@ public:
     void steer(double bearing_deg, std::complex<double>* out) const;
 
     // 격자엽 지표: 인접 소자 간격 / (lambda/2). 1 을 넘으면 모호성이 생긴다.
+    //
+    // 주의 — 이건 ULA 휴리스틱이라 UCA 에서는 양방향으로 틀린다. M=5, r=0.175 의
+    // 700 MHz(현 운용점)에서 0.96 을 내놓아 "안전" 이라 하지만, 실제 배열 상관은
+    // 정확히 180도에서 0.5732 (= -4.8 dB) 다. 와이어/UI 호환 때문에 남겨두되
+    // 판단에는 아래 sidelobe_db() 를 쓸 것.
     double ambiguity_ratio() const;
     double lambda_m() const;
+
+    // 배열 고유 사이드로브 (dB, <=0). 단일 소스 하나만 있어도 Bartlett 스펙트럼에
+    // 이만큼의 부엽이 반드시 생긴다 — 즉 이 아래의 "두 번째 봉우리" 는 방출체가
+    // 아니라 기하다. ensure() 에서 1회 계산한다 (M중 회전대칭이라 beta0 는
+    // [0,360/M) 만 쓸면 되고, m=5 에서 ~0.3 ms).
+    double sidelobe_db()  const { return sidelobe_db_; }
+    double sidelobe_deg() const { return sidelobe_deg_; }
 
 private:
     std::vector<std::complex<double>> sv_;   // 360 * M, bin-major
     double freq_hz_ = 0.0, radius_m_ = 0.0;
     int    m_ = 0;
     Sense  sense_ = Sense::CW;
+    double sidelobe_db_ = 0.0, sidelobe_deg_ = 0.0;
 };
 
 } // namespace df

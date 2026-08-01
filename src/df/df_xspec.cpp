@@ -70,9 +70,14 @@ bool XSpec::prepare(const Params& p, Status& why){
     int k = std::max(256, p.fft_size);
     while(k < (1 << 20) && (p.ch_bw_hz * k / fs) < kMinBins) k <<= 1;
 
+    // fft_out_ 은 k_*m_ 로 잡히므로 소자 수가 늘어도 재할당해야 한다.
+    // 가드가 k 만 보던 시절엔 같은 K + 더 큰 elements 로 두 번째 prepare 가
+    // 들어오면 옛 크기 버퍼가 남고 add_frame 이 그 밖에 썼다 (힙 손상).
+    // DAQ 가 채널 수를 늘려 재시작하면 실제로 도달한다.
+    const int prev_m = m_;
     m_ = p.elements;
     p_ = p;
-    if(k != k_ || !plan_){
+    if(k != k_ || m_ != prev_m || !plan_){
         destroy_plan();
         k_ = k;
         fft_in_  = fftwf_malloc(sizeof(fftwf_complex) * (size_t)k_);
@@ -126,11 +131,31 @@ bool XSpec::add_frame(const std::complex<float>* iq, size_t samples_per_ch){
     const int seg_use = std::min(seg_avail, seg_needed_);
     if(seg_use <= 0) return false;
 
+    // ── 세그먼트를 CPI 전체에 흩는다 ──────────────────────────────────────
+    // 예전엔 프레임 앞쪽에서 연속으로 seg_use 개를 떼어 썼다. 그러면 매
+    // 436.9 ms 프레임의 앞부분만 본다: 25 kHz 채널이면 앞 126 ms(28.9%),
+    // 200 kHz 면 17 ms(3.9%), 1 MHz 면 3.4 ms(0.78%) 뿐이다 (빈이 많아질수록
+    // seg_needed_ 가 작아져서 더 심해진다). 버스티/PTT/TDMA 방출체면 측정이
+    // 침묵 구간에 통째로 떨어질 수 있는 실패모드다.
+    //
+    // stride 로 흩으면 FFT 개수가 그대로라 비용이 정확히 같으면서 각 프레임의
+    // 추정이 CPI 전체를 대표하고, 세그먼트끼리 시간상 더 멀어져 독립성 가정도
+    // 오히려 좋아진다.
+    // stride 만으로는 seg_use==1 일 때 아무 일도 안 일어난다 (s=0 뿐이라 항상
+    // 프레임 맨 앞). 그리고 그게 하필 커버리지가 최악인 경우다 — 빈이 많으면
+    // seg_needed_ = ceil(target_looks*1.5/|B|) 가 1 로 떨어져서, 1 MHz 채널이면
+    // 436.9 ms 중 3.4 ms(0.78%)만 본다. 그래서 프레임마다 시작 오프셋을 한 칸씩
+    // 돌린다: seg_use==1 이어도 avg_frames 개 프레임이 서로 다른 지점을 보고,
+    // seg_use 가 클 때도 프레임 간에 남은 틈을 메운다.
+    // 최대 인덱스 = (seg_use-1)*stride + (stride-1) = seg_use*stride - 1 <= seg_avail-1.
+    const int stride = seg_avail / seg_use;      // >= 1 (seg_use <= seg_avail)
+    const int rot    = (stride > 1) ? (frames_ % stride) : 0;
+
     auto* in  = (fftwf_complex*)fft_in_;
     auto* out = (fftwf_complex*)fft_out_;
 
     for(int s = 0; s < seg_use; s++){
-        const size_t base = (size_t)s * k_;
+        const size_t base = ((size_t)s * (size_t)stride + (size_t)rot) * (size_t)k_;
         // 채널마다 창 씌우고 FFT. 결과는 out[m*k_ .. ] 에 모아둔다.
         for(int m = 0; m < m_; m++){
             const std::complex<float>* src = iq + (size_t)m * samples_per_ch + base;

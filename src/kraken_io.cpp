@@ -450,13 +450,23 @@ void FFTViewer::df_post_refusal(int dnum, const char* msg){
     p.bearing = p.bearing_rel = p.conf = p.snr = p.pwr = 0.f;
     p.frames_used = p.frames_discarded = 0;
     p.ok = false; p.overdrive = false;
+    p.algo_papr = p.eff_bw_khz = p.n_eff = p.ambiguity = p.diag_spread_db = 0.f;
+    p.alt_deg[0]=p.alt_deg[1]=p.alt_db[0]=p.alt_db[1]=0.f;
+    p.alt_n = p.elements = p.algo = 0;
+    p.imbalance = false; p.has_spec = false;
+    p.t_end_ms = 0; p.dur_ms = 0;
+    p.from_auto = df_req_auto;
     snprintf(p.err, sizeof p.err, "%s", msg);
     p.pending.store(true, std::memory_order_release);
 }
 
-bool FFTViewer::df_request_by_display_num(int dnum){
+bool FFTViewer::df_request_by_display_num(int dnum, bool from_auto){
     auto& K = kst();
     char msg[160];
+
+    // 결과(또는 거절)가 나올 때까지 살아 있어야 한다 — df_pump 와 df_post_refusal
+    // 둘 다 이걸 읽어 origin 을 채운다.
+    df_req_auto = from_auto;
 
     if(hw.type != HWType::KRAKEN){
         snprintf(msg, sizeof msg, "Not Available");
@@ -545,7 +555,86 @@ void FFTViewer::df_pump(){
     snprintf(p.err, sizeof p.err, "%s",
              r.note[0] ? r.note : df::status_text(r.status));
 
+    // ── 와이어로 나갈 나머지 ──────────────────────────────────────────────
+    // 예전엔 여기서 전부 버렸다 (HOST 밖으로 나갈 길이 없었으니까). 이제
+    // DF_RESULT 로 JOIN 에 실어보내므로 df::Result 를 온전히 옮겨 담는다.
+    p.algo_papr      = (float)r.algo_papr_db;
+    p.eff_bw_khz     = (float)(r.effective_bw_hz / 1e3);
+    p.n_eff          = (float)r.n_eff_looks;
+    p.ambiguity      = (float)r.ambiguity_ratio;
+    p.diag_spread_db = (float)r.diag_spread_db;
+    p.imbalance      = r.imbalance;
+    p.elements       = r.elements;
+    p.algo           = (int)r.algo;
+    p.alt_n          = r.alt_n;
+    for(int i = 0; i < 2; i++){
+        p.alt_deg[i] = (float)r.alt_deg[i];
+        p.alt_db[i]  = (float)r.alt_db[i];
+    }
+    p.t_end_ms = r.t_end_ms;
+    p.dur_ms   = (int)std::min<int64_t>(r.t_end_ms - r.t_start_ms, 65535);
+    p.from_auto = df_req_auto;
+
+    // 의사스펙트럼 양자화. spectrum_db 는 이미 최대 정규화(전부 <=0)라
+    // q = round(-2*dB) 로 0.5 dB/LSB, 하한 -127.5 dB.
+    if(p.ok){
+        for(int i = 0; i < 360; i++){
+            long q = std::lround(-2.0 * (double)r.spectrum_db[i]);
+            if(q < 0) q = 0; else if(q > 255) q = 255;
+            p.spec_q[i] = (uint8_t)q;
+        }
+        p.has_spec = true;
+    } else {
+        p.has_spec = false;
+    }
+
     p.pending.store(true, std::memory_order_release);
+}
+
+// ── DAQ 실시간 판독 (HOST) ───────────────────────────────────────────────
+// 예전엔 HOST 의 DF 설정 패널이 이걸 그렸다. GUI 가 JOIN 전용이 되면서 호출자가
+// 사라져 dead code 로 정리됐는데, 이제 DF_STATUS(0x61) 방송의 소스로 되살아난다 —
+// 판독을 볼 수 있는 쪽(HOST)과 조작하는 쪽(JOIN)이 갈라졌기 때문에 실어보내야 한다.
+void FFTViewer::df_get_live(FFTViewer::DFLive& o) const {
+    auto& K = kst();
+    o = FFTViewer::DFLive{};
+    if(!K.engine || !K.engine->running()) return;
+    const df::DaqStatus s = K.engine->status();
+    switch(s.link){
+        case df::LinkState::Streaming:   o.link = 2; break;
+        case df::LinkState::Calibrating: o.link = 1; break;
+        default:                         o.link = 0; break;
+    }
+    o.usable      = s.usable;
+    o.sync_state  = s.sync_state;
+    o.delay_sync  = s.delay_sync_flag;
+    o.iq_sync     = s.iq_sync_flag;
+    o.noise_src   = s.noise_source_state;
+    o.channels    = s.active_ant_chs;
+    o.overdrive   = s.adc_overdrive_flags;
+    o.daq_cf_mhz  = s.rf_center_hz / 1e6;
+    o.daq_fs_msps = s.sampling_hz  / 1e6;
+    o.frame_rate_hz = s.frame_rate_hz;
+    o.recv_mbps   = s.recv_mbps;
+    o.frames_ok   = s.frames_ok;
+    o.frames_cal  = s.frames_cal;
+    o.frames_bad  = s.frames_bad;
+    o.gaps        = s.cpi_gaps;
+    o.reconnects  = s.reconnects;
+    for(int i=0;i<8;i++) o.gain_tenths[i] = s.if_gain_tenths[i];
+    snprintf(o.hw_id, sizeof o.hw_id, "%s", s.hardware_id);
+    snprintf(o.last_error, sizeof o.last_error, "%s", s.last_error);
+    o.measuring = K.engine->armed();
+    o.progress  = K.engine->progress();
+
+    // 격자엽 지표는 현재 DAQ 중심주파수 기준으로 보여준다 (측정은 채널 주파수를 쓴다).
+    df::Config c = K.engine->config();
+    if(s.rf_center_hz > 0){
+        df::Manifold mf;
+        mf.ensure((double)s.rf_center_hz, c.radius_m, c.elements, c.sense);
+        o.lambda_m  = mf.lambda_m();
+        o.ambiguity = mf.ambiguity_ratio();
+    }
 }
 
 bool FFTViewer::df_measuring() const {

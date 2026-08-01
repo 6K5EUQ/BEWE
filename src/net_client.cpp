@@ -641,6 +641,33 @@ void NetClient::handle_packet(PacketType type,
         df_cfg_valid.store(true);
         break;
     }
+    case PacketType::DF_RESULT: {
+        if(len < (int)sizeof(PktDfResult)) break;
+        auto* r = reinterpret_cast<const PktDfResult*>(payload);
+        {
+            std::lock_guard<std::mutex> lk(df_res_mtx);
+            df_res = *r;
+            // 스펙트럼은 payload 의 **말미** 360 B 다. 헤더에 필드를 덧붙여도
+            // 오프셋이 안 밀리도록 앞이 아니라 뒤에서 센다.
+            if(r->has_spectrum && len >= (int)sizeof(PktDfResult) + 360)
+                memcpy(df_res_spec, payload + len - 360, 360);
+            else
+                memset(df_res_spec, 0xFF, 360);   // 전 방위 -127.5 dB = 빈 플롯
+        }
+        df_res_seq.fetch_add(1, std::memory_order_release);
+        break;
+    }
+    case PacketType::DF_STATUS: {
+        if(len < (int)sizeof(PktDfStatus)) break;
+        {
+            std::lock_guard<std::mutex> lk(df_stat_mtx);
+            df_stat = *reinterpret_cast<const PktDfStatus*>(payload);
+        }
+        df_stat_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::system_clock::now().time_since_epoch()).count(),
+                         std::memory_order_release);
+        break;
+    }
     case PacketType::CHAT: {
         if(len < sizeof(PktChat)) break;
         auto* c = reinterpret_cast<const PktChat*>(payload);
@@ -887,9 +914,10 @@ bool NetClient::cmd_set_autoscale(){
 bool NetClient::send_df_config(const PktDfConfig& c){
     return raw_send(PacketType::DF_CONFIG, &c, sizeof(c));
 }
-bool NetClient::cmd_df_measure(int dnum){
+bool NetClient::cmd_df_measure(int dnum, bool from_auto){
     PktCmd c{}; c.cmd=(uint8_t)CmdType::DF_MEASURE;
     c.df_measure.dnum=(uint8_t)dnum;
+    c.df_measure.origin=from_auto?1:0;
     return send_cmd(c);
 }
 bool NetClient::cmd_set_ch_detect(int idx, bool on){

@@ -300,12 +300,27 @@ public:
     bool cmd_set_sq_thresh(int idx, float thr);
     bool cmd_set_autoscale();
     bool cmd_set_ch_detect(int idx, bool on);
-    bool cmd_df_measure(int dnum);
+    bool cmd_df_measure(int dnum, bool from_auto = false);
     bool send_df_config(const PktDfConfig& c);
     // HOST 가 방송한 정본 DF 설정. JOIN 패널이 이걸 그린다.
     std::mutex   df_cfg_mtx;
     PktDfConfig  df_cfg{};
-    std::atomic<bool> df_cfg_valid{false};  // JOIN → HOST: 채널 에너지 디텍션 토글
+    std::atomic<bool> df_cfg_valid{false};
+
+    // ── HOST 가 방송한 DF 측정 결과 (DF_RESULT 0x60) ──────────────────────
+    // 한 칸 슬롯 + 세대 카운터. UI 는 seq 변화를 보고 소비한다 — 큐를 두면
+    // 패널이 닫혀 있는 동안 쌓였다가 열 때 한꺼번에 쏟아진다.
+    std::mutex            df_res_mtx;
+    PktDfResult           df_res{};
+    uint8_t               df_res_spec[360] = {};
+    std::atomic<uint32_t> df_res_seq{0};
+
+    // ── HOST 의 heimdall DAQ 판독 (DF_STATUS 0x61) ────────────────────────
+    // Kraken HOST 만 2초 주기로 보낸다. df_stat_ms 가 낡으면(6초) df_get_live 가
+    // 빈 구조체를 돌려준다 — 죽은 HOST 가 살아 보이면 안 된다.
+    std::mutex            df_stat_mtx;
+    PktDfStatus           df_stat{};
+    std::atomic<int64_t>  df_stat_ms{0};
     bool cmd_toggle_recv(int ch_idx, bool enable);
     bool cmd_toggle_fft_recv(bool enable);  // central에서 이 JOIN으로 FFT 송신 토글 (audio/HB 무관)
     bool cmd_update_ch_range(int idx, float s, float e);

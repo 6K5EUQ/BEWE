@@ -56,6 +56,11 @@ struct Config {
         if(max_frames < avg_frames)             return fail("max_frames must be >= avg_frames");
         if(snr_threshold_db < -20.0 || snr_threshold_db > 60.0)
             return fail("snr_threshold_db must be in [-20, 60]");
+        // 다른 필드는 전부 경계가 있는데 이것만 빠져 있었다. pkt_to_cfg 가
+        // 와이어 값을 무클램프로 통과시키므로 validate 가 유일한 관문이다 —
+        // JOIN 이 0 을 밀면 papr_thr 이 0 이 되어 통계 바닥이 완전히 꺼진다
+        // (= 순수 잡음에 임의 방위를 보고). 이 상수가 존재하는 이유 그 자체다.
+        if(c_papr < 1.0 || c_papr > 1000.0)     return fail("c_papr must be in [1, 1000]");
         if(target_looks < 64)                   return fail("target_looks must be >= 64");
         if(fft_size < 256 || (fft_size & (fft_size-1))) return fail("fft_size must be a power of two >= 256");
         if(dc_guard_hz < 0.0)                   return fail("dc_guard_hz must be >= 0");

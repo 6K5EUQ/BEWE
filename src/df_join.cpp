@@ -18,6 +18,7 @@
 #include "fft_viewer.hpp"
 #include "net_client.hpp"
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 
@@ -27,9 +28,27 @@
 bool FFTViewer::df_engine_ready() const { return false; }
 bool FFTViewer::df_measuring()    const { return false; }
 void FFTViewer::df_stop_engine()        {}
-void FFTViewer::df_pump()               {}
 
 bool FFTViewer::df_submit(double, double, int, int){ return false; }
+
+// HOST 가 방송한 DF_RESULT 를 소비한다. 세대 카운터를 보고 변화가 있을 때만
+// 옮기므로 패널이 닫혀 있어도 쌓이지 않는다 (한 칸 슬롯 = 항상 최신).
+// 적용은 fft_viewer.cpp 의 df_apply_result 한 곳이 한다 — HOST arm 과 같은 함수라
+// 두 경로가 갈라질 수 없다.
+void FFTViewer::df_pump(){
+    if(!net_cli) return;
+    const uint32_t s = net_cli->df_res_seq.load(std::memory_order_acquire);
+    if(s == df_res_seen) return;
+    df_res_seen = s;
+    PktDfResult r;
+    uint8_t q[360];
+    {
+        std::lock_guard<std::mutex> lk(net_cli->df_res_mtx);
+        r = net_cli->df_res;
+        memcpy(q, net_cli->df_res_spec, sizeof q);
+    }
+    df_apply_result(r, q);
+}
 
 // JOIN 은 HOST 의 DF 를 원격으로 쓴다. HOST 가 하트비트로 실제 가용도를 보내주므로
 // (0=불가 1=가능 2=준비중) 이 함수의 반환 규약(0=down 1=calibrating 2=streaming)
@@ -41,9 +60,40 @@ int FFTViewer::df_link_state() const {
     return (d == 1) ? 2 : (d == 2 ? 1 : 0);
 }
 
-// 로컬 DAQ 가 없으니 실시간 판독도 없다. 설정 패널은 빈 값을 그대로 그린다
-// (HOST 의 DAQ 판독을 와이어로 실어오지는 않는다 — 설정과 달리 조작 대상이 아니다).
-void FFTViewer::df_get_live(FFTViewer::DFLive& o) const { o = FFTViewer::DFLive{}; }
+// HOST 의 heimdall 판독을 DF_STATUS(0x61) 로 받아 그대로 옮긴다. 예전엔 여기서
+// 빈 구조체를 돌려줬고, 그래서 DF 패널의 좌측 열·λ/모호비 줄·측정 진행바·소자수
+// 불일치 경고가 전부 JOIN 에서 죽어 있었다 — 거절 이유를 설명하는 값들이 정작
+// 조작하는 사람 화면에 없었다.
+//
+// 6초보다 낡으면 통째로 0 을 돌려준다. 죽은 HOST 의 마지막 상태가 계속 초록으로
+// 남아 있으면 안 된다 (안전 측 실패).
+void FFTViewer::df_get_live(FFTViewer::DFLive& o) const {
+    o = FFTViewer::DFLive{};
+    if(!net_cli) return;
+    const int64_t t = net_cli->df_stat_ms.load(std::memory_order_acquire);
+    if(t == 0) return;
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count();
+    if(now - t > 6000) return;
+
+    PktDfStatus s;
+    { std::lock_guard<std::mutex> lk(net_cli->df_stat_mtx); s = net_cli->df_stat; }
+    o.link = s.link;  o.usable = (s.usable != 0);
+    o.sync_state = s.sync_state; o.delay_sync = s.delay_sync;
+    o.iq_sync = s.iq_sync;       o.noise_src = s.noise_src;
+    o.channels = s.channels;     o.overdrive = s.overdrive;
+    o.daq_cf_mhz = s.daq_cf_mhz; o.daq_fs_msps = s.daq_fs_msps;
+    o.frame_rate_hz = s.frame_rate_hz; o.recv_mbps = s.recv_mbps;
+    o.frames_ok = s.frames_ok;   o.frames_cal = s.frames_cal;
+    o.frames_bad = s.frames_bad; o.gaps = s.gaps; o.reconnects = s.reconnects;
+    for(int i = 0; i < 8; i++) o.gain_tenths[i] = s.gain_tenths[i];
+    memcpy(o.hw_id, s.hw_id, sizeof s.hw_id);
+    o.hw_id[sizeof o.hw_id - 1] = 0;
+    snprintf(o.last_error, sizeof o.last_error, "%s", s.last_error);
+    o.lambda_m = s.lambda_m; o.ambiguity = s.ambiguity;
+    o.measuring = (s.measuring != 0);
+    o.progress  = s.progress_pct / 100.f;
+}
 
 // ── 순수 함수 (원본 kraken_io.cpp:488-530 그대로) ────────────────────────
 // 문구가 HOST 와 한 글자라도 다르면 같은 사건이 기지별로 다르게 보인다.
@@ -86,15 +136,22 @@ void FFTViewer::df_post_refusal(int dnum, const char* msg){
     p.bearing = p.bearing_rel = p.conf = p.snr = p.pwr = 0.f;
     p.frames_used = p.frames_discarded = 0;
     p.ok = false; p.overdrive = false;
+    p.algo_papr = p.eff_bw_khz = p.n_eff = p.ambiguity = p.diag_spread_db = 0.f;
+    p.alt_deg[0]=p.alt_deg[1]=p.alt_db[0]=p.alt_db[1]=0.f;
+    p.alt_n = p.elements = p.algo = 0;
+    p.imbalance = false; p.has_spec = false;
+    p.t_end_ms = 0; p.dur_ms = 0;
+    p.from_auto = df_req_auto;
     snprintf(p.err, sizeof p.err, "%s", msg);
     p.pending.store(true, std::memory_order_release);
 }
 
 // 로컬에 SDR 이 없으니 HOST 에 대신 시킨다. 채널 배열은 CHANNEL_SYNC 로 동기화되어
 // 표시번호가 HOST 와 같으므로 번호를 그대로 넘기면 된다. 결과는 HOST 가
-// broadcast_chat("DF", ...) 로 모두에게 돌려주므로 여기서 따로 받을 게 없다.
+// DF_RESULT(0x60) 로 돌려주고 df_pump 가 받는다.
 // 원본: kraken_io.cpp:532-560.
-bool FFTViewer::df_request_by_display_num(int dnum){
+bool FFTViewer::df_request_by_display_num(int dnum, bool from_auto){
+    df_req_auto = from_auto;   // 로컬 거절에도 origin 이 붙어야 한다
     if(!net_cli || !net_cli->is_connected()){
         df_post_refusal(dnum, "no link"); return false;
     }
@@ -111,7 +168,7 @@ bool FFTViewer::df_request_by_display_num(int dnum){
     }
     // 채팅이 아니라 전용 커맨드로 보낸다. 채팅으로 보내면 "DGS-x: /df 1" 이
     // 대화 로그에 남아 시끄럽고, 명령이 사람 입력인 척 섞인다.
-    net_cli->cmd_df_measure(dnum);
+    net_cli->cmd_df_measure(dnum, from_auto);
     return true;
 }
 

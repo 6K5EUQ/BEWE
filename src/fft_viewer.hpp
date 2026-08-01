@@ -1027,7 +1027,10 @@ public:
     // 표시번호(freq_sorted_display_num) -> 배열 인덱스 -> 측정 요청.
     // 키·패널 버튼·/df·CLI 가 전부 이 한 경로를 쓴다. 거절 사유는 항상 한 줄로
     // 채팅/로그에 나간다 — 조용히 실패하면 운용자가 눌렀는지도 모른다.
-    bool df_request_by_display_num(int dnum);
+    // from_auto = AUTO DF 자동 발사. HOST 까지 따라가 결과의 origin 이 되고,
+    // 채팅 방송 여부를 가른다 — 자동분까지 방송하면 채널 10개 x 10초 쿨다운에서
+    // 최악 분당 60줄이 모든 기지의 대화 로그를 덮는다.
+    bool df_request_by_display_num(int dnum, bool from_auto = false);
     void df_post_refusal(int dnum, const char* msg);
     // pending_df_result 를 사람이 읽는 한 줄로. 접두사는 붙이지 않는다 —
     // 채팅은 발신자 이름("DF")이, 로그는 호출부가 "[DF] " 를 붙인다.
@@ -1049,7 +1052,53 @@ public:
         int   frames_used = 0, frames_discarded = 0;
         bool  ok = false, overdrive = false;
         char  err[80] = {};
+        // ── DF_RESULT 와이어 패킷을 만드는 데 필요한 나머지 ──────────────
+        // 예전엔 df_pump 가 df::Result 를 여기로 좁히면서 스펙트럼·모호집합·
+        // 진단값을 전부 버렸다. HOST 프로세스 밖으로 나갈 길이 없었기 때문인데,
+        // 이제 나간다.
+        float algo_papr = 0, eff_bw_khz = 0, n_eff = 0, ambiguity = 0, diag_spread_db = 0;
+        float alt_deg[2] = {}, alt_db[2] = {};
+        int   alt_n = 0, elements = 0, algo = 0;
+        bool  imbalance = false;
+        bool  from_auto = false;   // AUTO DF 발사분 — 채팅으로 방송하지 않는다
+        int64_t t_end_ms = 0;
+        int   dur_ms = 0;
+        uint8_t spec_q[360] = {};  // dB_below_peak = -0.5 * q
+        bool  has_spec = false;
     } pending_df_result;
+
+    // ── 방위 이력 ─────────────────────────────────────────────────────────
+    // AUTO DF 가 들어온 뒤로 측정이 잦다. 한 칸짜리 "마지막 결과" 로는 방위가
+    // 안정적인지 표류하는지 표적이 움직이는지 전혀 안 보인다. 각 행이 자기
+    // 스펙트럼을 들고 있어야 옛 fix 를 클릭했을 때 그때의 극좌표를 볼 수 있다
+    // (스펙트럼을 최신 것만 두면 표의 절반이 죽는다).
+    // 64 x ~460 B = 29 KB 고정, 할당 없음. UI 스레드 전용.
+    struct DFFix {
+        int64_t t_end_ms = 0;
+        float   bearing_deg = 0, bearing_rel_deg = 0;
+        float   snr_db = 0, conf_db = 0, power_dbfs = 0;
+        float   cf_mhz = 0, bw_khz = 0, ambiguity = 0;
+        float   station_lat = 0, station_lon = 0;   // lon: 동경 양수
+        float   alt_deg[2] = {}, alt_db[2] = {};
+        uint8_t dnum = 0, elements = 0, algo = 0, overdrive_mask = 0;
+        uint8_t kind = 0, frames_used = 0, frames_discarded = 0, alt_n = 0;
+        uint8_t origin = 0, imbalance = 0, has_spec = 0, manual_lob = 0;
+        char    note[64] = {};
+        uint8_t spec_q[360] = {};
+    };
+    static constexpr int DF_HIST_MAX = 64;
+    DFFix df_hist[DF_HIST_MAX];
+    int   df_hist_n = 0;          // 채워진 개수 (<= DF_HIST_MAX)
+    int   df_hist_head = 0;       // 다음에 쓸 위치
+    // 링에서 i 번째로 오래된 항목 (0 = 가장 오래됨)
+    const DFFix& df_hist_at(int i) const {
+        const int base = (df_hist_n < DF_HIST_MAX) ? 0 : df_hist_head;
+        return df_hist[(base + i) % DF_HIST_MAX];
+    }
+    // HOST/JOIN 양 arm 이 같은 함수로 결과를 받아들인다 (fft_viewer.cpp).
+    // 두 곳에서 각자 필드를 옮기면 반드시 갈라진다.
+    void df_apply_result(const PktDfResult& r, const uint8_t* spec_q);
+    void df_push_fix(const DFFix& f);
 
     // 설정 패널이 그리는 "마지막 결과". UI 스레드만 읽고 쓴다.
     bool  df_last_valid = false;
@@ -1058,6 +1107,14 @@ public:
     float df_last_bearing = 0, df_last_bearing_rel = 0;
     float df_last_conf = 0, df_last_snr = 0, df_last_pwr = 0;
     float df_last_spectrum[360] = {};
+    // 진행 중인(또는 방금 끝난) 측정이 AUTO DF 발사분인지. 엔진은 한 번에 하나만
+    // 재고 그동안 다른 요청은 "already running" 으로 거절되므로 한 칸이면 충분하다.
+    // 요청 스레드와 드레인 스레드가 같다 (UI/메인).
+    bool df_req_auto = false;
+
+    // JOIN: 마지막으로 소비한 DF_RESULT 세대. net_cli->df_res_seq 와 다르면
+    // 새 결과가 온 것이다 (한 칸 슬롯이라 항상 최신).
+    uint32_t df_res_seen = 0;
     // 캡처 스레드에 LO 변경을 위임한다. wait=true 면 캡처 스레드가 실제로 적용할 때까지
     // 블록한다 (스케줄 녹화처럼 "바뀐 주파수로" 곧바로 녹화를 시작하는 호출자용).
     void set_frequency(float cf_mhz, bool wait=false);

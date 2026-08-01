@@ -154,7 +154,7 @@ struct ServerCallbacks {
     std::function<void(int idx, float thr)>          on_set_sq_thresh;
     std::function<void()>                            on_set_autoscale;
     std::function<void(int idx, bool on)>            on_set_ch_detect;
-    std::function<void(int dnum)>                   on_df_measure;
+    std::function<void(int dnum, bool from_auto)>   on_df_measure;
     std::function<void(int snr_db)>                 on_df_set_snr;
     std::function<void(const PktDfConfig&)>         on_df_set_config;
     std::function<void(int ch_idx, uint8_t op_idx, bool enable)> on_toggle_recv;
@@ -343,6 +343,9 @@ public:
 
     // HW status → all clients
     void broadcast_df_config(const PktDfConfig& c);
+    // spec360 이 null 이 아니면 payload 말미에 360 B 를 이어붙인다.
+    void broadcast_df_result(const PktDfResult& r, const uint8_t* spec360);
+    void broadcast_df_status(const PktDfStatus& s);
     void broadcast_status(float cf_mhz, float gain_db,
                           uint32_t sr, uint8_t hw_type);
 

@@ -36,6 +36,7 @@ const char* status_text(Status s){
         case Status::Timeout:        return "timeout";
         case Status::BadRequest:     return "bad request";
         case Status::Cancelled:      return "cancelled";
+        case Status::Overdrive:      return "overdrive: reduce DAQ gain";
     }
     return "?";
 }
@@ -312,13 +313,30 @@ void Engine::Impl::loop(){
                 }
                 continue;
             }
-            if(xspec.add_frame(f.iq, f.samples_per_ch)){
-                got++;
+            // ── 과입력 프레임은 누적하지 않고 버린다 ──────────────────────
+            // ADC 클리핑은 측정 대상 그 자체인 채널간 위상을 파괴하는 경성
+            // 비선형이다. 그런데 클리핑된 프레임도 강한 지배 고유값과 높은
+            // PAPR 을 만들어 수락 규칙을 그대로 통과한다 — 즉 결과가 "자신만만
+            // 하게 틀린 방위"가 되고 출력만 봐서는 구분할 방법이 없다.
+            // 예전엔 전량 누적하고 플래그만 od_mask 에 OR 해 표시용으로 썼다.
+            if(h.adc_overdrive_flags){
+                discarded++;
                 od_mask |= h.adc_overdrive_flags;
+            } else if(xspec.add_frame(f.iq, f.samples_per_ch)){
+                got++;
                 frames_done.store(got);
             }
             if(got < cur.frames && budget > 0) continue;
-            if(got == 0){ fail(cur, Status::Timeout); measuring = false; continue; }
+            if(got == 0){
+                // 쓸 만한 프레임이 하나도 없었다. 원인이 과입력이면 그렇게
+                // 말해준다 — enable_control 이 켜져 있으면 운용자가 DAQ gain 을
+                // 바로 내릴 수 있으니 실행 가능한 안내다.
+                fail(cur, od_mask ? Status::Overdrive : Status::Timeout);
+                measuring = false; continue;
+            }
+            // got > 0 이면 예산이 클리핑 프레임에서 끝났더라도 모아둔 클린
+            // 프레임으로 푼다. 여기서 버리면 "3장 중 2장은 깨끗했는데 마지막이
+            // 클리핑" 이 통째로 실패가 된다 — 부분 평균이 실패보다 낫다.
 
             // ── 풀이 ─────────────────────────────────────────────────────
             Config c = [&]{ std::lock_guard<std::mutex> lk(cfg_mtx); return cfg; }();
@@ -349,17 +367,37 @@ void Engine::Impl::loop(){
             r.algo = cur.algo;
             r.overdrive_mask = od_mask;
             r.ambiguity_ratio = manifold.ambiguity_ratio();
+            r.algo_papr_db = e.algo_papr_db;
+            r.diag_spread_db = e.diag_spread_db;
+            r.imbalance = e.imbalance;
+            for(int i = 0; i < M && i < kMaxElements; i++) r.eval[i] = e.eval[i];
+            r.alt_n = e.alt_n;
+            for(int i = 0; i < e.alt_n; i++){
+                r.alt_deg[i] = std::fmod(e.alt_deg[i] + c.heading_deg + 360.0, 360.0);
+                r.alt_db[i]  = e.alt_db[i];
+            }
             memcpy(r.spectrum_db, e.spectrum_db, sizeof r.spectrum_db);
             r.t_start_ms = t_start;
             r.t_end_ms = now_ms();
             // note 는 채팅 한 줄에 그대로 들어간다. 짧게 유지할 것 —
             // 자세한 수치는 DF 설정 패널이 보여준다.
+            //
+            // 실패 경로의 문구는 건드리지 말 것: df_short_reason 이 이 문자열을
+            // 패턴매칭해 3개 결과로 압축하는 계약이 있다. 대안 방위는 성공
+            // 경로에만 붙인다.
+            // 순서 = 심각도. 위쪽일수록 결과 자체를 못 믿는다는 뜻이고,
+            // alt 는 마지막이다 — 정보성 안내가 하드 경고를 가리면 안 된다.
             if(!e.ok)
                 snprintf(r.note, sizeof r.note, "no signal");
-            else if(r.ambiguity_ratio > 1.0)
-                snprintf(r.note, sizeof r.note, "grating lobes");
+            else if(e.imbalance)
+                snprintf(r.note, sizeof r.note, "channel imbalance %.0f dB", e.diag_spread_db);
             else if(od_mask)
                 snprintf(r.note, sizeof r.note, "overdrive");
+            else if(r.ambiguity_ratio > 1.0)
+                snprintf(r.note, sizeof r.note, "grating lobes");
+            else if(e.alt_n > 0)
+                snprintf(r.note, sizeof r.note, "alt %.0f deg %.0f dB",
+                         r.alt_deg[0], e.alt_db[0]);
 
             publish(r);
             measuring = false;

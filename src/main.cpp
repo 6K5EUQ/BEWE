@@ -25,6 +25,10 @@ static void install_signal_handlers(){
 #include "sat_view.hpp"
 #endif
 
+#ifdef BEWE_HOST_BUILD
+#include "df/df_selftest.hpp"   // --df-selftest
+#endif
+
 SessionArgs g_session_args;
 
 static bool starts_with(const char* s, const char* prefix){
@@ -38,6 +42,14 @@ static void parse_args(int argc, char** argv){
 #ifdef BEWE_HOST_BUILD
         // SDR 은 HOST 빌드만 연다. GUI(JOIN)는 하드웨어를 아예 링크하지 않으므로
         // 이 플래그를 받아도 할 수 있는 게 없다.
+        // DF DSP 회귀 하네스. 합성 배열만 쓰므로 SDR 도 heimdall 도 필요 없다.
+        // 즉시 실행하고 실패 개수를 종료코드로 낸다 — CI/스크립트에서 바로 쓴다.
+        if(starts_with(a, "--df-selftest")){
+            int verb = 1;
+            const char* eq = std::strchr(a, '=');
+            if(eq) verb = std::atoi(eq + 1);
+            std::exit(df::run_selftest(verb));
+        }
         if(std::strcmp(a, "--sdr") == 0 && i+1 < argc){
             std::string v = argv[i+1];
             if(v == "bladerf" || v == "rtlsdr" || v == "pluto" || v == "kraken"){
@@ -80,6 +92,7 @@ static void parse_args(int argc, char** argv){
                 "BEWE options:\n"
 #ifdef BEWE_HOST_BUILD
                 "  --sdr bladerf|rtlsdr|pluto|kraken  force a specific SDR backend\n"
+                "  --df-selftest[=verbosity]    run the DF DSP regression suite and exit\n"
                 "  --session-mode=host|join     internal: child-process boot mode\n"
 #else
                 "  --session-mode=join          internal: child-process boot mode\n"

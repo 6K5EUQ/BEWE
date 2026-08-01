@@ -151,6 +151,8 @@ enum class PacketType : uint8_t {
                                     // JOIN 은 로컬에 반영하지 않고 요청만 보내고,
                                     // HOST 가 적용한 뒤 방송하는 값이 정본이 된다 —
                                     // 여러 JOIN 이 동시에 만져도 한 값으로 수렴한다.
+    DF_RESULT              = 0x60,  // host → join: PktDfResult (+ 말미 360 B 스펙트럼)
+    DF_STATUS              = 0x61,  // host → join: PktDfStatus. Kraken HOST 만 2초 주기
 };
 
 // ── Packet header (9 bytes, packed) ──────────────────────────────────────
@@ -401,7 +403,10 @@ struct __attribute__((packed)) PktCmd {
         struct { char    name[16]; }                       set_hw;
         struct { uint8_t enable; }                         toggle_fft_recv;
         struct { uint8_t idx; uint8_t enable; }            set_ch_detect;
-        struct { uint8_t dnum; }                           df_measure;   // 표시번호(1..10)
+        // origin: 0=수동(운용자가 눌렀다) 1=AUTO DF(스퀠치 상승 자동 발사).
+        // PktCmd 는 raw[64] 유니온이라 크기가 안 변한다 — 구 JOIN 은 PktCmd{} 로
+        // 0 을 보내고 그게 곧 "수동" 이라 하위호환이 자연스럽다.
+        struct { uint8_t dnum; uint8_t origin; }           df_measure;   // 표시번호(1..10)
         struct { int8_t  snr_db; }                         df_set_snr;
         uint8_t raw[64];
     };
@@ -676,6 +681,80 @@ struct __attribute__((packed)) PktDfConfig {
     uint8_t  signal_dim;      // MUSIC 모델 차수
     uint8_t  enable_control;  // :5001 로 FREQ/GAIN 을 보낼지
     uint8_t  _pad;
+};
+
+// ── DF_RESULT (HOST → JOIN) ───────────────────────────────────────────────
+// GUI 는 JOIN 전용이라 DF 엔진을 링크하지 않는다. 그래서 v13.20 의 역할 분리
+// 이후 JOIN 은 방위를 채팅 한 줄로만 받았고, 설정 패널의 결과 블록·극좌표
+// 플롯·진행바가 전부 죽은 코드였다. 이 패킷이 그 구멍을 메운다.
+//
+// 필드 추가는 반드시 말미에 — 단 **의사스펙트럼은 payload 의 마지막 360 바이트**
+// 다. 헤더에 필드를 덧붙여도 스펙트럼 오프셋이 안 밀리도록 앞이 아니라 뒤에서
+// 센다 (수신 측: payload + len - 360).
+//
+// 스펙트럼은 uint8 로 양자화한다. 대역폭이 이유가 아니라(측정은 운용자 트리거고
+// float 형이어도 FFT 스트림의 0.1%), (a) FFT 가 이미 uint8+zstd 라 집안 스타일이
+// 같고 (b) 0.5 dB/LSB 가 220 px 극좌표 플롯의 시각 분해능(~0.2 dB/px) 아래이며
+// (c) JOIN 쪽 이력 링이 4배 작아지기 때문이다.
+//   q = 0..255,  dB_below_peak = -0.5 * q   (피크 = 0 dB)
+struct __attribute__((packed)) PktDfResult {
+    uint8_t  kind;            // 0=측정성공 1=측정거절 2=설정거절
+    uint8_t  dnum;            // 표시번호 1..10 (0=채널 없음)
+    uint8_t  elements;        // 측정에 실제로 쓴 소자 수
+    uint8_t  algo;            // 0=Bartlett 1=Capon 2=MUSIC
+    uint8_t  overdrive_mask;  // ADC 과입력 채널 비트마스크
+    uint8_t  has_spectrum;    // 1 이면 payload 말미 360 B 가 유효
+    uint8_t  frames_used;
+    uint8_t  frames_discarded;
+    uint8_t  origin;          // 0=수동(운용자) 1=AUTO DF. 채팅 방송 여부를 가른다
+    uint8_t  imbalance;       // 소자 전력이 중앙값 대비 10배 밖 (죽은 채널 의심)
+    uint8_t  alt_n;           // 유효한 대안 방위 개수 (0..2)
+    uint8_t  _rsv;
+    float    bearing_deg;     // heading offset 반영 (최종 보고값)
+    float    bearing_rel_deg; // 안테나 0 기준
+    float    snr_db;          // 고유값비 SNR
+    float    conf_db;         // Bartlett PAPR
+    float    algo_papr_db;    // 보고 알고리즘의 PAPR
+    float    power_dbfs;
+    float    cf_mhz, bw_khz, eff_bw_khz;
+    float    n_eff_looks;
+    float    ambiguity;       // >1 이면 격자엽 (ULA 휴리스틱이라 UCA 에선 못 믿는다)
+    float    diag_spread_db;  // max/min diag(R)
+    float    alt_deg[2];      // 주엽 밖 국소최대 (모호집합)
+    float    alt_db[2];       // 피크 대비 dB (<=0)
+    float    station_lat;     // 측정 순간의 배열 위치. 이동 기지(드론)라 결과마다 다르다
+    float    station_lon;     // 동경 양수(E>0) — HOST 내부 규약(서경 양수)에서 반전해 실었다
+    int64_t  t_end_ms;        // 측정 종료 wall clock (epoch ms)
+    uint16_t dur_ms;          // t_end - t_start
+    uint8_t  _rsv2[2];
+    char     note[64];        // 거절 원문 / 진단 문구
+};
+
+// ── DF_STATUS (HOST → JOIN) ───────────────────────────────────────────────
+// heimdall DAQ 판독. HOST 만 볼 수 있어 JOIN 의 DF 패널 좌측 열이 통째로 죽어
+// 있었다 — 거절 이유를 설명하는 값들이 전부 여기 있는데 정작 조작하는 사람은
+// 못 본다.
+//
+// 하트비트에 붙이지 않은 이유: 156 B 를 모든 JOIN 이 3초마다 파싱하게 만드는데
+// 정작 패널은 보통 닫혀 있다. 대신 2초 주기 별도 방송을 hw.type==KRAKEN 으로
+// 게이트한다 — 비-Kraken 기지(함대 대부분)는 아무것도 안 보낸다.
+struct __attribute__((packed)) PktDfStatus {
+    uint8_t  link;            // 0=down 1=calibrating 2=streaming
+    uint8_t  usable;
+    uint8_t  sync_state, delay_sync, iq_sync, noise_src;
+    uint8_t  channels;        // DAQ 가 보고한 active_ant_chs
+    uint8_t  overdrive;       // ADC 과입력 마스크
+    uint8_t  measuring;
+    uint8_t  progress_pct;
+    uint8_t  meas_dnum;
+    uint8_t  _rsv;
+    float    daq_cf_mhz, daq_fs_msps;
+    float    frame_rate_hz, recv_mbps;
+    float    lambda_m, ambiguity;
+    uint32_t frames_ok, frames_cal, frames_bad, gaps, reconnects;  // 표시용이라 32비트로 줄임
+    uint16_t gain_tenths[8];
+    char     hw_id[20];
+    char     last_error[64];  // HOST 는 96 자를 쓰지만 앞 63 자면 원인을 안다
 };
 
 struct __attribute__((packed)) PktHeartbeat {

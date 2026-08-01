@@ -36,6 +36,7 @@ enum class Status : uint8_t {
     Timeout,         // 프레임 예산 안에 충분히 못 모음
     BadRequest,      // 대역폭 0/음수 등
     Cancelled,
+    Overdrive,       // ADC 클리핑으로 쓸 프레임이 없었다 (gain 을 내려야 한다)
 };
 
 const char* status_text(Status s);
@@ -74,6 +75,19 @@ struct Result {
     Algo     algo        = Algo::Music;
     uint32_t overdrive_mask = 0;
     double   ambiguity_ratio = 0;   // (2 r sin(pi/M)) / (lambda/2). >1 이면 격자엽
+
+    // ── 진단 (추정기가 이미 계산하던 값들) ────────────────────────────────
+    double   algo_papr_db  = 0;     // 보고 알고리즘의 PAPR. confidence_db 는 Bartlett 것
+    double   eval[kMaxElements] = {};   // 오름차순 고유값
+    double   diag_spread_db = 0;    // max/min diag(R) (dB)
+    bool     imbalance = false;     // 소자 전력이 중앙값 대비 10배 밖
+
+    // 주엽 밖 국소최대 상위 2개. alt_deg 는 heading offset 반영된 최종 방위,
+    // alt_db 는 피크 대비 dB (<=0). 5소자 UCA 는 700 MHz 에서 정확히 180도에
+    // -4.8 dB 사이드로브가 있는데 ambiguity_ratio 로는 안 잡힌다 (ULA 휴리스틱).
+    double   alt_deg[2] = {};
+    double   alt_db[2]  = {};
+    int      alt_n      = 0;
 
     float    spectrum_db[360] = {}; // 보고 알고리즘, 최대 정규화 dB
     int64_t  t_start_ms = 0, t_end_ms = 0;

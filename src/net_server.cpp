@@ -333,7 +333,11 @@ void NetServer::handle_packet(std::shared_ptr<ClientConn> c,
                 if(cb.on_df_set_snr) cb.on_df_set_snr((int)cmd->df_set_snr.snr_db);
                 break;
             case CmdType::DF_MEASURE:
-                if(cb.on_df_measure) cb.on_df_measure((int)cmd->df_measure.dnum);
+                // origin 은 PktCmd 의 고정 크기 유니온 안이라 구 JOIN 도 0
+                // (= 수동) 으로 채워 보낸다. 별도 len 게이트가 필요 없다.
+                if(cb.on_df_measure)
+                    cb.on_df_measure((int)cmd->df_measure.dnum,
+                                     cmd->df_measure.origin != 0);
                 break;
             case CmdType::SET_CH_DETECT:
                 if(cb.on_set_ch_detect)
@@ -887,6 +891,23 @@ void NetServer::broadcast_disk_stat(uint64_t free_bytes, uint64_t total_bytes, c
 // HOST 가 적용한 설정을 정본으로 뿌린다. 변경 시 + JOIN 접속 시 보낸다.
 void NetServer::broadcast_df_config(const PktDfConfig& c){
     auto pkt = make_packet(PacketType::DF_CONFIG, &c, sizeof(c));
+    if(cb.on_relay_broadcast)
+        cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
+}
+
+// 의사스펙트럼은 구조체 뒤에 그대로 이어붙인다. 수신 측은 payload 말미 360 B 로
+// 읽으므로, 나중에 PktDfResult 에 필드를 덧붙여도 오프셋이 안 밀린다.
+void NetServer::broadcast_df_result(const PktDfResult& r, const uint8_t* spec360){
+    std::vector<uint8_t> body(sizeof(r) + (spec360 ? 360 : 0));
+    memcpy(body.data(), &r, sizeof(r));
+    if(spec360) memcpy(body.data() + sizeof(r), spec360, 360);
+    auto pkt = make_packet(PacketType::DF_RESULT, body.data(), body.size());
+    if(cb.on_relay_broadcast)
+        cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
+}
+
+void NetServer::broadcast_df_status(const PktDfStatus& s){
+    auto pkt = make_packet(PacketType::DF_STATUS, &s, sizeof(s));
     if(cb.on_relay_broadcast)
         cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
 }
