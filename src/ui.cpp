@@ -5290,18 +5290,16 @@ void run_streaming_viewer(){
                 // 각 열 폭은 최악 문자열을 CalcTextSize 로 재서 잡는다.
                 const float col_gap = ImGui::CalcTextSize("  ").x;
                 const float col_cpu = ImGui::CalcTextSize("HOST |").x + col_gap;
-                const float col_ram = col_cpu + ImGui::CalcTextSize("CPU : 100% [100\xC2\xB0""C]").x + col_gap;
-                const float col_rte = col_ram + ImGui::CalcTextSize("RAM : 100%").x + col_gap;
+                const float col_rte = col_cpu + ImGui::CalcTextSize("CPU : 100% [100\xC2\xB0""C]").x + col_gap;
                 const float col_bat = col_rte + ImGui::CalcTextSize("Download : 999.99KB/s").x + col_gap;
-                auto status_row = [&](const char* who, int cpu, int ct, int ram,
+                auto status_row = [&](const char* who, int cpu, int ct,
                                       const char* rate_label, const char* rate, const char* bat){
                     ImGui::TextUnformatted(who);
                     ImGui::SameLine(col_cpu); ImGui::Text("CPU : %d%% [%d\xC2\xB0""C]", cpu, ct);
-                    ImGui::SameLine(col_ram); ImGui::Text("RAM : %d%%", ram);
                     ImGui::SameLine(col_rte); ImGui::Text("%s : %s", rate_label, rate);
                     if(bat && bat[0]){ ImGui::SameLine(col_bat); ImGui::TextUnformatted(bat); }
                 };
-                // HOST CPU/RAM/Upload/전원
+                // HOST CPU/Upload/전원
                 // Upload = 그 HOST 가 Central 로 올리는 업로드량.
                 //   HOST 창: 자기 CentralClient tx 레이트(net_up_kbps).
                 //   JOIN 창: 원격 HOST 가 heartbeat 로 보내온 값(remote_host_up_x100).
@@ -5310,18 +5308,18 @@ void run_streaming_viewer(){
                     fmt_bat(bbuf, sizeof(bbuf), vv.net_cli->remote_host_bat.load());
                     status_row("HOST |", vv.net_cli->remote_host_cpu.load(),
                                vv.net_cli->remote_host_cpu_temp.load(),
-                               vv.net_cli->remote_host_ram.load(), "Upload", rbuf, bbuf);
+                               "Upload", rbuf, bbuf);
                 } else {
                     fmt_rate(rbuf, sizeof(rbuf), vv.net_up_kbps.load());
                     fmt_bat(bbuf, sizeof(bbuf), vv.sysmon_bat.load());
                     status_row("HOST |", (int)vv.sysmon_cpu, vv.sysmon_cpu_temp_c.load(),
-                               (int)vv.sysmon_ram, "Upload", rbuf, bbuf);
+                               "Upload", rbuf, bbuf);
                 }
                 // JOIN Download = 이 창이 접속한 그 기지 하나로부터 받는 양 (창별 독립, 합산 아님)
                 if(vv.net_cli){
                     fmt_rate(rbuf, sizeof(rbuf), vv.net_down_kbps.load());
                     status_row("JOIN |", (int)vv.sysmon_cpu, vv.sysmon_cpu_temp_c.load(),
-                               (int)vv.sysmon_ram, "Download", rbuf, nullptr);
+                               "Download", rbuf, nullptr);
                 }
             };
 
