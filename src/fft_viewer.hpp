@@ -749,7 +749,7 @@ public:
     bool  auto_df_on[MAX_CHANNELS] = {};
     bool  auto_df_gate_prev[MAX_CHANNELS] = {};   // edge 검출용 직전 게이트 상태
     float auto_df_last_t[MAX_CHANNELS] = {};      // 마지막 요청 시각 (ImGui::GetTime)
-    static constexpr float AUTO_DF_COOLDOWN_S = 10.0f;
+    static constexpr float AUTO_DF_COOLDOWN_S = 5.0f;   // 열린 채널 재측정 주기
 
     // 파일 전송 진행상태 (HOST: 전송 중, JOIN: 수신 중)
     struct FileXfer {

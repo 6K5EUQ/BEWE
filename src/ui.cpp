@@ -5072,18 +5072,22 @@ void run_streaming_viewer(){
         // ── 채널 스컬치 업데이트 (FFT 기반, 필터만 있으면 동작) ──────────
         v.update_channel_squelch();
 
-        // ── AUTO DF: 스컬치 게이트 닫힘→열림 순간에 DF 1회 요청 ───────────
+        // ── AUTO DF: 스컬치가 열려 있는 동안 주기적으로 DF 요청 ───────────
+        // 예전엔 "닫힘→열림" 순간(rise)만 봤다. 무전기처럼 끊겼다 이어지는 신호엔
+        // 맞지만, 방송처럼 한 번 열리고 계속 열려 있는 신호는 최초 1회 뒤로 영영
+        // 재트리거가 없다 — AUTO 를 켠 시점에 이미 열려 있었다면 아예 안 걸린다.
+        // 그래서 rise 뿐 아니라 "열려 있음" 자체를 조건으로 두고, 쿨다운으로 주기를
+        // 만든다. AUTO 를 막 켠 채널은 last_t 가 0 이라 다음 프레임에 바로 한 번 잰다.
+        //
         // 엔진은 한 번에 한 채널만 재므로 경합하면 먼저 뜬 쪽이 이기고 나머지는
         // 버린다 (df_request_by_display_num 이 "already running" 으로 거절).
-        // 채널당 쿨다운을 둬 연속 통신에서 요청이 쏟아지는 것을 막는다.
         if(v.df_link_state() != 0){
             float now_df = (float)ImGui::GetTime();
             for(int ci=0; ci<MAX_CHANNELS; ci++){
                 if(!v.channels[ci].filter_active){ v.auto_df_gate_prev[ci]=false; continue; }
                 bool g = v.channels[ci].sq_gate.load();
-                bool rise = g && !v.auto_df_gate_prev[ci];
                 v.auto_df_gate_prev[ci] = g;
-                if(!rise || !v.auto_df_on[ci]) continue;
+                if(!g || !v.auto_df_on[ci]) continue;            // 열려 있는 동안만
                 if(v.channels[ci].dem_paused.load()) continue;   // Holding = 가시대역 밖
                 if(now_df - v.auto_df_last_t[ci] < FFTViewer::AUTO_DF_COOLDOWN_S) continue;
                 v.auto_df_last_t[ci] = now_df;
@@ -5704,8 +5708,14 @@ void run_streaming_viewer(){
                                 bool on    = df_ok && v.auto_df_on[ci];
                                 if(!df_ok)   ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(0.6f,0.1f,0.1f,1.f));
                                 else if(on)  ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(0.1f,0.55f,0.1f,1.f));
-                                if(ImGui::SmallButton("AUTO DF") && df_ok)
+                                if(ImGui::SmallButton("AUTO DF") && df_ok){
                                     v.auto_df_on[ci] = !v.auto_df_on[ci];
+                                    // 켜는 순간 쿨다운을 비워 둔다 — 그 채널이 이미
+                                    // 열려 있으면 다음 프레임에 곧바로 한 번 잰다.
+                                    // (안 그러면 다음 쿨다운 만료까지 아무 일도 없어
+                                    //  버튼이 안 먹은 것처럼 보인다.)
+                                    if(v.auto_df_on[ci]) v.auto_df_last_t[ci] = 0.f;
+                                }
                                 if(!df_ok || on) ImGui::PopStyleColor();
                             }
 

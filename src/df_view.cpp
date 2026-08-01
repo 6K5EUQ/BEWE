@@ -53,6 +53,34 @@ const char* link_text(int l){
     return l == 2 ? "STREAMING" : (l == 1 ? "CALIBRATING" : "DOWN");
 }
 
+// ── 주파수 → LOB 색 ──────────────────────────────────────────────────────
+// 지도에 선이 여러 개 겹치면 어느 게 무엇을 잰 것인지 색으로 구분되어야 한다.
+// 채널 번호는 주파수 정렬 순위라 채널이 하나 생기고 사라질 때마다 밀리므로,
+// 같은 대상을 계속 다른 색으로 그리게 된다. 그래서 주파수 자체를 키로 쓴다 —
+// 같은 주파수는 세션이 바뀌어도, 기지가 달라도 언제나 같은 색이다.
+//
+// 1 kHz 로 양자화한다. 측정마다 소수점 아래가 미세하게 흔들려도(같은 방송을
+// 두 번 재면 cf_mhz 가 0.0001 씩 달라진다) 같은 색으로 묶이게 하려는 것이다.
+struct LobColor { ImU32 core, glow; };
+LobColor lob_color_for_freq(float cf_mhz){
+    // 노랑 → 파랑 → 보라 → 빨강 (운용자 지정 순서)
+    static const struct { uint8_t r,g,b; } kPalette[] = {
+        {255, 214,  70},   // 노랑
+        { 80, 165, 255},   // 파랑
+        {185, 120, 255},   // 보라
+        {255,  95,  95},   // 빨강
+    };
+    constexpr int N = (int)(sizeof(kPalette)/sizeof(kPalette[0]));
+    const uint32_t khz = (uint32_t)(cf_mhz * 1000.0f + 0.5f);
+    // 인접 주파수가 서로 다른 색이 되도록 섞는다 (단순 나머지는 1 kHz 차이가
+    // 같은 색으로 몰릴 수 있다). 값이 같으면 결과도 항상 같다.
+    uint32_t h = khz * 2654435761u;
+    h ^= h >> 16;
+    const auto& c = kPalette[h % N];
+    return { IM_COL32(c.r, c.g, c.b, 255),
+             IM_COL32((c.r*3+255)/4, (c.g*3+255)/4, (c.b*3+255)/4, 255) };
+}
+
 
 // 엔진의 Config::validate() 와 같은 교차필드 제약. 위젯은 슬라이더 "범위"만 좁히고
 // 저장값은 그대로 두기 때문에, elements 를 내리면 signal_dim 이 범위 밖에 남는다.
@@ -562,7 +590,12 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 if(f.dnum > 0){ snprintf(b, sizeof b, "%u", (unsigned)f.dnum); modview::cell(b); }
                 else modview::cell("-");
                 ImGui::TableSetColumnIndex(2);
-                if(f.cf_mhz > 0.f){ snprintf(b, sizeof b, "%.4f", f.cf_mhz); modview::cell(b); }
+                // 지도 LOB 과 같은 색으로 찍는다 — 표의 행과 지도의 선이 눈으로 이어진다.
+                if(f.cf_mhz > 0.f){
+                    snprintf(b, sizeof b, "%.4f", f.cf_mhz);
+                    const ImU32 fc = lob_color_for_freq(f.cf_mhz).glow;
+                    modview::cell(b, ImGui::ColorConvertU32ToFloat4(fc));
+                }
                 else modview::cell("-");
                 ImGui::TableSetColumnIndex(3);
                 if(f.kind == 0){
@@ -725,13 +758,15 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             const double e_lat = sla + (lob_km * std::cos(f.bearing_deg * D2R)) / KM_PER_DEG_LAT;
             const double e_lon = slo + (lob_km * std::sin(f.bearing_deg * D2R))
                                        / (KM_PER_DEG_LAT * (clat > 0.05 ? clat : 0.05));
+            // 주파수별 색 — 같은 주파수는 항상 같은 색이라 겹친 선을 눈으로 가른다.
+            const LobColor lc = lob_color_for_freq(f.cf_mhz);
             ImVec2 prev = P(sla, slo);
             for(int s = 1; s <= 16; s++){
                 const double t = (double)s / 16.0;
                 const ImVec2 cur = P(sla + (e_lat - sla)*t, slo + (e_lon - slo)*t);
                 const float fade = (float)(1.0 - 0.65*t) * amul;
-                dl->AddLine(prev, cur, IM_COL32(255,210,60,(int)(55*fade)),  5.0f);
-                dl->AddLine(prev, cur, IM_COL32(255,236,150,(int)(205*fade)), 1.6f);
+                dl->AddLine(prev, cur, (lc.core & 0x00FFFFFF) | ((ImU32)(55*fade)  << 24), 5.0f);
+                dl->AddLine(prev, cur, (lc.glow & 0x00FFFFFF) | ((ImU32)(205*fade) << 24), 1.6f);
                 // 커서-선분 거리 (클릭 히트테스트용)
                 {
                     const float vx = cur.x-prev.x, vy = cur.y-prev.y;
