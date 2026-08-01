@@ -57,7 +57,7 @@ void worker(FFTViewer& v, int ch_idx){
     bewe_log_push(0,"ACARS[%d] start: %.4f MHz  BW=%.1fkHz  asr=%u\n",
         ch_idx,(ch.s+ch.e)/2.0f,bw_hz/1000.f,actual_asr);
 
-    const size_t MAX_LAG=(size_t)(msr*0.08);
+    const size_t MAX_LAG = ring_max_lag(msr, v.hw.burst_samples);
     const size_t BATCH  =(size_t)cap_decim*actual_asr/50;
     std::atomic<size_t>& my_rp = worker_rp(ch_idx);
     my_rp.store(v.ring_wp.load());
@@ -142,7 +142,7 @@ void worker(FFTViewer& v, int ch_idx){
         size_t lag_limit = catching_up ? std::min((size_t)(IQ_RING_CAPACITY/2),
                                                   PREROLL + MAX_LAG) : MAX_LAG;
         if(lag>lag_limit){
-            size_t keep=(size_t)(msr*0.02);
+            size_t keep = ring_keep_after_lag(msr, v.hw.burst_samples);
             rp=(wp-keep)&IQ_RING_MASK;
             my_rp.store(rp,std::memory_order_release);
             for(int k=0;k<4;k++){ lpi[k].s=lpq[k].s=0; }

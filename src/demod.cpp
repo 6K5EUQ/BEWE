@@ -61,7 +61,7 @@ void FFTViewer::dem_worker(int ch_idx){
     // 스컬치는 UI 스레드에서 FFT 기반으로 중앙 관리 (sq_gate 읽기만)
     bool gate_open=false;
 
-    const size_t MAX_LAG=(size_t)(msr*0.08);
+    const size_t MAX_LAG = ring_max_lag(msr, hw.burst_samples);
     const size_t BATCH  =(size_t)cap_decim*actual_asr/50;
     const float  inv_scale=1.0f/hw.iq_scale;  // ÷ → × (per-worker, msr/HW 고정과 동일 안전성)
 
@@ -79,9 +79,12 @@ void FFTViewer::dem_worker(int ch_idx){
         size_t rp=ch.dem_rp.load(std::memory_order_relaxed);
         size_t lag=(wp-rp)&IQ_RING_MASK;
 
-        // Lag limiter: reset if too far behind
+        // Lag limiter: reset if too far behind.
+        // 정말 밀렸을 때만 온다 (버스트 백엔드는 MAX_LAG 이 버스트 2개분).
+        // 남기는 양도 버스트 하나는 되어야 한다 — 20 ms 만 남기면 다음 프레임이
+        // 그대로 또 리미터를 때린다.
         if(lag>MAX_LAG){
-            size_t keep=(size_t)(msr*0.02);
+            size_t keep=ring_keep_after_lag(msr, hw.burst_samples);
             rp=(wp-keep)&IQ_RING_MASK;
             ch.dem_rp.store(rp,std::memory_order_release);
             for(int k=0;k<4;k++){ lpi[k].s=lpq[k].s=0; }

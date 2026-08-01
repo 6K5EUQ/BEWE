@@ -474,6 +474,32 @@ static inline uint32_t optimal_iq_sr(uint32_t main_sr, float bw_hz){
     return main_sr/decim;
 }
 
+// ── ring 소비 워커의 lag 리미터 임계 ──────────────────────────────────────
+// 기본 80 ms. "워커가 정말 못 따라간다" 를 판정하는 값이라 평소엔 이걸로 충분하다.
+//
+// 단 캡처가 버스트로 공급하는 백엔드에선 버스트 하나가 이 값을 그냥 넘는다.
+// KrakenSDR 이 그렇다 — heimdall 이 1,048,576 샘플(2.4 MSPS 에서 437 ms)을 한 번에
+// ring 에 넣으므로, 80 ms 기준이면 프레임이 올 때마다 "과부하" 로 오판해 대부분을
+// 버린다 (실측: 오디오가 필요량의 5% 인 1.2 KB/s 만 나와 뚝뚝 끊겼다).
+// 그래서 버스트 2개분을 담을 수 있게 올리고, ring wrap 을 피하려 용량 절반으로 막는다.
+//
+// keep 은 리미터가 실제로 발동했을 때 남길 양이다. 버스트 하나는 남겨야 다음
+// 프레임이 도착하자마자 또 리미터를 때리지 않는다.
+static inline size_t ring_max_lag(uint32_t main_sr, uint32_t burst_samples){
+    size_t lag = (size_t)(main_sr * 0.08);
+    if(burst_samples){
+        const size_t need = (size_t)burst_samples * 2;
+        if(lag < need) lag = need;
+    }
+    if(lag > IQ_RING_CAPACITY/2) lag = IQ_RING_CAPACITY/2;
+    return lag;
+}
+static inline size_t ring_keep_after_lag(uint32_t main_sr, uint32_t burst_samples){
+    size_t keep = (size_t)(main_sr * 0.02);
+    if(burst_samples && keep < burst_samples) keep = burst_samples;
+    return keep;
+}
+
 static inline void demod_rates(uint32_t main_sr, float bw_hz,
                                 uint32_t& inter_sr, uint32_t& audio_decim, uint32_t& cap_decim){
     float min_inter=bw_hz*3.0f;

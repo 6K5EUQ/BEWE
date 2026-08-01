@@ -49,7 +49,7 @@ void worker(FFTViewer& v, int ch_idx){
     // magnitude 출력 묶음 (~20 ms 분량)
     std::vector<float> mag; mag.reserve((size_t)(fs_out*0.05)+64);
 
-    const size_t MAX_LAG=(size_t)(msr*0.08);
+    const size_t MAX_LAG = ring_max_lag(msr, v.hw.burst_samples);
     const size_t BATCH  =(size_t)(msr/50);                 // ~20 ms 입력
     std::atomic<size_t>& my_rp = worker_rp(ch_idx);
     my_rp.store(v.ring_wp.load());
@@ -80,7 +80,7 @@ void worker(FFTViewer& v, int ch_idx){
         size_t rp=my_rp.load(std::memory_order_relaxed);
         size_t lag=(wp-rp)&IQ_RING_MASK;
         if(lag>MAX_LAG){                                   // 밀리면 점프 + 필터 리셋
-            size_t keep=(size_t)(msr*0.02);
+            size_t keep = ring_keep_after_lag(msr, v.hw.burst_samples);
             rp=(wp-keep)&IQ_RING_MASK;
             my_rp.store(rp,std::memory_order_release);
             cap_i=cap_q=0; cap_cnt=0;

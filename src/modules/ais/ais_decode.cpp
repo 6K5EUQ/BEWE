@@ -134,7 +134,7 @@ void worker(FFTViewer& v, int ch_idx){
     bewe_log_push(0,"AIS[%d] start: %.4f MHz  BW=%.1f kHz  station=%u  decim=%u out=%u Hz (%.2f sps)\n",
         ch_idx,(ch.s+ch.e)/2.0f, bw_hz/1000.f, msr, decim, out_sr, (double)out_sr/9600.0);
 
-    const size_t MAX_LAG=(size_t)(msr*0.08);
+    const size_t MAX_LAG = ring_max_lag(msr, v.hw.burst_samples);
     const size_t BATCH  =std::max<size_t>(4096, msr/50);
     std::atomic<size_t>& my_rp = worker_rp(ch_idx);
     my_rp.store(v.ring_wp.load());
@@ -190,7 +190,7 @@ void worker(FFTViewer& v, int ch_idx){
         size_t rp=my_rp.load(std::memory_order_relaxed);
         size_t lag=(wp-rp)&IQ_RING_MASK;
         if(lag>MAX_LAG){                                   // 과부하 → 경계 점프 + 상태 리셋
-            size_t keep=(size_t)(msr*0.02);
+            size_t keep = ring_keep_after_lag(msr, v.hw.burst_samples);
             rp=(wp-keep)&IQ_RING_MASK; my_rp.store(rp,std::memory_order_release);
             for(int k=0;k<4;k++){ lpi[k].s=lpq[k].s=0; }
             dec_i=dec_q=0; dec_cnt=0; prev_i=prev_q=0; acc.reset(); acc_gate=false;

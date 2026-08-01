@@ -456,7 +456,7 @@ void FFTViewer::iq_only_worker(int ch_idx){
 
     double acc_i=0, acc_q=0; int acc_cnt=0;
     const float inv_scale=1.0f/hw.iq_scale;  // ÷ → ×
-    const size_t MAX_LAG = (size_t)(msr * 0.08);
+    const size_t MAX_LAG = ring_max_lag(msr, hw.burst_samples);
     const size_t BATCH   = std::max((size_t)4096, (size_t)decim * 256);
 
     while(!ch.iq_only_stop_req.load(std::memory_order_relaxed) && !sdr_stream_error.load()){
@@ -471,7 +471,7 @@ void FFTViewer::iq_only_worker(int ch_idx){
         size_t rp = ch.iq_only_rp.load(std::memory_order_relaxed);
         size_t lag = (wp - rp) & IQ_RING_MASK;
         if(lag > MAX_LAG){
-            size_t keep = (size_t)(msr * 0.02);
+            size_t keep = ring_keep_after_lag(msr, hw.burst_samples);
             rp = (wp - keep) & IQ_RING_MASK;
             ch.iq_only_rp.store(rp, std::memory_order_release);
             for(int k=0;k<4;k++){ lpi[k].s=lpq[k].s=0; }

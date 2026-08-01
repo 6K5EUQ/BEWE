@@ -31,6 +31,11 @@ struct HWConfig {
     // (이전엔 0.875 — 가장자리에 채널 두면 update_dem_by_freq 가 Holding 처리)
     float    eff_bw_ratio    = 1.0f;
 
+    // 캡처가 ring 에 한 번에 밀어넣는 최대 샘플 수 (0 = 작은 버퍼 연속 공급).
+    // demod/decode 워커의 lag 리미터가 "과부하"와 "정상 버스트"를 구별하는 데 쓴다.
+    // KrakenSDR 은 heimdall 이 1,048,576 샘플(2.4 MSPS 에서 437 ms)을 통째로 주므로
+    // 이 값을 모르면 워커가 프레임마다 리미터를 때려 95% 를 버린다 (실측 audio 1.2 KB/s).
+    uint32_t burst_samples   = 0;
     // 표시용 이름
     const char* name         = "Unknown";
 
@@ -159,6 +164,8 @@ inline HWConfig make_kraken_config(uint32_t actual_sr){
     c.iq_scale        = 2048.0f;
     c.iq_offset       = 0.0f;
     c.eff_bw_ratio    = 1.0f;
+    // heimdall 프레임 = 1,048,576 샘플. 워커 lag 리미터가 이걸 정상으로 봐야 한다.
+    c.burst_samples   = 1u << 20;
     c.name            = "KrakenSDR";
     c.gain_min        = 0.0f;
     c.gain_max        = 49.6f;
