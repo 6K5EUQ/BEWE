@@ -4973,25 +4973,12 @@ void run_streaming_viewer(){
            && !ImGui::IsAnyItemActive()){
             try_toggle(3, v.lwf_modal_open);
         }
-        // ── D 키 ────────────────────────────────────────────────────────
-        // 복조가 걸리지 않은 채널이 선택돼 있으면 그 채널의 Detect(에너지 디텍션) 토글.
-        // 그 외에는 기존 동작 = DEMOD 모듈 패널 토글 (모듈 설치 시에만).
+        // ── D 키 = DEMOD 모듈 패널 토글 (모듈 설치 시에만) ──────────────
+        // (채널 Detect 토글 매핑 제거 — 사용자 요청. STATUS 의 DET 버튼이 그
+        //  역할을 한다.)
         if(ImGui::IsKeyPressed(ImGuiKey_D, false) && !io.WantTextInput
-           && !ImGui::IsAnyItemActive()){
-            int dci = v.selected_ch;
-            // detect 가 켜져 있으면(신호를 잡아 복조 중이어도) 언제나 해제 대상.
-            // 꺼져 있으면 복조 없는 채널만 detect 켜기 대상.
-            bool det_target = (dci >= 0 && v.channels[dci].filter_active
-                               && (v.channels[dci].det_on.load()
-                                   || (!v.channels[dci].dem_run.load()
-                                       && v.channels[dci].mode == Channel::DM_NONE)));
-            if(det_target){
-                bool on = !v.channels[dci].det_on.load();
-                if(v.net_cli) v.net_cli->cmd_set_ch_detect(dci, on);
-                else          v.set_channel_detect(dci, on);
-            } else if(!bewe_modules().empty()){
-                try_toggle(6, v.demod_panel_open);
-            }
+           && !ImGui::IsAnyItemActive() && !bewe_modules().empty()){
+            try_toggle(6, v.demod_panel_open);
         }
         // ── Signal Library 토글 (L키) — 새 오버레이 ────
         if(!viewer_open_blocking && ImGui::IsKeyPressed(ImGuiKey_L, false) && !io.WantTextInput){
