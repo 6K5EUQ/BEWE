@@ -69,6 +69,19 @@ bool FFTViewer::float_win_capturing_mouse(){
 // (종전엔 매 프레임 벡터 딥카피 + 256-엔트리 색테이블 재구성)
 static std::atomic<uint32_t> g_band_ui_gen{1};
 
+// ── 표시용 파일명 (확장자 제거) ───────────────────────────────────────────
+// STATUS-RECORD 목록은 이름만 보여준다. 확장자는 종류가 이미 IQ/DEMOD 소제목으로
+// 갈려 있어 정보가 없고, ".sigmf-data" 는 11자라 긴 파일명을 그만큼 더 잘라먹는다.
+//
+// **표시에만 쓴다.** re.filename 원본은 삭제·전송·경로조립이 그대로 쓰므로 절대
+// 바꾸지 않는다. 마지막 점부터 끝까지만 자르되, 점이 없거나 맨 앞이면(숨김파일)
+// 그대로 둔다.
+static std::string disp_name(const std::string& fn){
+    const size_t dot = fn.find_last_of('.');
+    if(dot == std::string::npos || dot == 0) return fn;
+    return fn.substr(0, dot);
+}
+
 // ── 파일 크기 포맷 ────────────────────────────────────────────────────────
 
 static std::string fmt_filesize(const std::string& dir, const std::string& fname){
@@ -5834,7 +5847,7 @@ void run_streaming_viewer(){
                                                     it_rz=fsz_cache.emplace(re.filename, fmt_filesize("",re.path)).first;
                                                 const std::string szstr=it_rz->second;
                                                 float pw_r = ImGui::GetContentRegionAvail().x;
-                                                ImGui::Selectable(re.filename.c_str(), false, ImGuiSelectableFlags_SpanAllColumns|ImGuiSelectableFlags_AllowDoubleClick, ImVec2(pw_r, 0));
+                                                ImGui::Selectable(disp_name(re.filename).c_str(), false, ImGuiSelectableFlags_SpanAllColumns|ImGuiSelectableFlags_AllowDoubleClick, ImVec2(pw_r, 0));
                                                 if(ImGui::BeginPopupContextItem("##iq_fin_ctx")){
                                                     if(ImGui::MenuItem("Delete")){
                                                         if(!re.path.empty()) ::remove(re.path.c_str());
@@ -5890,10 +5903,10 @@ void run_streaming_viewer(){
                                                 const char* iq_tag = iq_hld ? "[HLD]" : "[REC]";
                                                 if(!rc.second.empty())
                                                     snprintf(iq_lbl,sizeof(iq_lbl),"%s [%2d] %s  [%d/%ds]  %s",
-                                                             iq_tag, iq_dn, re.filename.c_str(), iq_rec_secs, iq_secs, rc.second.c_str());
+                                                             iq_tag, iq_dn, disp_name(re.filename).c_str(), iq_rec_secs, iq_secs, rc.second.c_str());
                                                 else
                                                     snprintf(iq_lbl,sizeof(iq_lbl),"%s [%2d] %s  [%d/%ds]",
-                                                             iq_tag, iq_dn, re.filename.c_str(), iq_rec_secs, iq_secs);
+                                                             iq_tag, iq_dn, disp_name(re.filename).c_str(), iq_rec_secs, iq_secs);
                                                 ImGui::Selectable(iq_lbl, re.ch_idx>=0 && v.selected_ch==re.ch_idx);
                                                 if(ImGui::IsItemHovered()){
                                                     if(ImGui::IsMouseClicked(ImGuiMouseButton_Left)){
@@ -5938,10 +5951,10 @@ void run_streaming_viewer(){
                                                 ImGui::PushStyleColor(ImGuiCol_Text,col);
                                                 if(re.xfer_total>0)
                                                     ImGui::Text("[Transferring]  %s  (%.1f / %.1f MB)",
-                                                        re.filename.c_str(),
+                                                        disp_name(re.filename).c_str(),
                                                         re.xfer_done/1048576.0, re.xfer_total/1048576.0);
                                                 else
-                                                    ImGui::Text("[Transferring]  %s", re.filename.c_str());
+                                                    ImGui::Text("[Transferring]  %s", disp_name(re.filename).c_str());
                                                 ImGui::PopStyleColor();
                                             } else if((re.req_state==RS::REQ_NONE || re.req_state==RS::REQ_TRANSFERRING) && re.finished){
                                                 // 전송 완료
@@ -5960,7 +5973,7 @@ void run_streaming_viewer(){
                                                     sz_s=it_rz2->second;
                                                 }
                                                 float pw_rg = ImGui::GetContentRegionAvail().x;
-                                                ImGui::Selectable(re.filename.c_str(), false, ImGuiSelectableFlags_SpanAllColumns|ImGuiSelectableFlags_AllowDoubleClick, ImVec2(pw_rg,0));
+                                                ImGui::Selectable(disp_name(re.filename).c_str(), false, ImGuiSelectableFlags_SpanAllColumns|ImGuiSelectableFlags_AllowDoubleClick, ImVec2(pw_rg,0));
                                                 if(ImGui::BeginPopupContextItem("##riq_fin_ctx")){
                                                     if(ImGui::MenuItem("Delete")){
                                                         if(!re.path.empty()) ::remove(re.path.c_str());
@@ -5986,11 +5999,11 @@ void run_streaming_viewer(){
                                             } else if(re.req_state==RS::REQ_DENIED){
                                                 col=IM_COL32(200,80,80,255);
                                                 ImGui::PushStyleColor(ImGuiCol_Text,col);
-                                                ImGui::Text("[Denied]  %s  %.0fs", re.filename.c_str(), re.req_deny_timer);
+                                                ImGui::Text("[Denied]  %s  %.0fs", disp_name(re.filename).c_str(), re.req_deny_timer);
                                                 ImGui::PopStyleColor();
                                             } else {
                                                 ImGui::PushStyleColor(ImGuiCol_Text,col);
-                                                ImGui::Text("%s", re.filename.c_str());
+                                                ImGui::Text("%s", disp_name(re.filename).c_str());
                                                 ImGui::PopStyleColor();
                                             }
                                         }
@@ -6056,9 +6069,9 @@ void run_streaming_viewer(){
                                             int dn=re.ch_idx>=0?v.freq_sorted_display_num(re.ch_idx):0;
                                             const char* tag = is_hld ? "[HLD]" : "[REC]";
                                             if(!ac.second.empty())
-                                                snprintf(rec_lbl,sizeof(rec_lbl),"%s [%2d] %s  [%d/%ds]  %s", tag, dn, re.filename.c_str(), rec_secs, secs, ac.second.c_str());
+                                                snprintf(rec_lbl,sizeof(rec_lbl),"%s [%2d] %s  [%d/%ds]  %s", tag, dn, disp_name(re.filename).c_str(), rec_secs, secs, ac.second.c_str());
                                             else
-                                                snprintf(rec_lbl,sizeof(rec_lbl),"%s [%2d] %s  [%d/%ds]", tag, dn, re.filename.c_str(), rec_secs, secs);
+                                                snprintf(rec_lbl,sizeof(rec_lbl),"%s [%2d] %s  [%d/%ds]", tag, dn, disp_name(re.filename).c_str(), rec_secs, secs);
                                             ImGui::Selectable(rec_lbl, re.ch_idx>=0 && v.selected_ch==re.ch_idx);
                                             if(ImGui::IsItemHovered()){
                                                 if(ImGui::IsMouseClicked(ImGuiMouseButton_Left)){
@@ -6088,7 +6101,7 @@ void run_streaming_viewer(){
                                                 it_az=fsz_cache.emplace(re.filename, fmt_filesize("",re.path)).first;
                                             const std::string szstr=it_az->second;
                                             float pw_a = ImGui::GetContentRegionAvail().x;
-                                            ImGui::Selectable(re.filename.c_str(), false, ImGuiSelectableFlags_SpanAllColumns|ImGuiSelectableFlags_AllowDoubleClick, ImVec2(pw_a, 0));
+                                            ImGui::Selectable(disp_name(re.filename).c_str(), false, ImGuiSelectableFlags_SpanAllColumns|ImGuiSelectableFlags_AllowDoubleClick, ImVec2(pw_a, 0));
                                             if(ImGui::BeginPopupContextItem("##aud_fin_ctx")){
                                                 if(ImGui::MenuItem("Delete")){
                                                     if(!re.path.empty()) ::remove(re.path.c_str());
