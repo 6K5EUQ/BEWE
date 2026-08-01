@@ -376,7 +376,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     static int    sort_col   = -1;
     static bool   sort_asc   = true;
     static bool   at_bottom  = true;
-    static float  lob_km     = 150.f;
+    static float  lob_km     = 10.f;    // 지도에 그리는 방위선 길이 (km)
     static uint32_t last_seq  = 0;    // 마지막으로 본 df_hist_seq (개수 아님)
     static int      last_vis_n = 0;   // 직전 프레임 가시행 수 (tail-follow 용)
 
@@ -456,7 +456,8 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     // 누른 그 프레임에 setup_open 을 바로 읽으면 지도 폭은 옛 값(패널 없음)인데
     // 패널만 그려져 지도 위에 겹친다. 토글은 다음 프레임부터 반영한다.
     const bool  setup_shown = setup_open;
-    const float setup_w = setup_shown ? 340.f : 0.f;
+    constexpr float kSetupW = 340.f;      // 설정 패널 폭 (오버레이 버튼 기준에도 쓰임)
+    const float setup_w = setup_shown ? kSetupW : 0.f;
     float tw, mapw;
     if(mv.big){ tw = 0.f; mapw = W - setup_w - (setup_w > 0 ? 4.f : 0.f); }
     else {
@@ -665,10 +666,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
 
     (void)modview_map::draw_map("##df_map", mv, pts, ImVec2(mapw, body_h),
                               just_opened, &stns, nullptr);
-    // 오버레이가 커서를 지도 안으로 옮기므로, 그 전 위치를 들고 있다가 되돌린다.
-    // 안 그러면 뒤따르는 SetupPanel 의 SameLine 이 지도 안쪽을 기준으로 잡아
-    // 패널이 지도 위에 겹쳐 그려진다 (표까지 밀려 사라진다).
-    const ImVec2 after_map_cursor = ImGui::GetCursorPos();
 
     // ── 지도 우상단 조작 오버레이 (헤더바 대체) ──────────────────────────
     // draw_map **뒤에** 등록한다: 나중에 그려야 지도 위에 보이고, 지도 캔버스
@@ -677,8 +674,15 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     // 않게 우상단 모서리에 붙이고, 필요한 것만 둔다.
     {
         const float BW = 62.f, BH = 22.f, PAD = 8.f, GAPB = 4.f;
-        // 오른쪽에서 왼쪽으로: SETUP, CLEAR, (잠금 중이면) 주파수 해제 버튼
-        float bx = map_p0.x + mapw - PAD - BW;
+        // 오른쪽에서 왼쪽으로: SETUP, CLEAR, (잠금 중이면) 주파수 해제 버튼.
+        //
+        // 기준을 지도 우상단으로 잡으면 SETUP 을 여는 순간 지도가 패널 폭만큼
+        // 좁아지며 버튼이 같이 왼쪽으로 끌려간다 (누른 버튼이 손 밑에서 도망간다).
+        // 그렇다고 창 오른쪽 끝에 붙이면 열린 패널 위를 덮는다. 그래서 **패널이
+        // 열렸을 때의 지도 폭**을 기준으로 고정한다 — 열고 닫아도 자리가 같고,
+        // 패널과도 겹치지 않는다.
+        const float anchor_w = mapw - (setup_w > 0 ? 0.f : (kSetupW + 4.f));
+        float bx = map_p0.x + std::max(anchor_w, 80.f) - PAD - BW;
         const float by = map_p0.y + PAD;
 
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.f);
@@ -709,7 +713,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             ImGui::PopStyleColor();
         }
         ImGui::PopStyleVar();
-        ImGui::SetCursorPos(after_map_cursor);   // 지도 다음 위치로 복원
     }
 
 
