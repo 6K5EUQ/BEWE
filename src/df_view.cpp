@@ -426,7 +426,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             return x.t_end_ms < y.t_end_ms;
         });
     }
-    // 0 Time 1 CH 2 Freq 3 Brg 4 SNR 5 Note
+    // 0 Time 1 CH 2 Freq 3 Brg 4 SNR
     modview::sort_vis(vis, sort_col, sort_asc, [&](int col, int a, int b)->int{
         const FFTViewer::DFFix& x = v.df_hist_at(a);
         const FFTViewer::DFFix& y = v.df_hist_at(b);
@@ -436,8 +436,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             case 1: return cf(x.dnum, y.dnum);
             case 2: return cf(x.cf_mhz, y.cf_mhz);
             case 3: return cf(x.bearing_deg, y.bearing_deg);
-            case 4: return cf(x.snr_db, y.snr_db);
-            default: return strcmp(x.note, y.note);
+            default: return cf(x.snr_db, y.snr_db);
         }
     });
     // 행 키는 push 시퀀스다. t_end_ms 를 쓰면 측정 전 거절(df_post_refusal)이
@@ -466,15 +465,14 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     if(!mv.big){
         ImGuiTableFlags tf = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
                              ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable;
-        if(ImGui::BeginTable("##df_tbl", 6, tf, ImVec2(tw, body_h))){
+        if(ImGui::BeginTable("##df_tbl", 5, tf, ImVec2(tw, body_h))){
             ImGui::TableSetupScrollFreeze(2, 1);
             ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 74);
             ImGui::TableSetupColumn("CH",   ImGuiTableColumnFlags_WidthFixed, 36);
             ImGui::TableSetupColumn("Freq", ImGuiTableColumnFlags_WidthFixed, 84);
-            ImGui::TableSetupColumn("Brg",  ImGuiTableColumnFlags_WidthFixed, 108);
+            ImGui::TableSetupColumn("Brg",  ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("SNR",  ImGuiTableColumnFlags_WidthFixed, 50);
-            ImGui::TableSetupColumn("Note", ImGuiTableColumnFlags_WidthStretch);
-            modview::sortable_headers(6, sort_col, sort_asc, /*text_col=*/5);
+            modview::sortable_headers(5, sort_col, sort_asc, /*text_col=*/-1);
 
             for(int p = 0; p < (int)vis.size(); p++){
                 const int hi = vis[p];
@@ -529,9 +527,9 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                         // 1 sigma 를 그대로 적으면 그 안에 있을 확률이 68% 뿐인데
                         // 숫자가 작아 더 정확해 보이는 착시를 준다.
                         const double sg95 = df_bearing_sigma_deg(f) * 1.96;
-                        snprintf(b, sizeof b, "%.1f (+-%.1f)", f.bearing_deg, sg95);
+                        snprintf(b, sizeof b, "%.1f\xC2\xB0 (%.1f\xC2\xB0)", f.bearing_deg, sg95);
                     } else {
-                        snprintf(b, sizeof b, "%.1f", f.bearing_deg);
+                        snprintf(b, sizeof b, "%.1f\xC2\xB0", f.bearing_deg);
                     }
                     modview::cell(b, f.manual_lob ? ImVec4(0.6f,0.8f,1.f,1.f)
                                                   : ImVec4(0.3f,0.9f,0.3f,1.f));
@@ -539,19 +537,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 ImGui::TableSetColumnIndex(4);
                 if(measured){ snprintf(b, sizeof b, "%.1f", f.snr_db); modview::cell(b); }
                 else modview::cell("-");
-                ImGui::TableSetColumnIndex(5);
-                {
-                    const bool bad = (f.kind != 0) || f.imbalance || f.overdrive_mask;
-                    ImVec4 nc = bad ? ImVec4(1.f,0.6f,0.35f,1.f) : ImVec4(0.65f,0.65f,0.65f,1.f);
-                    // 성공했는데 특별히 알릴 게 없으면 엔진이 note 에 "ok" 를 채운다
-                    // (status_text(Status::Ok)). 그건 방위·SNR 이 이미 말해주는 사실이라
-                    // 행마다 반복하면 정작 봐야 할 진단 문구가 묻힌다.
-                    const bool plain_ok = (f.kind == 0) && (strcmp(f.note, "ok") == 0);
-                    char nb[96];
-                    snprintf(nb, sizeof nb, "%s%s", f.origin ? "[A] " : "",
-                             plain_ok ? "" : f.note);
-                    modview::cell_left(nb, &nc);
-                }
             }
             // grew 는 **가시행 수가 늘었을 때**만 참이어야 한다. 전체 개수와
             // 비교하면 필터가 켜진 동안 매 프레임 참이 되어 스크롤이 바닥에
