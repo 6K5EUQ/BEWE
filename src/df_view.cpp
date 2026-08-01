@@ -426,7 +426,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             return x.t_end_ms < y.t_end_ms;
         });
     }
-    // 0 Time 1 CH 2 Freq 3 Brg 4 SNR 5 Conf 6 Note
+    // 0 Time 1 CH 2 Freq 3 Brg 4 SNR 5 Note
     modview::sort_vis(vis, sort_col, sort_asc, [&](int col, int a, int b)->int{
         const FFTViewer::DFFix& x = v.df_hist_at(a);
         const FFTViewer::DFFix& y = v.df_hist_at(b);
@@ -437,7 +437,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             case 2: return cf(x.cf_mhz, y.cf_mhz);
             case 3: return cf(x.bearing_deg, y.bearing_deg);
             case 4: return cf(x.snr_db, y.snr_db);
-            case 5: return cf(x.conf_db, y.conf_db);
             default: return strcmp(x.note, y.note);
         }
     });
@@ -467,16 +466,15 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     if(!mv.big){
         ImGuiTableFlags tf = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
                              ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable;
-        if(ImGui::BeginTable("##df_tbl", 7, tf, ImVec2(tw, body_h))){
+        if(ImGui::BeginTable("##df_tbl", 6, tf, ImVec2(tw, body_h))){
             ImGui::TableSetupScrollFreeze(2, 1);
             ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 74);
             ImGui::TableSetupColumn("CH",   ImGuiTableColumnFlags_WidthFixed, 36);
             ImGui::TableSetupColumn("Freq", ImGuiTableColumnFlags_WidthFixed, 84);
-            ImGui::TableSetupColumn("Brg",  ImGuiTableColumnFlags_WidthFixed, 54);
+            ImGui::TableSetupColumn("Brg",  ImGuiTableColumnFlags_WidthFixed, 108);
             ImGui::TableSetupColumn("SNR",  ImGuiTableColumnFlags_WidthFixed, 50);
-            ImGui::TableSetupColumn("Conf", ImGuiTableColumnFlags_WidthFixed, 50);
             ImGui::TableSetupColumn("Note", ImGuiTableColumnFlags_WidthStretch);
-            modview::sortable_headers(7, sort_col, sort_asc, /*text_col=*/6);
+            modview::sortable_headers(6, sort_col, sort_asc, /*text_col=*/5);
 
             for(int p = 0; p < (int)vis.size(); p++){
                 const int hi = vis[p];
@@ -516,22 +514,28 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                     }
                 }
                 else modview::cell("-");
+                // 수동 LOB 은 측정이 아니다 — 0 을 SNR 로 찍으면 실제로 잰 값처럼 보인다.
+                const bool measured = (f.kind == 0) && !f.manual_lob;
                 ImGui::TableSetColumnIndex(3);
                 if(f.kind == 0){
-                    snprintf(b, sizeof b, "%.1f", f.bearing_deg);
+                    // 방위와 그 불확도를 한 칸에 붙여 쓴다. 예전엔 Conf(Bartlett
+                    // PAPR)를 따로 뒀는데, 그건 "봉우리가 잡음과 구분되는가" 라는
+                    // 검출 통계량이라 임계가 적분량마다 달라 값 자체를 비교할 수
+                    // 없었다. 여기 쓰는 sigma 는 지도의 95% 타원과 같은 근거라
+                    // (df_bearing_sigma_deg) 표와 지도가 같은 말을 한다.
+                    if(measured){
+                        const double sg = df_bearing_sigma_deg(f);
+                        snprintf(b, sizeof b, "%.1f (%.1f)", f.bearing_deg, sg);
+                    } else {
+                        snprintf(b, sizeof b, "%.1f", f.bearing_deg);
+                    }
                     modview::cell(b, f.manual_lob ? ImVec4(0.6f,0.8f,1.f,1.f)
                                                   : ImVec4(0.3f,0.9f,0.3f,1.f));
                 } else modview::cell("-");
-                // 수동 LOB 은 측정이 아니다 — 0 을 SNR/신뢰도/프레임수로 찍으면
-                // 실제로 잰 값처럼 보인다.
-                const bool measured = (f.kind == 0) && !f.manual_lob;
                 ImGui::TableSetColumnIndex(4);
                 if(measured){ snprintf(b, sizeof b, "%.1f", f.snr_db); modview::cell(b); }
                 else modview::cell("-");
                 ImGui::TableSetColumnIndex(5);
-                if(measured){ snprintf(b, sizeof b, "%.2f", f.conf_db); modview::cell(b); }
-                else modview::cell("-");
-                ImGui::TableSetColumnIndex(6);
                 {
                     const bool bad = (f.kind != 0) || f.imbalance || f.overdrive_mask;
                     ImVec4 nc = bad ? ImVec4(1.f,0.6f,0.35f,1.f) : ImVec4(0.65f,0.65f,0.65f,1.f);
