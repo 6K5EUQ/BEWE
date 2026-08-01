@@ -701,10 +701,10 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             float sla = f.station_lat, slo = f.station_lon;
             if(sla == 0.f && slo == 0.f) continue;
             norm(sla, slo);
-            // 밝게 그리는 기준은 **타원 계산에 들어갔는가**(shown) 다. 선택한 행만
-            // 밝히면, 합산에 참여하는 같은 주파수의 나머지 선들이 흐릿하게 남아
-            // 타원이 어디서 나온 건지 화면에서 읽히지 않는다.
-            const bool is_sel = std::find(shown.begin(), shown.end(), &f) != shown.end();
+            // 밝게 그리는 건 **직접 고른 행**뿐이다. 합산에 참여한다고 다 밝히면
+            // (같은 주파수 전체가 그렇다) 선이 화면을 덮어 정작 그 결과인 타원이
+            // 안 보인다. 나머지는 연하게 남겨 배경으로 둔다.
+            const bool is_sel = selected.empty() ? false : sel.selected(key_of(vis[p]));
             const float amul  = is_sel ? 1.0f : 0.35f;
             const double clat = std::cos(sla * D2R);
             const double e_lat = sla + (lob_km * std::cos(f.bearing_deg * D2R)) / KM_PER_DEG_LAT;
