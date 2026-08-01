@@ -4329,7 +4329,6 @@ void run_streaming_viewer(){
         // main_kbd_active 블록 **밖**이어야 한다. 그 플래그는 df_panel_open 이면
         // false 라, 안에 두면 F 로 열 수는 있어도 닫을 수가 없다.
         if(!io.WantTextInput && !ImGui::IsAnyItemActive()
-           && !(sci >= 0 && v.channels[sci].filter_active)
            && ImGui::IsKeyPressed(ImGuiKey_F, false)){
             if(v.df_panel_open){
                 v.df_panel_open = false;
@@ -4456,18 +4455,9 @@ void run_streaming_viewer(){
                && !(v.eid_panel_open && v.eid_view_mode == 8)){
                 toggle_tm();
             }
-            // 오버레이(EID/LOG/HIST/LIB) 활성 시엔 채널 demod 키 (A/F 등) 무시
+            // (A/F 키 demod 모드 매핑 제거 — 사용자 요청. STATUS 의 AM/FM/DET
+            //  버튼이 그 역할을 한다. F 는 이제 DF 창 토글 전용이다.)
             if(main_kbd_active && sci>=0 && v.channels[sci].filter_active){
-                auto set_mode=[&](Channel::DemodMode m){
-                    if(v.remote_mode && v.net_cli){
-                        // CONNECT 모드: 서버에 CMD 전송
-                        int cur=(int)v.channels[sci].mode;
-                        int nm=(v.channels[sci].mode==m)?0:(int)m;
-                        v.net_cli->cmd_set_ch_mode(sci, nm);
-                    }
-                };
-                if(ImGui::IsKeyPressed(ImGuiKey_A,false)) set_mode(Channel::DM_AM);
-                if(ImGui::IsKeyPressed(ImGuiKey_F,false)) set_mode(Channel::DM_FM);
                 // ── 방향키: 로컬 오디오 출력 전환 (L/R/L+R/M) ──────────
                 auto arrow_set_out = [&](int ci, int lco){
                     int prev=v.local_ch_out[ci]; v.local_ch_out[ci]=lco;
