@@ -735,8 +735,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     static std::vector<modview_map::MapPoint>  pts;
     static std::vector<modview_map::MapStation> stns;
     static std::vector<std::string>            stn_names;
-    static std::vector<std::string>            tip1, tip2;
-    pts.clear(); stns.clear(); stn_names.clear(); tip1.clear(); tip2.clear();
+    pts.clear(); stns.clear(); stn_names.clear();
 
     // 한국 운용 전제 좌표 정규화 — 서경으로 저장된 값 방어 (cli_host 는 서경 양수)
     auto norm = [](float& la, float& lo){ if(lo < 0.f) lo = -lo; if(la < 0.f) la = -la; };
@@ -760,40 +759,10 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     }
     for(size_t i = 0; i < stns.size(); i++) stns[i].name = stn_names[i].c_str();
 
-    // fix 당 포인트 하나. 위치는 기지가 아니라 **LOB 중점** — 정지 기지의 여러
-    // 방위가 부채꼴로 퍼져 각각 클릭 가능해진다 (기지에 두면 한 픽셀에 겹친다).
-    tip1.reserve(vis.size()); tip2.reserve(vis.size());
-    for(int p = 0; p < (int)vis.size(); p++){
-        const FFTViewer::DFFix& f = v.df_hist_at(vis[p]);
-        if(f.kind != 0) continue;
-        float sla = f.station_lat, slo = f.station_lon;
-        if(sla == 0.f && slo == 0.f) continue;
-        norm(sla, slo);
-        const double half = lob_km * 0.5;
-        const double clat = std::cos(sla * D2R);
-        modview_map::MapPoint mp;
-        mp.lat = sla + (half * std::cos(f.bearing_deg * D2R)) / KM_PER_DEG_LAT;
-        mp.lon = slo + (half * std::sin(f.bearing_deg * D2R)) / (KM_PER_DEG_LAT * (clat > 0.05 ? clat : 0.05));
-        // 진행방향 삼각형(AIS 선박 마커)을 쓰지 않는다. 방향은 LOB 광선이 이미
-        // 보여주고, 삼각형은 "그쪽으로 움직이는 접촉물"처럼 읽혀 오해를 준다 —
-        // 이 점은 표적 위치가 아니라 광선 위의 클릭 손잡이(LOB 중점)일 뿐이다.
-        mp.heading = -1.f;
-        mp.id      = (uint64_t)f.t_end_ms;
-        const bool is_sel = sel.selected(key_of(vis[p]));
-        mp.selected = is_sel;
-        mp.color = is_sel ? IM_COL32(255,205,70,255)
-                          : (f.manual_lob ? IM_COL32(140,180,255,220) : IM_COL32(80,200,255,200));
-        char t1[64], t2[64];
-        snprintf(t1, sizeof t1, "CH%u  %.1f deg", (unsigned)f.dnum, f.bearing_deg);
-        char ts[16]; hms(f.t_end_ms, ts, sizeof ts);
-        snprintf(t2, sizeof t2, "SNR %.1f dB   %s", f.snr_db, ts);
-        tip1.emplace_back(t1); tip2.emplace_back(t2);
-        pts.push_back(mp);
-    }
-    for(size_t i = 0; i < pts.size(); i++){
-        pts[i].tip_l1 = tip1[i].c_str();
-        pts[i].tip_l2 = tip2[i].c_str();
-    }
+    // LOB 위에 마커를 찍지 않는다 (pts 는 계속 빈 채로 draw_map 에 넘긴다).
+    // 지도의 점은 "거기에 뭐가 있다" 로 읽히는데, 방위선 중점은 표적 위치가 아니라
+    // 그냥 선의 절반 지점이다 — 표적은 그 선 **어딘가**에 있고, 어디인지는 다른
+    // 선과 만나야 알 수 있다. 클릭 선택은 광선 자체를 히트테스트해 처리한다.
 
     // 이력이 비면 draw_map 은 auto-fit 을 안 한다 — 기지 중심으로 시드해 준다.
     if(just_opened && pts.empty() && !stns.empty() && !mv.initialized){
@@ -803,24 +772,20 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     }
 
     const ImVec2 map_p0 = ImGui::GetCursorScreenPos();
-    modview_map::MapResult mres =
-        modview_map::draw_map("##df_map", mv, pts, ImVec2(mapw, body_h),
+    (void)modview_map::draw_map("##df_map", mv, pts, ImVec2(mapw, body_h),
                               just_opened, &stns, nullptr);
 
-    // 지도 클릭 -> 표와 **동일한** 선택 경로. 선택 모델이 하나라야 ctrl/shift 의미가 같다.
-    if(mres.clicked_id != 0){
-        for(int p = 0; p < (int)vis.size(); p++){
-            if((uint64_t)v.df_hist_at(vis[p]).t_end_ms == mres.clicked_id){
-                sel.click(key_of(vis[p]), p, key_at_vis, (int)vis.size(), io.KeyCtrl, io.KeyShift);
-                break;
-            }
-        }
-    }
+    // 지도 클릭 -> 표와 **동일한** 선택 경로 (선택 모델이 하나라야 ctrl/shift 의미가
+    // 같다). 클릭 대상은 마커가 아니라 **광선 자체**다 — 아래 LOB 렌더 블록에서
+    // 커서와 각 선분의 거리를 재 가장 가까운 것을 고른다.
+    int    lob_hit_p   = -1;
+    double lob_hit_d2  = 12.0 * 12.0;   // 12 px 안쪽만 후보
 
     // ── LOB 광선 + 교차 fix (draw_map 위에 덧그린다) ────────────────────
     {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->PushClipRect(map_p0, ImVec2(map_p0.x + mapw, map_p0.y + body_h), true);
+        const ImVec2 mp_pos = io.MousePos;
         auto P = [&](double lat, double lon){
             return ImVec2((float)(map_p0.x + (lon - mv.lon0) / (mv.lon1 - mv.lon0) * mapw),
                           (float)(map_p0.y + (mv.lat1 - lat) / (mv.lat1 - mv.lat0) * body_h));
@@ -844,6 +809,17 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 const float fade = (float)(1.0 - 0.65*t) * amul;
                 dl->AddLine(prev, cur, IM_COL32(255,210,60,(int)(55*fade)),  5.0f);
                 dl->AddLine(prev, cur, IM_COL32(255,236,150,(int)(205*fade)), 1.6f);
+                // 커서-선분 거리 (클릭 히트테스트용)
+                {
+                    const float vx = cur.x-prev.x, vy = cur.y-prev.y;
+                    const float wx = mp_pos.x-prev.x, wy = mp_pos.y-prev.y;
+                    const float L2 = vx*vx + vy*vy;
+                    float tt = (L2 > 1e-6f) ? (wx*vx + wy*vy)/L2 : 0.f;
+                    tt = tt < 0.f ? 0.f : (tt > 1.f ? 1.f : tt);
+                    const float ddx = wx - vx*tt, ddy = wy - vy*tt;
+                    const double d2 = (double)(ddx*ddx + ddy*ddy);
+                    if(d2 < lob_hit_d2){ lob_hit_d2 = d2; lob_hit_p = p; }
+                }
                 prev = cur;
             }
         }
@@ -866,10 +842,10 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 dl->AddConvexPolyFilled(poly, 48, IM_COL32(255,205,70,30));
                 for(int i = 0; i < 48; i++)
                     dl->AddLine(poly[i], poly[(i+1)%48], IM_COL32(255,232,130,150), 1.2f);
-                // 중심 마커 — 지구본 데모와 같은 글로우+코어. 십자만 두면 채운
-                // 타원 안에서 묻힌다.
-                dl->AddCircleFilled(cp, 6.0f, IM_COL32(255,210,80,45));
-                dl->AddCircleFilled(cp, 2.4f, IM_COL32(255,244,180,225));
+                // 중심은 십자만. 지구본 데모처럼 반지름 6px 글로우를 얹으면,
+                // 기본 줌에서 타원 자체가 1px 미만이라 **그 글로우가 곧 "동그라미"로
+                // 보인다** — 실제 오차 크기와 무관한 고정 크기 원이 오차타원 행세를
+                // 한다. 타원이 안 보일 만큼 작으면 작다는 사실이 보여야 맞다.
                 dl->AddLine(ImVec2(cp.x-7,cp.y), ImVec2(cp.x+7,cp.y), IM_COL32(255,240,160,230), 1.6f);
                 dl->AddLine(ImVec2(cp.x,cp.y-7), ImVec2(cp.x,cp.y+7), IM_COL32(255,240,160,230), 1.6f);
                 char lb[96];
@@ -879,6 +855,21 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             }
         }
         dl->PopClipRect();
+
+        // 광선 클릭 -> 표와 같은 선택 경로. map_view 와 같은 규칙으로 드래그를
+        // 걸러낸다 (놓는 순간 + 이동량 4px 미만) — 안 그러면 지도를 팬할 때마다
+        // 지나간 선이 선택된다. 호버 시 굵기를 키워 클릭 가능함을 알린다.
+        if(lob_hit_p >= 0){
+            const bool inside = mp_pos.x >= map_p0.x && mp_pos.x <= map_p0.x + mapw &&
+                                mp_pos.y >= map_p0.y && mp_pos.y <= map_p0.y + body_h;
+            const ImVec2 dg = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+            const bool dragged = (dg.x*dg.x + dg.y*dg.y) > 16.f;
+            if(inside) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            if(inside && !dragged && ImGui::IsMouseReleased(ImGuiMouseButton_Left)){
+                sel.click(key_of(vis[lob_hit_p]), lob_hit_p, key_at_vis,
+                          (int)vis.size(), io.KeyCtrl, io.KeyShift);
+            }
+        }
     }
 
     // ── 나침반 오버레이 (지도 좌하단 — 우하단은 축척바, 좌상단은 토글열) ──
