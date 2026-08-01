@@ -1074,6 +1074,10 @@ public:
     // (스펙트럼을 최신 것만 두면 표의 절반이 죽는다).
     // 64 x ~460 B = 29 KB 고정, 할당 없음. UI 스레드 전용.
     struct DFFix {
+        // 단조 증가 고유 id. t_end_ms 를 키로 쓰면 안 된다 — 측정 전 거절
+        // (df_post_refusal) 은 t_end_ms 가 0 이라 전부 같은 키가 되고, 하나를
+        // 클릭하면 거절 행 전체가 선택된다.
+        uint32_t seq = 0;
         int64_t t_end_ms = 0;
         float   bearing_deg = 0, bearing_rel_deg = 0;
         float   snr_db = 0, conf_db = 0, power_dbfs = 0;
@@ -1090,6 +1094,9 @@ public:
     DFFix df_hist[DF_HIST_MAX];
     int   df_hist_n = 0;          // 채워진 개수 (<= DF_HIST_MAX)
     int   df_hist_head = 0;       // 다음에 쓸 위치
+    // 총 push 횟수. df_hist_n 은 64 에서 포화하므로 "새 결과가 왔나" 를 그걸로
+    // 판정하면 링이 찬 뒤로 영영 안 바뀐다 (거절 배너가 죽는다).
+    uint32_t df_hist_seq = 0;
     // 링에서 i 번째로 오래된 항목 (0 = 가장 오래됨)
     const DFFix& df_hist_at(int i) const {
         const int base = (df_hist_n < DF_HIST_MAX) ? 0 : df_hist_head;

@@ -322,6 +322,7 @@ float FFTViewer::audio_play_pos_sec() const {
 // df_pump 와 JOIN 의 df_pump 가 각자 필드를 옮기면 반드시 갈라지므로 한 함수만 둔다.
 void FFTViewer::df_push_fix(const DFFix& f){
     df_hist[df_hist_head] = f;
+    df_hist[df_hist_head].seq = ++df_hist_seq;   // 행 고유 id (t_end_ms 는 거절 시 0)
     df_hist_head = (df_hist_head + 1) % DF_HIST_MAX;
     if(df_hist_n < DF_HIST_MAX) df_hist_n++;
 }

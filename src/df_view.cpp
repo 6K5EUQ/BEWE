@@ -1,69 +1,59 @@
-// ── DF(방탐) 설정 오버레이 ────────────────────────────────────────────────
-// 하단 상태바의 DF 를 누르면 열린다. 전체영역 오버레이라 다른 오버레이와
-// 상호배타이고, 열려 있는 동안 메인페이지 키보드/마우스는 막힌다.
+// ── DF(방탐) 전체영역 오버레이 ────────────────────────────────────────────
+// 하단 상태바의 DF 를 누르면 열린다. 다른 오버레이와 상호배타이고, 열려 있는
+// 동안 메인페이지 키보드/마우스는 막힌다 (상태바 32 px 는 남겨 다시 눌러 닫는다).
 //
-// 구조는 sig_lib_view.cpp 의 draw_overlay 와 같다 — 상태바(32 px)는 남겨서
-// 다시 눌러 닫을 수 있게 한다.
+// 화면 구성이 v14.2 에서 뒤집혔다. 예전에는 설정 위젯이 화면의 90% 를 차지하고
+// 결과는 우하단 200 px 원 하나였다 — 운용자가 계속 보는 것과 한 번 만지고 마는
+// 것의 비중이 정반대였다. 지금은:
 //
-// 설정은 전부 HOST 소유다. JOIN 은 HOST 가 방송한 정본을 보여주고, 바꾸면
-// HOST 로 요청만 보낸다 — 측정을 실제로 하는 쪽과 화면이 어긋나지 않게.
+//   [좌] 방위 이력표      — 측정이 안정적인지 표류하는지, 왜 거절됐는지
+//   [우] 지도 + LOB 광선  — 방위가 실제로 어디를 가리키는지, 교차점은 어디인지
+//   [설정] 우측 접이식    — 기본 닫힘. 열면 예전 위젯이 그대로 들어 있다
+//
+// 설정은 전부 HOST 소유다. JOIN 은 HOST 가 방송한 정본을 보여주고, 바꾸면 HOST 로
+// 요청만 보낸다 — 측정을 실제로 하는 쪽과 화면이 어긋나지 않게.
+//
+// 이 파일에는 설명 문구를 넣지 않는다 (BEWE.md "UI 에 설명글 임의 추가 금지").
+// 값을 보여주는 툴팁·라벨은 정보라 예외다.
 
 #include "fft_viewer.hpp"
+#include "net_client.hpp"
+#include "kst_time.hpp"
+#include "modules/modview.hpp"
+#include "modules/common/modview_map.hpp"
 
 #include "imgui.h"
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <vector>
 
 namespace {
 
-// 5소자 UCA 를 위에서 본 그림 + 마지막 측정 방위. 배선 방향(CW/CCW)이
-// 화면에서 바로 보여야 운용자가 설정을 틀리게 두는 걸 알아챈다.
-void draw_array_diagram(ImDrawList* dl, ImVec2 c, float R, int elements,
-                        int sense, double bearing_deg, bool have_bearing){
-    const float PI = 3.14159265358979f;
-    dl->AddCircle(c, R, IM_COL32(90,90,90,255), 64, 1.5f);
-    dl->AddLine(ImVec2(c.x, c.y-R-14), ImVec2(c.x, c.y-R+6), IM_COL32(120,120,120,255), 1.0f);
-    dl->AddText(ImVec2(c.x-4, c.y-R-30), IM_COL32(150,150,150,255), "0");
+constexpr float PI_F = 3.14159265358979f;
+constexpr double D2R = 3.14159265358979 / 180.0;
+constexpr double KM_PER_DEG_LAT = 111.32;
 
-    const float dir = (sense == 0) ? 1.0f : -1.0f;   // 0=CW
-    if(elements < 1) elements = 1;
-    for(int m = 0; m < elements; m++){
-        // 화면은 나침반 배치: 0도가 위, 시계방향이 오른쪽.
-        const float phi = dir * 2.0f * PI * m / (float)elements;
-        const ImVec2 p(c.x + R*std::sin(phi), c.y - R*std::cos(phi));
-        const ImU32 col = (m == 0) ? IM_COL32(255,200,0,255) : IM_COL32(160,160,160,255);
-        dl->AddCircleFilled(p, 5.0f, col);
-        char lb[8]; snprintf(lb, sizeof lb, "%d", m);
-        dl->AddText(ImVec2(p.x+7, p.y-7), col, lb);
-    }
-    if(have_bearing){
-        const float b = (float)(bearing_deg * PI / 180.0);
-        const ImVec2 tip(c.x + (R+26)*std::sin(b), c.y - (R+26)*std::cos(b));
-        dl->AddLine(c, tip, IM_COL32(80,220,80,255), 2.5f);
-        dl->AddCircleFilled(tip, 4.0f, IM_COL32(80,220,80,255));
-    }
+int64_t now_ms_local(){
+    return (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-// 360빈 의사스펙트럼을 극좌표로. 봉우리가 얼마나 뾰족한지가 신뢰도를 눈으로 준다.
-void draw_polar_spectrum(ImDrawList* dl, ImVec2 c, float R, const float* db, int n){
-    if(!db) return;
-    ImVec2 prev;
-    for(int i = 0; i <= n; i++){
-        const int k = i % n;
-        const float PI = 3.14159265358979f;
-        float r = (db[k] + 40.0f) / 40.0f;      // -40 dB 를 중심, 0 dB 를 반지름으로
-        if(r < 0.f) r = 0.f;
-        if(r > 1.f) r = 1.f;
-        const float a = k * 2.0f * PI / n;
-        const ImVec2 p(c.x + R*r*std::sin(a), c.y - R*r*std::cos(a));
-        if(i > 0) dl->AddLine(prev, p, IM_COL32(80,180,255,200), 1.2f);
-        prev = p;
-    }
+void hms(int64_t ms, char* o, size_t n){
+    if(ms <= 0){ snprintf(o, n, "--:--:--"); return; }
+    time_t t = (time_t)(ms / 1000); struct tm tv; KST::to_tm(t, tv);
+    strftime(o, n, "%H:%M:%S", &tv);
 }
 
 const char* link_text(int l){
     return l == 2 ? "STREAMING" : (l == 1 ? "CALIBRATING" : "DOWN");
+}
+
+const char* algo_name(int a){
+    return a == 0 ? "Bartlett" : (a == 1 ? "Capon" : "MUSIC");
 }
 
 // 엔진의 Config::validate() 와 같은 교차필드 제약. 위젯은 슬라이더 "범위"만 좁히고
@@ -77,8 +67,239 @@ void clamp_cross_fields(PktDfConfig& c){
     if(c.max_frames < c.avg_frames) c.max_frames = c.avg_frames;
 }
 
+// ── 나침반 ────────────────────────────────────────────────────────────────
+// 예전 draw_array_diagram + draw_polar_spectrum 을 하나로 합쳤다. 예전 플롯에는
+// "0" 눈금 하나뿐이라 방위를 눈으로 읽을 수가 없었고, dB 바닥이 -40 에 박혀 있어
+// MUSIC 의 뾰족한 봉우리가 바늘로만 보였다.
+//
+// spec_q: dB_below_peak = -0.5 * q (와이어 양자화 그대로). null 이면 곡선 생략.
+// hover_az: 마우스가 원 안에 있으면 그 방위(도)를 돌려준다 (없으면 <0).
+void draw_compass(ImDrawList* dl, ImVec2 c, float R,
+                  const uint8_t* spec_q, bool have,
+                  double bearing_deg, const double* alt_deg, int alt_n,
+                  int elements, int sense, float floor_db, float* hover_az){
+    const ImU32 col_ring  = IM_COL32(90,90,90,255);
+    const ImU32 col_tick  = IM_COL32(120,120,120,255);
+    const ImU32 col_txt   = IM_COL32(150,150,150,255);
+    const ImU32 col_curve = IM_COL32(80,180,255,200);
+    const ImU32 col_brg   = IM_COL32(80,220,80,255);
+
+    auto pt = [&](double deg, float r){
+        const float a = (float)(deg * D2R);
+        return ImVec2(c.x + r * std::sin(a), c.y - r * std::cos(a));
+    };
+
+    // dB 링 3개 (바닥 / 절반 / 0)
+    for(int i = 1; i <= 3; i++){
+        const float rr = R * (float)i / 3.f;
+        dl->AddCircle(c, rr, i == 3 ? col_ring : IM_COL32(60,60,60,255), 64, i == 3 ? 1.5f : 1.0f);
+    }
+    {
+        char lb[16];
+        for(int i = 1; i <= 3; i++){
+            snprintf(lb, sizeof lb, "%.0f", floor_db * (float)(3 - i) / 3.f);
+            dl->AddText(ImVec2(c.x + 3, c.y - R * (float)i / 3.f - 2), IM_COL32(95,95,95,255), lb);
+        }
+    }
+
+    // 30도 눈금 + 사방위 + 도 라벨
+    static const char* card[12] = { "N","30","60","E","120","150","S","210","240","W","300","330" };
+    for(int i = 0; i < 12; i++){
+        const double d = i * 30.0;
+        const bool major = (i % 3) == 0;
+        dl->AddLine(pt(d, R), pt(d, R - (major ? 10.f : 5.f)), col_tick, major ? 1.6f : 1.0f);
+        const ImVec2 tp = pt(d, R + 13.f);
+        const ImVec2 ts = ImGui::CalcTextSize(card[i]);
+        dl->AddText(ImVec2(tp.x - ts.x * 0.5f, tp.y - ts.y * 0.5f),
+                    major ? IM_COL32(190,190,190,255) : col_txt, card[i]);
+    }
+
+    // 의사스펙트럼 곡선
+    if(have && spec_q && floor_db < -1.f){
+        ImVec2 prev;
+        for(int i = 0; i <= 360; i++){
+            const int k = i % 360;
+            const float db = -0.5f * (float)spec_q[k];
+            // db=0 -> 반지름 1, db=floor -> 0. floor 는 음수다.
+            float r = 1.0f - (db / floor_db);
+            if(r < 0.f) r = 0.f; else if(r > 1.f) r = 1.f;
+            const ImVec2 p = pt((double)k, R * r);
+            if(i > 0) dl->AddLine(prev, p, col_curve, 1.2f);
+            prev = p;
+        }
+    }
+
+    // 배열 다이어그램 (중앙) — 배선 sense 실수가 보이는 유일한 곳이라 존치
+    {
+        const float ar = R * 0.30f;
+        dl->AddCircle(c, ar, IM_COL32(70,70,70,255), 32, 1.0f);
+        const float dir = (sense == 0) ? 1.0f : -1.0f;
+        const int m = (elements < 1) ? 1 : elements;
+        for(int i = 0; i < m; i++){
+            const float phi = dir * 2.0f * PI_F * (float)i / (float)m;
+            const ImVec2 p(c.x + ar * std::sin(phi), c.y - ar * std::cos(phi));
+            dl->AddCircleFilled(p, 3.5f, i == 0 ? IM_COL32(255,200,0,255) : IM_COL32(150,150,150,255));
+        }
+    }
+
+    // 대안 방위 (모호집합) — 주 방위보다 흐리게
+    for(int i = 0; i < alt_n && i < 2; i++){
+        dl->AddLine(c, pt(alt_deg[i], R), IM_COL32(255,170,60,120), 1.4f);
+        dl->AddCircleFilled(pt(alt_deg[i], R), 3.0f, IM_COL32(255,170,60,160));
+    }
+
+    // 주 방위
+    if(have){
+        const ImVec2 tip = pt(bearing_deg, R + 8.f);
+        dl->AddLine(c, tip, col_brg, 2.5f);
+        dl->AddCircleFilled(tip, 4.0f, col_brg);
+        char lb[24]; snprintf(lb, sizeof lb, "%.1f", bearing_deg);
+        const ImVec2 lp = pt(bearing_deg, R + 30.f);
+        const ImVec2 ls = ImGui::CalcTextSize(lb);
+        dl->AddText(ImVec2(lp.x - ls.x * 0.5f, lp.y - ls.y * 0.5f), col_brg, lb);
+    }
+
+    // 호버 판독 — 값이지 설명이 아니므로 허용
+    *hover_az = -1.f;
+    const ImVec2 mp = ImGui::GetIO().MousePos;
+    const float dx = mp.x - c.x, dy = mp.y - c.y;
+    const float rr = std::sqrt(dx*dx + dy*dy);
+    if(rr <= R + 6.f){
+        float az = std::atan2(dx, -dy) * 180.f / PI_F;
+        if(az < 0.f) az += 360.f;
+        *hover_az = az;
+        dl->AddLine(c, pt(az, R), IM_COL32(200,200,200,90), 1.0f);
+        char lb[48];
+        if(have && spec_q){
+            const int k = ((int)(az + 0.5f)) % 360;
+            snprintf(lb, sizeof lb, "%.0f deg   %.1f dB", az, -0.5f * (float)spec_q[k]);
+        } else {
+            snprintf(lb, sizeof lb, "%.0f deg", az);
+        }
+        dl->AddText(ImVec2(c.x - R, c.y + R + 18.f), IM_COL32(210,210,210,220), lb);
+    }
+}
+
+// ── LOB 교차 fix ──────────────────────────────────────────────────────────
+// 선택된 방위선들의 최소자승 교점 + 1σ 오차타원.
+// ENU 근사 (Korea bbox 안에서 대권/평면 차이는 200 km 에서 1 px 미만).
+//
+// ui.cpp 의 accum_fix 를 부르지 않는다 — 그건 방출체 위치를 입력으로 요구하고
+// 로그인 데모를 유기적으로 보이게 하려고 결정적 1도 의사난수 오차를 더한다.
+// 그 항이 실제 DF 표시에 들어가면 안 된다. 누산 관용구만 가져왔다.
+struct FixSolution {
+    bool   ok = false;
+    double lat = 0, lon = 0;      // lon: 동경 양수
+    double maj_km = 0, min_km = 0, orient_deg = 0;
+};
+
+FixSolution df_solve_fix(const FFTViewer::DFFix* const* sel, int n){
+    FixSolution out;
+    if(n < 2) return out;
+    if(n > FFTViewer::DF_HIST_MAX) n = FFTViewer::DF_HIST_MAX;
+
+    // 좌표가 없는 fix 는 통째로 제외한다. 지도의 광선/마커도 같은 조건으로
+    // 건너뛰므로, 여기만 (0,0) 을 남기면 적도-그리니치의 유령 기지가 해에
+    // 끼어들어 보이지도 않는 선으로 교점을 끌어당긴다.
+    double slat[FFTViewer::DF_HIST_MAX], slon[FFTViewer::DF_HIST_MAX], sbrg[FFTViewer::DF_HIST_MAX];
+    int m = 0;
+    for(int i = 0; i < n; i++){
+        float la = sel[i]->station_lat, lo = sel[i]->station_lon;
+        if(la == 0.f && lo == 0.f) continue;
+        if(lo < 0.f) lo = -lo;      // 지도 경로와 같은 정규화 (서경 저장 방어)
+        if(la < 0.f) la = -la;
+        slat[m] = la; slon[m] = lo; sbrg[m] = sel[i]->bearing_deg; m++;
+    }
+    if(m < 2) return out;
+
+    // 기지가 전부 같은 자리면 교점이 기하학적으로 의미가 없다. 그래도 풀면
+    // 방위가 조금씩 다른 LOB 들이 기지 자신에서 만나 "기지 위에 표적이 있다"는
+    // 자신만만한 가짜 fix 가 나온다 — 정지 기지에서 같은 채널을 반복 측정하는
+    // 가장 흔한 사용법에서 바로 나온다. 서로 떨어진 위치가 최소 2곳 필요하다.
+    {
+        bool distinct = false;
+        for(int i = 1 ; i < m && !distinct; i++)
+            for(int j = 0; j < i && !distinct; j++)
+                if(std::abs(slat[i]-slat[j]) > 1e-4 || std::abs(slon[i]-slon[j]) > 1e-4)
+                    distinct = true;
+        if(!distinct) return out;
+    }
+
+    double lat0 = 0, lon0 = 0;
+    for(int i = 0; i < m; i++){ lat0 += slat[i]; lon0 += slon[i]; }
+    lat0 /= m; lon0 /= m;
+    const double kmlon = KM_PER_DEG_LAT * std::cos(lat0 * D2R);
+    if(kmlon < 1e-6) return out;
+
+    // s_i = 기지 ENU, p_i = 방위선에 수직인 단위벡터, d_i = 방위 방향.
+    // 제약: p_i . x = p_i . s_i  (x 가 방위선 위에 있다는 뜻)
+    double sx[FFTViewer::DF_HIST_MAX], sy[FFTViewer::DF_HIST_MAX];
+    double px[FFTViewer::DF_HIST_MAX], py[FFTViewer::DF_HIST_MAX];
+    double dx_[FFTViewer::DF_HIST_MAX], dy_[FFTViewer::DF_HIST_MAX];
+    for(int i = 0; i < m; i++){
+        sx[i] = (slon[i] - lon0) * kmlon;
+        sy[i] = (slat[i] - lat0) * KM_PER_DEG_LAT;
+        const double b = sbrg[i] * D2R;
+        dx_[i] =  std::sin(b);      // 방위 방향 (East, North)
+        dy_[i] =  std::cos(b);
+        px[i] =  std::cos(b);       // 그 수직
+        py[i] = -std::sin(b);
+    }
+    n = m;
+
+    double ex = 0, ey = 0;
+    double A[4] = {0,0,0,0};
+    for(int pass = 0; pass < 3; pass++){
+        double a11=0, a12=0, a22=0, b1=0, b2=0;
+        for(int i = 0; i < n; i++){
+            double w = 1.0;
+            if(pass > 0){
+                // 먼 LOB 일수록 각도 오차가 큰 횡오차로 번진다: sigma_perp = R * sigma_ang
+                const double dxk = ex - sx[i], dyk = ey - sy[i];
+                const double R = std::sqrt(dxk*dxk + dyk*dyk);
+                const double sperp = std::max(R * (1.0 * D2R), 0.05);   // 1도 가정, 하한 50 m
+                w = 1.0 / (sperp * sperp);
+            }
+            const double c = px[i]*sx[i] + py[i]*sy[i];
+            a11 += w*px[i]*px[i]; a12 += w*px[i]*py[i]; a22 += w*py[i]*py[i];
+            b1  += w*px[i]*c;     b2  += w*py[i]*c;
+        }
+        const double det = a11*a22 - a12*a12;
+        if(std::abs(det) < 1e-9) return out;    // 거의 평행한 LOB — 교점이 무의미
+        ex = ( a22*b1 - a12*b2) / det;
+        ey = (-a12*b1 + a11*b2) / det;
+        A[0]=a11; A[1]=a12; A[2]=a12; A[3]=a22;
+    }
+
+    // LOB 은 직선이 아니라 **광선**이다. 최소자승은 직선으로 풀기 때문에 해가
+    // 안테나 뒤쪽에 떨어질 수 있는데, 그건 방위가 가리키는 방향의 정반대다.
+    // 그런 fix 를 지도에 그리면 운용자가 표적을 정반대로 읽는다.
+    for(int i = 0; i < n; i++){
+        const double t = (ex - sx[i])*dx_[i] + (ey - sy[i])*dy_[i];
+        if(t <= 0.0) return out;   // 이 LOB 의 뒤쪽 — 교점 아님
+    }
+
+    // 공분산 = A^-1. 2x2 대칭 고유분해로 1σ 반축.
+    const double det = A[0]*A[3] - A[1]*A[2];
+    if(std::abs(det) < 1e-12) return out;
+    const double c11 =  A[3]/det, c12 = -A[1]/det, c22 = A[0]/det;
+    const double tr = c11 + c22, dt = c11*c22 - c12*c12;
+    const double disc = std::max(tr*tr*0.25 - dt, 0.0);
+    const double l1 = tr*0.5 + std::sqrt(disc);
+    const double l2 = std::max(tr*0.5 - std::sqrt(disc), 0.0);
+    out.maj_km = std::sqrt(std::max(l1, 0.0));
+    out.min_km = std::sqrt(l2);
+    out.orient_deg = 0.5 * std::atan2(2.0*c12, c11 - c22) / D2R;
+
+    out.lat = lat0 + ey / KM_PER_DEG_LAT;
+    out.lon = lon0 + ex / kmlon;
+    out.ok  = true;
+    return out;
+}
+
 } // namespace
 
+// ═══════════════════════════════════════════════════════════════════════════
 void df_draw_panel(FFTViewer& v, bool just_opened){
     if(!v.df_panel_open) return;
     ImGuiIO& io = ImGui::GetIO();
@@ -90,29 +311,27 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     if(just_opened) ImGui::SetNextWindowFocus();
     ImGui::Begin("##df_overlay", &v.df_panel_open,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
-    if(ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
-       ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+    // 텍스트 입력 중에는 ESC/Ctrl+C 를 가로채지 않는다 — 필터를 치다가 ESC 를
+    // 누르면 편집 취소가 아니라 패널 전체가 닫혀 버린다.
+    const bool typing    = ImGui::GetIO().WantTextInput;
+    const bool win_focus = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    if(win_focus && !typing && ImGui::IsKeyPressed(ImGuiKey_Escape, false))
         v.df_panel_open = false;
 
     FFTViewer::DFLive L{};
     v.df_get_live(L);
     const bool is_join = (v.net_cli != nullptr);
 
-    // HOST 정본. JOIN 은 HOST 방송본을 그대로 읽는다.
+    // HOST 정본 + 편집 버퍼. 정본을 매 프레임 위젯 변수에 덮어쓰면 드래그 중
+    // 프레임마다 DF_CONFIG 가 나가고(HOST 가 validate+apply+broadcast+JSON write 를
+    // 60 Hz 로 돈다) 손잡이가 뒤로 튄다. 위젯이 활성인 동안(그리고 송신 직후 hold
+    // 창 동안) 재동기를 멈춘다. hold 가 만료되면 ui = canon 으로 되돌아가므로
+    // HOST 가 거절한 값은 자동으로 진실에 스냅백한다.
     PktDfConfig canon{};
     v.df_get_cfg(canon);
-
-    // 편집 버퍼. 위젯은 canon 이 아니라 이걸 만진다.
-    //
-    // 정본을 매 프레임 위젯 변수에 덮어쓰면 두 가지가 동시에 깨진다:
-    //  (1) 드래그 중 프레임마다 DF_CONFIG 가 나가 HOST 가 validate+apply+broadcast+
-    //      host_state JSON write 를 60 Hz 로 돌린다 (Pi5 에서 실측 가능한 스톨),
-    //  (2) 에코가 돌아올 때까지 손잡이가 뒤로 튄다.
-    // 그래서 위젯이 활성인 동안(그리고 송신 직후 hold 창 동안)에는 재동기를 멈춘다.
-    // hold 가 만료되면 ui = canon 으로 되돌아가므로, HOST 가 거절한 값은 자동으로
-    // 진실에 스냅백한다 — accept 와 reject 를 한 경로가 처리한다.
     static PktDfConfig ui{};
     static double      hold_until = 0.0;
     const double now = ImGui::GetTime();
@@ -120,179 +339,707 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     if(!(ImGui::IsAnyItemActive() || now < hold_until)) ui = canon;
     PktDfConfig& c = ui;
 
-    ImGui::TextColored(ImVec4(0.9f,0.9f,0.9f,1.f), "DIRECTION FINDING");
-    ImGui::Separator();
+    // ── 영속 UI 상태 ──────────────────────────────────────────────────────
+    static modview_map::MapView mv;
+    static modview::Selection   sel;
+    static float  split_tw   = 460.f;
+    static bool   setup_open = false;
+    static int    sort_col   = -1;
+    static bool   sort_asc   = true;
+    static bool   at_bottom  = true;
+    static char   filter[64] = {};
+    static float  lob_km     = 150.f;
+    static float  polar_floor_db = -40.f;
+    static int    meas_ch    = 0;          // 0 = 자동(선택 채널)
+    static uint32_t last_seq  = 0;    // 마지막으로 본 df_hist_seq (개수 아님)
+    static int      last_vis_n = 0;   // 직전 프레임 가시행 수 (tail-follow 용)
+    static int64_t banner_until = 0;
+    static char   banner[96] = {};
+    // 수동 LOB 입력 (다른 기지의 방위를 손으로 넣어 교차 fix 를 만든다).
+    // 기지는 이름으로 기억한다 — 목록은 unordered_map 순회로 매 프레임 다시
+    // 만들어지므로 인덱스를 붙들면 다른 기지를 가리키게 된다.
+    static bool        lob_popup = false;
+    static std::string lob_stn;
+    static float       lob_brg = 0.f;
 
+    if(just_opened){ mv.big = false; }
+
+    // ── 거절/진단 배너 ────────────────────────────────────────────────────
+    // 예전엔 상세 사유가 LOG 오버레이로만 갔는데, LOG 는 DF 와 상호배타라 DF 를
+    // 닫아야만 이유를 읽을 수 있었다. 새 결과가 들어오면 여기 8초 띄운다.
+    // 감지 키는 개수가 아니라 push 시퀀스다 — df_hist_n 은 64 에서 포화하므로
+    // 링이 한 번 차고 나면 개수 비교는 영원히 거짓이 되고 배너가 죽는다.
+    if(v.df_hist_seq != last_seq){
+        if(v.df_hist_n > 0){
+            const FFTViewer::DFFix& f = v.df_hist_at(v.df_hist_n - 1);
+            // 수동 LOB 은 사용자가 방금 입력한 값이라 알릴 게 없다.
+            if(!f.manual_lob && (f.kind != 0 || f.note[0])){
+                snprintf(banner, sizeof banner, "CH%u  %s", (unsigned)f.dnum,
+                         f.note[0] ? f.note : "no result");
+                banner_until = now_ms_local() + 8000;
+            }
+        }
+        last_seq = v.df_hist_seq;
+    }
+    const bool banner_on = (banner[0] && now_ms_local() < banner_until);
+
+    // ══════════════════ 헤더 스트립 ══════════════════
+    const float W  = ImGui::GetContentRegionAvail().x;
+    const float Hh = ImGui::GetContentRegionAvail().y;
+    const float HDR = 30.f;
+    const float BAN = banner_on ? 22.f : 0.f;
+
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f,0.12f,0.16f,1.f));
+    ImGui::BeginChild("##df_hdr", ImVec2(W, HDR), false,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    {
+        const float VCEN = 16.5f, GAP = 8.f;
+        ImGui::SetCursorPos(ImVec2(GAP, VCEN - ImGui::GetTextLineHeight()*0.5f));
+        ImGui::TextColored(ImVec4(0.9f,0.9f,0.9f,1.f), "DIRECTION FINDING");
+
+        const bool df_ok = v.df_link_state() != 0;
+        ImGui::SameLine(0, GAP*2);
+        ImGui::SetCursorPosY(VCEN - ImGui::GetFrameHeight()*0.5f);
+        ImGui::BeginDisabled(!df_ok);
+        if(ImGui::Button("MEASURE")){
+            int dn = meas_ch;
+            if(dn <= 0 && v.selected_ch >= 0) dn = v.freq_sorted_display_num(v.selected_ch);
+            if(dn > 0) v.df_request_by_display_num(dn, /*from_auto=*/false);
+        }
+        ImGui::EndDisabled();
+
+        // 채널 선택 — 표시번호는 주파수 정렬 순위다 (배열 인덱스가 아님)
+        ImGui::SameLine(0, 4);
+        ImGui::SetNextItemWidth(150);
+        {
+            char cur[48];
+            if(meas_ch <= 0) snprintf(cur, sizeof cur, "CH (selected)");
+            else             snprintf(cur, sizeof cur, "CH%d", meas_ch);
+            if(ImGui::BeginCombo("##df_ch", cur)){
+                if(ImGui::Selectable("CH (selected)", meas_ch <= 0)) meas_ch = 0;
+                for(int i = 0; i < MAX_CHANNELS; i++){
+                    if(!v.channels[i].filter_active) continue;
+                    const int dn = v.freq_sorted_display_num(i);
+                    if(dn <= 0) continue;
+                    char it[64];
+                    snprintf(it, sizeof it, "CH%d  %.4f MHz", dn,
+                             (v.channels[i].s + v.channels[i].e) * 0.5);
+                    if(ImGui::Selectable(it, meas_ch == dn)) meas_ch = dn;
+                }
+                ImGui::EndCombo();
+            }
+        }
+
+        // AUTO DF 현황 — 여기서 만드는 게 아니라 채널 패널의 상태를 비추기만 한다.
+        // 다만 일괄 해제는 둔다: 자동 측정이 폭주할 때 채널 패널을 열지 않고
+        // 멈출 수 있어야 한다.
+        int auto_n = 0;
+        for(int i = 0; i < MAX_CHANNELS; i++)
+            if(v.channels[i].filter_active && v.auto_df_on[i]) auto_n++;
+        ImGui::SameLine(0, GAP);
+        if(auto_n > 0){
+            char lb[32]; snprintf(lb, sizeof lb, "AUTO %d OFF", auto_n);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f,0.55f,0.1f,1.f));
+            if(ImGui::Button(lb))
+                for(int i = 0; i < MAX_CHANNELS; i++) v.auto_df_on[i] = false;
+            ImGui::PopStyleColor();
+        } else {
+            ImGui::BeginDisabled(true); ImGui::Button("AUTO 0"); ImGui::EndDisabled();
+        }
+
+        ImGui::SameLine(0, GAP);
+        if(ImGui::Button("+ LOB")) lob_popup = true;
+
+        ImGui::SameLine(0, GAP);
+        ImGui::SetNextItemWidth(180);
+        ImGui::InputText("##df_filter", filter, sizeof filter);
+
+        ImGui::SameLine(0, GAP);
+        char cnt[32]; snprintf(cnt, sizeof cnt, "%d fix", v.df_hist_n);
+        ImGui::SetCursorPosY(VCEN - ImGui::GetTextLineHeight()*0.5f);
+        ImGui::TextDisabled("%s", cnt);
+
+        // 우측: CLEAR + SETUP. 창이 좁으면 왼쪽 위젯 위로 겹치므로 현재 커서
+        // 오른쪽으로만 민다 (겹치느니 잘리는 편이 낫다).
+        const float RM = 12.f;
+        const float rx = W - RM - 70.f - 4.f - 60.f;
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(std::max(rx, ImGui::GetCursorPosX() + 8.f));
+        ImGui::SetCursorPosY(VCEN - ImGui::GetFrameHeight()*0.5f);
+        if(ImGui::Button("CLEAR", ImVec2(60,0))){
+            v.df_hist_n = 0; v.df_hist_head = 0; sel.clear();
+            v.df_last_valid = false; banner[0] = 0;
+            last_seq = v.df_hist_seq; last_vis_n = 0;
+        }
+        ImGui::SameLine(0, 4);
+        // 클릭 전 상태를 스냅샷해서 push/pop 가드를 고정한다. `if(setup_open)` 을
+        // 양쪽에 쓰면 버튼이 그 조건 자체를 뒤집어 컬러 스택이 매 토글마다 깨진다.
+        const bool setup_hi = setup_open;
+        if(setup_hi) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f,0.45f,0.6f,1.f));
+        if(ImGui::Button("SETUP", ImVec2(70,0))) setup_open = !setup_open;
+        if(setup_hi) ImGui::PopStyleColor();
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+
+    if(banner_on){
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.22f,0.16f,0.05f,1.f));
+        ImGui::BeginChild("##df_ban", ImVec2(W, BAN), false, ImGuiWindowFlags_NoScrollbar);
+        ImGui::SetCursorPos(ImVec2(10, 2));
+        ImGui::TextColored(ImVec4(1.f,0.78f,0.25f,1.f), "%s", banner);
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    }
+
+    // Kraken 이 아닌 로컬 HOST 면 여기서 끝. (원인 + 조치라 정보다)
     if(!is_join && v.hw.type != HWType::KRAKEN){
+        lob_popup = false;   // 여기서 소비 안 하면 다음에 열 때 팝업이 튀어나온다
         ImGui::TextColored(ImVec4(1.f,0.4f,0.4f,1.f),
             "DF requires the KrakenSDR backend. Start BEWE with  --sdr kraken");
         ImGui::End();
         return;
     }
 
-    // JOIN 이 HOST 정본을 아직 못 받았으면 설정을 못 만지게 막는다.
-    // 안 막으면 df_default_pkt() 하드코딩 기본값이 편집 버퍼에 있다가 첫 조작에서
-    // 통째로 HOST 로 나가 실제 설정을 덮어쓴다 (host_state 에 영속화까지 된다).
-    const bool cfg_ready = !is_join || v.net_cli->df_cfg_valid.load();
-    ImGui::BeginDisabled(!cfg_ready);
+    // 헤더/배너는 child 라 각각 뒤에 ItemSpacing 이 붙는다. 그만큼 빼지 않으면
+    // 배너가 켜질 때 본문이 창 밖으로 밀려 아래가 잘린다.
+    const float SPY = ImGui::GetStyle().ItemSpacing.y;
+    float body_h = Hh - HDR - BAN - SPY * (banner_on ? 2.f : 1.f);
+    if(body_h < 120.f) body_h = 120.f;
 
-    ImGui::Columns(2, "##df_cols", true);
+    // ══════════════════ 가시 목록 (필터 + 정렬) ══════════════════
+    static std::vector<int> vis;
+    vis.clear();
+    for(int i = 0; i < v.df_hist_n; i++){
+        const FFTViewer::DFFix& f = v.df_hist_at(i);
+        if(filter[0]){
+            char buf[160];
+            snprintf(buf, sizeof buf, "CH%u %.4f %.1f %s", (unsigned)f.dnum,
+                     f.cf_mhz, f.bearing_deg, f.note);
+            if(!modview::ci_find(buf, filter)) continue;
+        }
+        vis.push_back(i);
+    }
+    // 0 Time 1 CH 2 Freq 3 Brg 4 SNR 5 Conf 6 Frm 7 Note
+    modview::sort_vis(vis, sort_col, sort_asc, [&](int col, int a, int b)->int{
+        const FFTViewer::DFFix& x = v.df_hist_at(a);
+        const FFTViewer::DFFix& y = v.df_hist_at(b);
+        auto cf = [](double p, double q){ return p < q ? -1 : (p > q ? 1 : 0); };
+        switch(col){
+            case 0: return cf((double)x.t_end_ms, (double)y.t_end_ms);
+            case 1: return cf(x.dnum, y.dnum);
+            case 2: return cf(x.cf_mhz, y.cf_mhz);
+            case 3: return cf(x.bearing_deg, y.bearing_deg);
+            case 4: return cf(x.snr_db, y.snr_db);
+            case 5: return cf(x.conf_db, y.conf_db);
+            case 6: return cf(x.frames_used, y.frames_used);
+            default: return strcmp(x.note, y.note);
+        }
+    });
+    // 행 키는 push 시퀀스다. t_end_ms 를 쓰면 측정 전 거절(df_post_refusal)이
+    // 전부 0 이라 같은 키가 되고, 거절 하나를 클릭하면 거절 행 전체가 선택된다.
+    auto key_of = [&](int hist_i){
+        char k[24]; snprintf(k, sizeof k, "%u", (unsigned)v.df_hist_at(hist_i).seq);
+        return std::string(k);
+    };
+    auto key_at_vis = [&](int p)->std::string{
+        return (p >= 0 && p < (int)vis.size()) ? key_of(vis[p]) : std::string();
+    };
 
-    // ══════════════════════ 왼쪽 ══════════════════════
-    // ── DAQ 상태 ────────────────────────────────────────────────────────
-    if(!is_join){
-        const ImVec4 col_link = (L.link==2) ? ImVec4(0.3f,0.9f,0.3f,1.f)
-                              : (L.link==1) ? ImVec4(1.f,0.8f,0.f,1.f)
-                                            : ImVec4(0.9f,0.3f,0.3f,1.f);
-        ImGui::TextColored(col_link, "DAQ LINK: %s", link_text(L.link));
-        if(L.last_error[0]) ImGui::TextColored(ImVec4(1.f,0.5f,0.5f,1.f), "%s", L.last_error);
-        if(L.link > 0){
-            ImGui::Text("hw=%s  ch=%u  %.4f MHz  %.3f MSPS",
-                        L.hw_id, L.channels, L.daq_cf_mhz, L.daq_fs_msps);
-            ImGui::Text("sync_state=%u/6  delay_sync=%u  iq_sync=%u  noise_src=%u",
-                        L.sync_state, L.delay_sync, L.iq_sync, L.noise_src);
-            ImGui::Text("%.2f frames/s  %.1f MB/s   ok=%llu cal=%llu bad=%llu gaps=%llu reconn=%llu",
-                        L.frame_rate_hz, L.recv_mbps, L.frames_ok, L.frames_cal,
-                        L.frames_bad, L.gaps, L.reconnects);
-            if(L.overdrive)
-                ImGui::TextColored(ImVec4(1.f,0.5f,0.f,1.f),
-                                   "ADC OVERDRIVE mask 0x%x", L.overdrive);
-            ImGui::Text("gains(dB):");
-            for(unsigned i = 0; i < L.channels && i < 8; i++){
-                ImGui::SameLine(); ImGui::Text("%.1f", L.gain_tenths[i]/10.0);
+    // ══════════════════ 좌: 이력표 | 스플리터 | 우: 지도 ══════════════════
+    const float setup_w = setup_open ? 340.f : 0.f;
+    float tw, mapw;
+    if(mv.big){ tw = 0.f; mapw = W - setup_w - (setup_w > 0 ? 4.f : 0.f); }
+    else {
+        tw = split_tw;
+        const float maxtw = W - setup_w - 60.f;
+        if(tw > maxtw) tw = maxtw;
+        if(tw < 200.f) tw = 200.f;
+        mapw = W - tw - 6.f - setup_w - (setup_w > 0 ? 4.f : 0.f);
+        if(mapw < 10.f) mapw = 10.f;
+    }
+
+    if(!mv.big){
+        ImGuiTableFlags tf = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
+                             ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable;
+        if(ImGui::BeginTable("##df_tbl", 8, tf, ImVec2(tw, body_h))){
+            ImGui::TableSetupScrollFreeze(2, 1);
+            ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 74);
+            ImGui::TableSetupColumn("CH",   ImGuiTableColumnFlags_WidthFixed, 36);
+            ImGui::TableSetupColumn("Freq", ImGuiTableColumnFlags_WidthFixed, 84);
+            ImGui::TableSetupColumn("Brg",  ImGuiTableColumnFlags_WidthFixed, 54);
+            ImGui::TableSetupColumn("SNR",  ImGuiTableColumnFlags_WidthFixed, 50);
+            ImGui::TableSetupColumn("Conf", ImGuiTableColumnFlags_WidthFixed, 50);
+            ImGui::TableSetupColumn("Frm",  ImGuiTableColumnFlags_WidthFixed, 52);
+            ImGui::TableSetupColumn("Note", ImGuiTableColumnFlags_WidthStretch);
+            modview::sortable_headers(8, sort_col, sort_asc, /*text_col=*/7);
+
+            for(int p = 0; p < (int)vis.size(); p++){
+                const int hi = vis[p];
+                const FFTViewer::DFFix& f = v.df_hist_at(hi);
+                const std::string k = key_of(hi);
+                ImGui::TableNextRow();
+
+                char ts[16]; hms(f.t_end_ms, ts, sizeof ts);
+                if(modview::row_col0((int)(f.t_end_ms & 0x7fffffff) ^ hi, sel.selected(k), ts))
+                    sel.click(k, p, key_at_vis, (int)vis.size(), io.KeyCtrl, io.KeyShift);
+
+                char b[32];
+                ImGui::TableSetColumnIndex(1);
+                if(f.dnum > 0){ snprintf(b, sizeof b, "%u", (unsigned)f.dnum); modview::cell(b); }
+                else modview::cell("-");
+                ImGui::TableSetColumnIndex(2);
+                if(f.cf_mhz > 0.f){ snprintf(b, sizeof b, "%.4f", f.cf_mhz); modview::cell(b); }
+                else modview::cell("-");
+                ImGui::TableSetColumnIndex(3);
+                if(f.kind == 0){
+                    snprintf(b, sizeof b, "%.1f", f.bearing_deg);
+                    modview::cell(b, f.manual_lob ? ImVec4(0.6f,0.8f,1.f,1.f)
+                                                  : ImVec4(0.3f,0.9f,0.3f,1.f));
+                } else modview::cell("-");
+                // 수동 LOB 은 측정이 아니다 — 0 을 SNR/신뢰도/프레임수로 찍으면
+                // 실제로 잰 값처럼 보인다.
+                const bool measured = (f.kind == 0) && !f.manual_lob;
+                ImGui::TableSetColumnIndex(4);
+                if(measured){ snprintf(b, sizeof b, "%.1f", f.snr_db); modview::cell(b); }
+                else modview::cell("-");
+                ImGui::TableSetColumnIndex(5);
+                if(measured){ snprintf(b, sizeof b, "%.2f", f.conf_db); modview::cell(b); }
+                else modview::cell("-");
+                ImGui::TableSetColumnIndex(6);
+                if(measured){
+                    snprintf(b, sizeof b, "%u/%u", (unsigned)f.frames_used,
+                             (unsigned)f.frames_discarded); modview::cell(b);
+                } else modview::cell("-");
+                ImGui::TableSetColumnIndex(7);
+                {
+                    const bool bad = (f.kind != 0) || f.imbalance || f.overdrive_mask;
+                    ImVec4 nc = bad ? ImVec4(1.f,0.6f,0.35f,1.f) : ImVec4(0.65f,0.65f,0.65f,1.f);
+                    char nb[96];
+                    snprintf(nb, sizeof nb, "%s%s", f.origin ? "[A] " : "", f.note);
+                    modview::cell_left(nb, &nc);
+                }
+            }
+            // grew 는 **가시행 수가 늘었을 때**만 참이어야 한다. 전체 개수와
+            // 비교하면 필터가 켜진 동안 매 프레임 참이 되어 스크롤이 바닥에
+            // 못박히고, 필터가 없으면 영영 거짓이라 tail-follow 자체가 죽는다.
+            modview::tail_follow(at_bottom, (int)vis.size() > last_vis_n && sort_col < 0);
+            ImGui::EndTable();
+        }
+
+        // 스플리터
+        ImGui::SameLine(0, 0);
+        ImGui::InvisibleButton("##df_split", ImVec2(6.f, body_h));
+        if(ImGui::IsItemActive()){
+            // 클램프한 값(tw)에서 이어 받는다. 원시 누적값을 계속 키우면 한계
+            // 밖으로 나간 만큼이 그대로 남아, 되돌릴 때 그만큼 먹통 구간이 생긴다.
+            split_tw = tw + io.MouseDelta.x;
+            const float maxtw = W - setup_w - 60.f;
+            if(split_tw > maxtw) split_tw = maxtw;
+            if(split_tw < 200.f) split_tw = 200.f;
+        }
+        if(ImGui::IsItemHovered() || ImGui::IsItemActive()){
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            const ImVec2 rmin = ImGui::GetItemRectMin(), rmax = ImGui::GetItemRectMax();
+            ImGui::GetWindowDrawList()->AddLine(ImVec2((rmin.x+rmax.x)*0.5f, rmin.y),
+                                                ImVec2((rmin.x+rmax.x)*0.5f, rmax.y),
+                                                IM_COL32(120,160,200,180), 1.5f);
+        }
+        ImGui::SameLine(0, 0);
+    }
+
+    // ── 선택된 fix 들 ────────────────────────────────────────────────────
+    // **가시(필터 통과) 행만** 모은다. 필터로 숨긴 행이 계속 교점을 끌어당기면
+    // 지도에 그려지지 않은 선이 fix 를 움직이는 셈이라 설명이 불가능해진다.
+    static std::vector<const FFTViewer::DFFix*> selected;
+    selected.clear();
+    const FFTViewer::DFFix* focus = nullptr;
+    for(int p = 0; p < (int)vis.size(); p++){
+        const FFTViewer::DFFix& f = v.df_hist_at(vis[p]);
+        if(f.kind != 0) continue;
+        const std::string k = key_of(vis[p]);
+        if(sel.selected(k)){
+            selected.push_back(&f);
+            if(sel.focus == k) focus = &f;
+        }
+    }
+    if(!focus && !selected.empty()) focus = selected.back();
+    if(!focus && v.df_hist_n > 0){
+        for(int i = v.df_hist_n - 1; i >= 0; i--)
+            if(v.df_hist_at(i).kind == 0){ focus = &v.df_hist_at(i); break; }
+    }
+
+    // ── 지도 ─────────────────────────────────────────────────────────────
+    static std::vector<modview_map::MapPoint>  pts;
+    static std::vector<modview_map::MapStation> stns;
+    static std::vector<std::string>            stn_names;
+    static std::vector<std::string>            tip1, tip2;
+    pts.clear(); stns.clear(); stn_names.clear(); tip1.clear(); tip2.clear();
+
+    // 한국 운용 전제 좌표 정규화 — 서경으로 저장된 값 방어 (cli_host 는 서경 양수)
+    auto norm = [](float& la, float& lo){ if(lo < 0.f) lo = -lo; if(la < 0.f) la = -la; };
+
+    {
+        std::lock_guard<std::mutex> ck(v.station_geo_cache_mtx);
+        for(const auto& kv : v.station_geo_cache){
+            float la = kv.second.first, lo = kv.second.second;
+            if(la == 0.f && lo == 0.f) continue;
+            norm(la, lo);
+            stn_names.push_back(kv.first);
+            modview_map::MapStation ms; ms.lat = la; ms.lon = lo;
+            stns.push_back(ms);
+        }
+        if(stns.empty() && (v.station_lat != 0.f || v.station_lon != 0.f)){
+            float la = v.station_lat, lo = v.station_lon; norm(la, lo);
+            stn_names.push_back(v.station_name.empty() ? std::string("HOST") : v.station_name);
+            modview_map::MapStation ms; ms.lat = la; ms.lon = lo;
+            stns.push_back(ms);
+        }
+    }
+    for(size_t i = 0; i < stns.size(); i++) stns[i].name = stn_names[i].c_str();
+
+    // fix 당 포인트 하나. 위치는 기지가 아니라 **LOB 중점** — 정지 기지의 여러
+    // 방위가 부채꼴로 퍼져 각각 클릭 가능해진다 (기지에 두면 한 픽셀에 겹친다).
+    tip1.reserve(vis.size()); tip2.reserve(vis.size());
+    for(int p = 0; p < (int)vis.size(); p++){
+        const FFTViewer::DFFix& f = v.df_hist_at(vis[p]);
+        if(f.kind != 0) continue;
+        float sla = f.station_lat, slo = f.station_lon;
+        if(sla == 0.f && slo == 0.f) continue;
+        norm(sla, slo);
+        const double half = lob_km * 0.5;
+        const double clat = std::cos(sla * D2R);
+        modview_map::MapPoint mp;
+        mp.lat = sla + (half * std::cos(f.bearing_deg * D2R)) / KM_PER_DEG_LAT;
+        mp.lon = slo + (half * std::sin(f.bearing_deg * D2R)) / (KM_PER_DEG_LAT * (clat > 0.05 ? clat : 0.05));
+        mp.heading = (float)f.bearing_deg;
+        mp.id      = (uint64_t)f.t_end_ms;
+        const bool is_sel = sel.selected(key_of(vis[p]));
+        mp.selected = is_sel;
+        mp.color = is_sel ? IM_COL32(255,205,70,255)
+                          : (f.manual_lob ? IM_COL32(140,180,255,220) : IM_COL32(80,200,255,200));
+        char t1[64], t2[64];
+        snprintf(t1, sizeof t1, "CH%u  %.1f deg", (unsigned)f.dnum, f.bearing_deg);
+        char ts[16]; hms(f.t_end_ms, ts, sizeof ts);
+        snprintf(t2, sizeof t2, "SNR %.1f dB   %s", f.snr_db, ts);
+        tip1.emplace_back(t1); tip2.emplace_back(t2);
+        pts.push_back(mp);
+    }
+    for(size_t i = 0; i < pts.size(); i++){
+        pts[i].tip_l1 = tip1[i].c_str();
+        pts[i].tip_l2 = tip2[i].c_str();
+    }
+
+    // 이력이 비면 draw_map 은 auto-fit 을 안 한다 — 기지 중심으로 시드해 준다.
+    if(just_opened && pts.empty() && !stns.empty() && !mv.initialized){
+        mv.lat0 = stns[0].lat - 0.75; mv.lat1 = stns[0].lat + 0.75;
+        mv.lon0 = stns[0].lon - 0.75; mv.lon1 = stns[0].lon + 0.75;
+        mv.initialized = true;
+    }
+
+    const ImVec2 map_p0 = ImGui::GetCursorScreenPos();
+    modview_map::MapResult mres =
+        modview_map::draw_map("##df_map", mv, pts, ImVec2(mapw, body_h),
+                              just_opened, &stns, nullptr);
+
+    // 지도 클릭 -> 표와 **동일한** 선택 경로. 선택 모델이 하나라야 ctrl/shift 의미가 같다.
+    if(mres.clicked_id != 0){
+        for(int p = 0; p < (int)vis.size(); p++){
+            if((uint64_t)v.df_hist_at(vis[p]).t_end_ms == mres.clicked_id){
+                sel.click(key_of(vis[p]), p, key_at_vis, (int)vis.size(), io.KeyCtrl, io.KeyShift);
+                break;
             }
         }
     }
 
-    // ── DAQ 제어 ────────────────────────────────────────────────────────
-    ImGui::Dummy(ImVec2(0,8)); ImGui::Separator();
-    ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "DAQ CONTROL");
-    bool ctrl = (c.enable_control != 0);
-    if(ImGui::Checkbox("allow BEWE to retune the DAQ", &ctrl)) c.enable_control = ctrl ? 1 : 0;
-    // (DAQ 직접 재튠 위젯은 HOST 전용이었다. GUI 는 JOIN 뿐이라 삭제 —
-    //  JOIN 은 상단 주파수 박스가 HOST 로 SET_FREQ 를 보내고 HOST 가 DAQ 를 돌린다.)
-
-    // ── 배열 기하 ───────────────────────────────────────────────────────
-    ImGui::Dummy(ImVec2(0,8)); ImGui::Separator();
-    ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "ARRAY GEOMETRY");
-
-    ImGui::SetNextItemWidth(160);
-    ImGui::InputFloat("radius (m)", &c.radius_m, 0.005f, 0.05f, "%.4f");
-
-    int el = c.elements;
-    ImGui::SetNextItemWidth(160);
-    if(ImGui::SliderInt("elements", &el, 3, 8)) c.elements = (uint8_t)el;
-    if(!is_join && L.channels > 0 && (unsigned)c.elements != L.channels)
-        ImGui::TextColored(ImVec4(1.f,0.5f,0.5f,1.f), "  DAQ ch=%u", L.channels);
-
-    int sense = c.sense;
-    ImGui::SetNextItemWidth(160);
-    const char* sense_items[] = { "CW", "CCW" };
-    if(ImGui::Combo("numbering", &sense, sense_items, 2)) c.sense = (uint8_t)sense;
-
-    ImGui::SetNextItemWidth(160);
-    ImGui::InputFloat("heading offset (deg)", &c.heading_deg, 1.0f, 10.0f, "%.1f");
-
-    if(L.lambda_m > 0.0){
-        ImGui::Text("lambda %.3f m at the DAQ centre;  ambiguity ratio %.3f",
-                    L.lambda_m, L.ambiguity);
-        if(L.ambiguity > 1.0)
-            ImGui::TextColored(ImVec4(1.f,0.6f,0.f,1.f), "  grating lobes");
+    // ── LOB 광선 + 교차 fix (draw_map 위에 덧그린다) ────────────────────
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->PushClipRect(map_p0, ImVec2(map_p0.x + mapw, map_p0.y + body_h), true);
+        auto P = [&](double lat, double lon){
+            return ImVec2((float)(map_p0.x + (lon - mv.lon0) / (mv.lon1 - mv.lon0) * mapw),
+                          (float)(map_p0.y + (mv.lat1 - lat) / (mv.lat1 - mv.lat0) * body_h));
+        };
+        for(int p = 0; p < (int)vis.size(); p++){
+            const FFTViewer::DFFix& f = v.df_hist_at(vis[p]);
+            if(f.kind != 0) continue;
+            float sla = f.station_lat, slo = f.station_lon;
+            if(sla == 0.f && slo == 0.f) continue;
+            norm(sla, slo);
+            const bool is_sel = sel.selected(key_of(vis[p]));
+            const float amul  = is_sel ? 1.0f : 0.35f;
+            const double clat = std::cos(sla * D2R);
+            const double e_lat = sla + (lob_km * std::cos(f.bearing_deg * D2R)) / KM_PER_DEG_LAT;
+            const double e_lon = slo + (lob_km * std::sin(f.bearing_deg * D2R))
+                                       / (KM_PER_DEG_LAT * (clat > 0.05 ? clat : 0.05));
+            ImVec2 prev = P(sla, slo);
+            for(int s = 1; s <= 16; s++){
+                const double t = (double)s / 16.0;
+                const ImVec2 cur = P(sla + (e_lat - sla)*t, slo + (e_lon - slo)*t);
+                const float fade = (float)(1.0 - 0.65*t) * amul;
+                dl->AddLine(prev, cur, IM_COL32(255,210,60,(int)(55*fade)),  5.0f);
+                dl->AddLine(prev, cur, IM_COL32(255,236,150,(int)(205*fade)), 1.6f);
+                prev = cur;
+            }
+        }
+        // 교차 fix
+        if(selected.size() >= 2){
+            FixSolution fx = df_solve_fix(selected.data(), (int)selected.size());
+            if(fx.ok){
+                const ImVec2 cp = P(fx.lat, fx.lon);
+                const double clat = std::cos(fx.lat * D2R);
+                const double kmlon = KM_PER_DEG_LAT * (clat > 0.05 ? clat : 0.05);
+                ImVec2 poly[48];
+                const double th = fx.orient_deg * D2R;
+                for(int i = 0; i < 48; i++){
+                    const double a = 2.0*3.14159265358979*i/48.0;
+                    const double ex = fx.maj_km*std::cos(a), ey = fx.min_km*std::sin(a);
+                    const double rx = ex*std::cos(th) - ey*std::sin(th);
+                    const double ry = ex*std::sin(th) + ey*std::cos(th);
+                    poly[i] = P(fx.lat + ry/KM_PER_DEG_LAT, fx.lon + rx/kmlon);
+                }
+                dl->AddConvexPolyFilled(poly, 48, IM_COL32(255,205,70,30));
+                for(int i = 0; i < 48; i++)
+                    dl->AddLine(poly[i], poly[(i+1)%48], IM_COL32(255,232,130,150), 1.2f);
+                dl->AddLine(ImVec2(cp.x-7,cp.y), ImVec2(cp.x+7,cp.y), IM_COL32(255,240,160,230), 1.6f);
+                dl->AddLine(ImVec2(cp.x,cp.y-7), ImVec2(cp.x,cp.y+7), IM_COL32(255,240,160,230), 1.6f);
+                char lb[96];
+                snprintf(lb, sizeof lb, "FIX %.4fN %.4fE  +/- %.1f km",
+                         fx.lat, fx.lon, fx.maj_km);
+                dl->AddText(ImVec2(cp.x + 10, cp.y - 16), IM_COL32(255,240,160,240), lb);
+            }
+        }
+        dl->PopClipRect();
     }
 
-    ImGui::NextColumn();
-
-    // ══════════════════════ 오른쪽 ══════════════════════
-    ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "ESTIMATION");
-
-    int algo = c.algo;
-    ImGui::SetNextItemWidth(160);
-    const char* algo_items[] = { "Bartlett", "Capon (MVDR)", "MUSIC" };
-    if(ImGui::Combo("algorithm", &algo, algo_items, 3)) c.algo = (uint8_t)algo;
-
-    int sd = c.signal_dim;
-    ImGui::SetNextItemWidth(160);
-    if(ImGui::SliderInt("sources (MUSIC)", &sd, 1, c.elements > 1 ? c.elements-1 : 1))
-        c.signal_dim = (uint8_t)sd;
-
-    int af = c.avg_frames;
-    ImGui::SetNextItemWidth(160);
-    if(ImGui::SliderInt("frames to average", &af, 1, 30)) c.avg_frames = (uint8_t)af;
-    ImGui::SameLine();
-    ImGui::TextDisabled("~%.1f s", af * 0.437);
-
-    int mf = c.max_frames;
-    ImGui::SetNextItemWidth(160);
-    if(ImGui::SliderInt("frame budget", &mf, c.avg_frames, 60)) c.max_frames = (uint8_t)mf;
-
-    // ── 수락 규칙 ───────────────────────────────────────────────────────
-    ImGui::Dummy(ImVec2(0,8)); ImGui::Separator();
-    ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "ACCEPTANCE");
-    ImGui::SetNextItemWidth(160);
-    ImGui::SliderFloat("SNR threshold (dB)", &c.snr_thr_db, -10.0f, 40.0f, "%.0f");
-
-    // ── 신호 추출 ───────────────────────────────────────────────────────
-    ImGui::Dummy(ImVec2(0,8)); ImGui::Separator();
-    ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "SIGNAL EXTRACTION");
-    ImGui::SetNextItemWidth(160);
-    ImGui::InputFloat("DC guard (Hz)", &c.dc_guard_hz, 100.f, 1000.f, "%.0f");
-
-    int tl = c.target_looks;
-    ImGui::SetNextItemWidth(160);
-    if(ImGui::SliderInt("target looks", &tl, 128, 16384)) c.target_looks = (uint16_t)tl;
-
-    int kfs = c.fft_size;
-    ImGui::SetNextItemWidth(160);
-    const char* k_items[] = { "1024", "2048", "4096", "8192", "16384", "32768" };
-    int k_idx = 3;
-    for(int i = 0; i < 6; i++) if(kfs == (1024 << i)) k_idx = i;
-    if(ImGui::Combo("segment FFT", &k_idx, k_items, 6)) c.fft_size = (uint16_t)(1024 << k_idx);
-
-    ImGui::Dummy(ImVec2(0,4));
-    if(ImGui::TreeNode("Advanced")){
-        ImGui::SetNextItemWidth(160);
-        ImGui::InputFloat("c_papr", &c.c_papr, 1.0f, 10.0f, "%.1f");
-        ImGui::TreePop();
-    }
-
-    ImGui::EndDisabled();
-
-    // 손을 뗀 프레임에만 한 번 보낸다. HOST 는 즉시 적용 + 방송,
-    // JOIN 은 요청만 보내고 HOST 가 돌려주는 값을 정본으로 삼는다.
-    if(cfg_ready && !ImGui::IsAnyItemActive()){
-        clamp_cross_fields(ui);
-        if(memcmp(&canon, &ui, sizeof ui) != 0){
-            v.df_set_cfg(ui);
-            hold_until = now + 1.0;   // 에코 대기. 만료되면 정본으로 스냅백.
+    // ── 나침반 오버레이 (지도 좌하단 — 우하단은 축척바, 좌상단은 토글열) ──
+    {
+        // 좌하단이되 map_view 의 커서 lat/lon 판독(맨 아래 줄)은 피해 올려둔다.
+        const float CR = 92.f;
+        const ImVec2 cc(map_p0.x + CR + 34.f, map_p0.y + body_h - CR - 58.f);
+        if(mapw > 2*CR + 80.f && body_h > 2*CR + 80.f){
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->PushClipRect(map_p0, ImVec2(map_p0.x + mapw, map_p0.y + body_h), true);
+            dl->AddCircleFilled(cc, CR + 34.f, IM_COL32(12,14,18,190), 48);
+            float hover_az = -1.f;
+            const bool have = (focus != nullptr);
+            double altd[2] = {0,0};
+            int altn = 0;
+            if(have){ altd[0]=focus->alt_deg[0]; altd[1]=focus->alt_deg[1]; altn=focus->alt_n; }
+            draw_compass(dl, cc, CR,
+                         have && focus->has_spec ? focus->spec_q : nullptr,
+                         have, have ? focus->bearing_deg : 0.0, altd, altn,
+                         c.elements, c.sense, polar_floor_db, &hover_az);
+            dl->PopClipRect();
         }
     }
 
-    // ── 배열 그림 + 마지막 결과 ─────────────────────────────────────────
-    ImGui::Dummy(ImVec2(0,8)); ImGui::Separator();
-    ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "LAST RESULT");
-    const ImVec2 org = ImGui::GetCursorScreenPos();
-    const float  R   = 100.0f;
-    const ImVec2 ctr(org.x + R + 30.0f, org.y + R + 14.0f);
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const bool have = v.df_last_valid;
-    if(have) draw_polar_spectrum(dl, ctr, R, v.df_last_spectrum, 360);
-    draw_array_diagram(dl, ctr, R*0.55f, c.elements, c.sense, v.df_last_bearing, have);
-    ImGui::Dummy(ImVec2(0, R*2 + 26));
-
-    if(L.measuring){
-        ImGui::TextColored(ImVec4(1.f,0.8f,0.f,1.f), "measuring...");
-        ImGui::ProgressBar(L.progress, ImVec2(-1, 0));
-    } else if(have){
-        ImGui::Text("CH%d   %.4f MHz   BW %.1f kHz",
-                    v.df_last_dnum, v.df_last_cf_mhz, v.df_last_bw_khz);
-        ImGui::TextColored(ImVec4(0.3f,0.9f,0.3f,1.f), "bearing  %.1f deg", v.df_last_bearing);
-        ImGui::Text("SNR %.1f dB   confidence %.2f dB   power %.1f dBFS",
-                    v.df_last_snr, v.df_last_conf, v.df_last_pwr);
-        ImGui::TextDisabled("relative to antenna 0: %.1f deg", v.df_last_bearing_rel);
-    } else {
-        ImGui::TextDisabled("no measurement yet");
+    // ── 세부 판독 (지도 우상단) ─────────────────────────────────────────
+    if(focus){
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        char l1[128], l2[128], l3[128], l4[128];
+        char ts[16]; hms(focus->t_end_ms, ts, sizeof ts);
+        snprintf(l1, sizeof l1, "CH%u  %.4f MHz  BW %.1f kHz  %s",
+                 (unsigned)focus->dnum, focus->cf_mhz, focus->bw_khz, ts);
+        snprintf(l2, sizeof l2, "bearing %.1f deg   (ant0 %.1f)",
+                 focus->bearing_deg, focus->bearing_rel_deg);
+        snprintf(l3, sizeof l3, "SNR %.1f dB   conf %.2f dB   pwr %.1f dBFS   %s",
+                 focus->snr_db, focus->conf_db, focus->power_dbfs, algo_name(focus->algo));
+        if(focus->alt_n > 0)
+            snprintf(l4, sizeof l4, "alt %.0f deg %.0f dB", focus->alt_deg[0], focus->alt_db[0]);
+        else l4[0] = 0;
+        const float bw = 380.f;
+        const ImVec2 p0(map_p0.x + mapw - bw - 10.f, map_p0.y + 10.f);
+        const float bh = l4[0] ? 78.f : 62.f;
+        dl->PushClipRect(map_p0, ImVec2(map_p0.x + mapw, map_p0.y + body_h), true);
+        dl->AddRectFilled(p0, ImVec2(p0.x + bw, p0.y + bh), IM_COL32(12,14,18,205), 4.f);
+        dl->AddRect(p0, ImVec2(p0.x + bw, p0.y + bh), IM_COL32(70,80,95,220), 4.f);
+        dl->AddText(ImVec2(p0.x+8, p0.y+6),  IM_COL32(200,200,200,255), l1);
+        dl->AddText(ImVec2(p0.x+8, p0.y+22), IM_COL32(90,230,90,255),   l2);
+        dl->AddText(ImVec2(p0.x+8, p0.y+38), IM_COL32(180,180,180,255), l3);
+        if(l4[0]) dl->AddText(ImVec2(p0.x+8, p0.y+54), IM_COL32(255,180,80,255), l4);
+        dl->PopClipRect();
     }
 
-    ImGui::Columns(1);
+    // ══════════════════ 설정 창 (기본 닫힘) ══════════════════
+    if(setup_open){
+        ImGui::SameLine(0, 4);
+        // JOIN 이 HOST 정본을 아직 못 받았으면 못 만지게 막는다. 안 막으면
+        // df_default_pkt 하드코딩 기본값이 첫 조작에서 통째로 HOST 를 덮어쓴다
+        // (host_state 에 영속화까지 된다).
+        const bool cfg_ready = !is_join || v.net_cli->df_cfg_valid.load();
+        ImGui::BeginChild("##df_setup", ImVec2(setup_w, body_h), true);
+        ImGui::BeginDisabled(!cfg_ready);
+
+        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "DAQ");
+        {
+            const ImVec4 cl = (L.link==2) ? ImVec4(0.3f,0.9f,0.3f,1.f)
+                            : (L.link==1) ? ImVec4(1.f,0.8f,0.f,1.f)
+                                          : ImVec4(0.9f,0.3f,0.3f,1.f);
+            ImGui::TextColored(cl, "[%s]", link_text(L.link));
+            ImGui::SameLine();
+            ImGui::Text("sync %u/6  ch %u", L.sync_state, L.channels);
+            if(L.link > 0){
+                ImGui::Text("%s  %.4f MHz  %.3f MSPS", L.hw_id, L.daq_cf_mhz, L.daq_fs_msps);
+                ImGui::Text("%.2f fps  %.1f MB/s", L.frame_rate_hz, L.recv_mbps);
+                ImGui::Text("ok %llu  cal %llu  bad %llu  gap %llu  rec %llu",
+                            L.frames_ok, L.frames_cal, L.frames_bad, L.gaps, L.reconnects);
+                ImGui::Text("gain:");
+                for(unsigned i = 0; i < L.channels && i < 8; i++){
+                    ImGui::SameLine(); ImGui::Text("%.1f", L.gain_tenths[i]/10.0);
+                }
+            }
+            if(L.last_error[0]) ImGui::TextColored(ImVec4(1.f,0.5f,0.5f,1.f), "%s", L.last_error);
+            if(L.overdrive) ImGui::TextColored(ImVec4(1.f,0.5f,0.f,1.f),
+                                               "ADC OVERDRIVE 0x%x", L.overdrive);
+            if(L.channels > 0 && (unsigned)c.elements != L.channels)
+                ImGui::TextColored(ImVec4(1.f,0.5f,0.5f,1.f), "DAQ ch=%u", L.channels);
+        }
+        if(L.measuring){
+            ImGui::TextColored(ImVec4(1.f,0.8f,0.f,1.f), "measuring...");
+            ImGui::ProgressBar(L.progress, ImVec2(-1, 0));
+        }
+
+        ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "DAQ CONTROL");
+        { bool ctl = (c.enable_control != 0);
+          if(ImGui::Checkbox("retune DAQ", &ctl)) c.enable_control = ctl?1:0; }
+
+        ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "ARRAY GEOMETRY");
+        ImGui::SetNextItemWidth(150);
+        ImGui::InputFloat("radius (m)", &c.radius_m, 0.005f, 0.05f, "%.4f");
+        { int el = c.elements; ImGui::SetNextItemWidth(150);
+          if(ImGui::SliderInt("elements", &el, 3, 8)) c.elements = (uint8_t)el; }
+        { int sn = c.sense; ImGui::SetNextItemWidth(150);
+          const char* it[] = { "CW", "CCW" };
+          if(ImGui::Combo("numbering", &sn, it, 2)) c.sense = (uint8_t)sn; }
+        ImGui::SetNextItemWidth(150);
+        ImGui::InputFloat("heading offset (deg)", &c.heading_deg, 1.0f, 10.0f, "%.1f");
+        if(L.lambda_m > 0.0){
+            ImGui::Text("lambda %.3f m   ambiguity %.3f", L.lambda_m, L.ambiguity);
+            if(L.ambiguity > 1.0)
+                ImGui::TextColored(ImVec4(1.f,0.6f,0.f,1.f), "grating lobes");
+        }
+
+        ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "ESTIMATION");
+        { int al = c.algo; ImGui::SetNextItemWidth(150);
+          const char* it[] = { "Bartlett", "Capon (MVDR)", "MUSIC" };
+          if(ImGui::Combo("algorithm", &al, it, 3)) c.algo = (uint8_t)al; }
+        { int sd = c.signal_dim; ImGui::SetNextItemWidth(150);
+          if(ImGui::SliderInt("sources (MUSIC)", &sd, 1, c.elements > 1 ? c.elements-1 : 1))
+              c.signal_dim = (uint8_t)sd; }
+        { int af = c.avg_frames; ImGui::SetNextItemWidth(150);
+          if(ImGui::SliderInt("frames to average", &af, 1, 30)) c.avg_frames = (uint8_t)af;
+          ImGui::SameLine(); ImGui::TextDisabled("~%.1f s", af * 0.437); }
+        { int mf = c.max_frames; ImGui::SetNextItemWidth(150);
+          if(ImGui::SliderInt("frame budget", &mf, c.avg_frames, 60)) c.max_frames = (uint8_t)mf; }
+
+        ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "ACCEPTANCE");
+        ImGui::SetNextItemWidth(150);
+        ImGui::SliderFloat("SNR threshold (dB)", &c.snr_thr_db, -10.0f, 40.0f, "%.0f");
+
+        ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "SIGNAL EXTRACTION");
+        ImGui::SetNextItemWidth(150);
+        ImGui::InputFloat("DC guard (Hz)", &c.dc_guard_hz, 100.f, 1000.f, "%.0f");
+        { int tl = c.target_looks; ImGui::SetNextItemWidth(150);
+          if(ImGui::SliderInt("target looks", &tl, 128, 16384)) c.target_looks = (uint16_t)tl; }
+        { int kfs = c.fft_size; ImGui::SetNextItemWidth(150);
+          const char* it[] = { "1024","2048","4096","8192","16384","32768" };
+          int ki = 3; for(int i=0;i<6;i++) if(kfs == (1024<<i)) ki = i;
+          if(ImGui::Combo("segment FFT", &ki, it, 6)) c.fft_size = (uint16_t)(1024<<ki); }
+
+        ImGui::Dummy(ImVec2(0,4));
+        if(ImGui::TreeNode("Advanced")){
+            ImGui::SetNextItemWidth(150);
+            ImGui::InputFloat("c_papr", &c.c_papr, 1.0f, 10.0f, "%.1f");
+            ImGui::TreePop();
+        }
+
+        ImGui::EndDisabled();
+
+        // 표시 전용 (와이어에 안 올린다 — HOST 소유 설정이 아니라 화면 취향이다)
+        ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "DISPLAY");
+        ImGui::SetNextItemWidth(150);
+        ImGui::SliderFloat("polar floor (dB)", &polar_floor_db, -80.f, -10.f, "%.0f");
+        ImGui::SetNextItemWidth(150);
+        ImGui::SliderFloat("LOB length (km)", &lob_km, 10.f, 500.f, "%.0f");
+
+        ImGui::EndChild();
+
+        // 손을 뗀 프레임에만 한 번 보낸다. HOST 가 거절하면 에코가 안 오고,
+        // hold 만료 시 ui = canon 으로 진실에 스냅백한다.
+        if(cfg_ready && !ImGui::IsAnyItemActive()){
+            clamp_cross_fields(ui);
+            if(memcmp(&canon, &ui, sizeof ui) != 0){
+                v.df_set_cfg(ui);
+                hold_until = now + 1.0;
+            }
+        }
+    }
+
+    // ── 수동 LOB 입력 팝업 ───────────────────────────────────────────────
+    // JOIN 은 Central 룸 하나에만 있어 한 기지의 DF 결과만 받는다. 다른 기지의
+    // 방위를 손으로 넣으면 와이어 변경 없이 기지간 교차 fix 를 만들 수 있다.
+    if(lob_popup){ ImGui::OpenPopup("##df_lob"); lob_popup = false; }
+    if(ImGui::BeginPopup("##df_lob")){
+        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "MANUAL LOB");
+        ImGui::SetNextItemWidth(200);
+        int lob_idx = -1;
+        for(int i = 0; i < (int)stn_names.size(); i++)
+            if(stn_names[i] == lob_stn){ lob_idx = i; break; }
+        if(lob_idx < 0 && !stn_names.empty()){ lob_idx = 0; lob_stn = stn_names[0]; }
+        {
+            const char* cur = (lob_idx >= 0) ? stn_names[lob_idx].c_str() : "(no station)";
+            if(ImGui::BeginCombo("station", cur)){
+                for(int i = 0; i < (int)stn_names.size(); i++)
+                    if(ImGui::Selectable(stn_names[i].c_str(), lob_idx == i)){
+                        lob_idx = i; lob_stn = stn_names[i];
+                    }
+                ImGui::EndCombo();
+            }
+        }
+        ImGui::SetNextItemWidth(200);
+        ImGui::InputFloat("bearing (deg)", &lob_brg, 1.f, 10.f, "%.1f");
+        ImGui::BeginDisabled(lob_idx < 0);
+        if(ImGui::Button("ADD") && lob_idx >= 0 && lob_idx < (int)stns.size()){
+            FFTViewer::DFFix f{};
+            f.t_end_ms    = now_ms_local();
+            f.bearing_deg = std::fmod(lob_brg + 360.f, 360.f);
+            f.station_lat = (float)stns[lob_idx].lat;
+            f.station_lon = (float)stns[lob_idx].lon;
+            f.kind = 0; f.manual_lob = 1;
+            snprintf(f.note, sizeof f.note, "MANUAL %s", stn_names[lob_idx].c_str());
+            v.df_push_fix(f);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if(ImGui::Button("CANCEL")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    // Ctrl+C: 선택 행을 탭 구분으로 복사
+    if(win_focus && !typing && io.KeyCtrl &&
+       ImGui::IsKeyPressed(ImGuiKey_C, false) && !sel.keys.empty()){
+        std::string out;
+        for(int p = 0; p < (int)vis.size(); p++){
+            const int hi = vis[p];
+            if(!sel.selected(key_of(hi))) continue;
+            const FFTViewer::DFFix& f = v.df_hist_at(hi);
+            char ts[16]; hms(f.t_end_ms, ts, sizeof ts);
+            char line[256];
+            snprintf(line, sizeof line, "%s\tCH%u\t%.4f\t%.1f\t%.1f\t%.2f\t%u/%u\t%s\n",
+                     ts, (unsigned)f.dnum, f.cf_mhz, f.bearing_deg, f.snr_db, f.conf_db,
+                     (unsigned)f.frames_used, (unsigned)f.frames_discarded, f.note);
+            out += line;
+        }
+        if(!out.empty()) ImGui::SetClipboardText(out.c_str());
+    }
+
+    last_vis_n = (int)vis.size();
     ImGui::End();
 }
