@@ -991,7 +991,8 @@ public:
     bool df_engine_ready() const;
     int  df_link_state()   const;   // 0=down  1=calibrating  2=streaming
     bool df_measuring()    const;
-    bool df_submit(double center_hz, double bw_hz, int arr_idx, int dnum);
+    bool df_submit(double center_hz, double bw_hz, int arr_idx, int dnum,
+                   bool use_backlog = false);
     void df_stop_engine();
     // 설정 접근 (설정 패널·HostState 용). algo 0=Bartlett 1=Capon 2=MUSIC,
     // sense 0=CW 1=CCW.

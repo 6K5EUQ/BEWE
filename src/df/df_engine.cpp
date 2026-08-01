@@ -1,3 +1,4 @@
+#include <deque>
 #include "df_engine.hpp"
 #include "df_estimator.hpp"
 #include "df_manifold.hpp"
@@ -180,6 +181,29 @@ void Engine::Impl::loop(){
     uint32_t od_mask = 0;
     int64_t  t_start = 0;
 
+    // ── 최근 프레임 보관 (버스트 소급 측정용) ────────────────────────────
+    // 버스트 신호는 요청이 도착했을 때 이미 끝나 있다. 그래서 직전 프레임을
+    // 몇 개 들고 있다가, use_backlog 요청이 오면 그것부터 적분한다.
+    //
+    // 5채널 원본을 그대로 복사해 둔다 — DF 는 채널간 위상차가 전부라, ch0 만
+    // 담는 ring/롤링 IQ 로는 절대 대신할 수 없다.
+    // 프레임 하나 = samples_per_ch * channels * 8 B (complex<float>).
+    // 2.4 MSPS/5ch 기준 약 21 MB 이므로 2 개까지만 둔다 (~42 MB).
+    struct HeldFrame {
+        std::vector<std::complex<float>> iq;   // channel-major 사본
+        uint32_t channels = 0, samples_per_ch = 0;
+        uint32_t overdrive = 0;
+        uint64_t rf_center_hz = 0, sampling_hz = 0;
+        bool     usable = false;
+    };
+    constexpr size_t kHeldMax = 2;
+    std::deque<HeldFrame> held;
+    // 보관 자체가 비용(21 MB memcpy/프레임 = 2.4 MSPS 에서 초당 약 48 MB)이라
+    // 항상 켜두지 않는다. 버스트 요청이 한 번 오면 켜고, 한동안 안 오면 끈다.
+    bool     hold_on = false;
+    int64_t  hold_last_use_ms = 0;
+    constexpr int64_t kHoldIdleMs = 60000;   // 마지막 버스트 요청 후 1분
+
     steady_clock::time_point last_rate = steady_clock::now();
     uint64_t last_frames = 0, last_bytes = 0;
 
@@ -254,6 +278,32 @@ void Engine::Impl::loop(){
                         h.sampling_freq, h.adc_overdrive_flags, (int64_t)h.time_stamp);
         }
 
+        // ── 최근 프레임 보관 (버스트 요청이 최근에 있었을 때만) ──────────
+        // client 의 Frame 은 내부 수신 버퍼를 가리키는 뷰라 다음 next_frame 에서
+        // 덮인다. 보관하려면 사본이 있어야 한다.
+        if(hold_on && now_ms() - hold_last_use_ms > kHoldIdleMs){
+            hold_on = false;
+            held.clear();
+            held.shrink_to_fit();          // 42 MB 를 실제로 돌려준다
+        }
+        if(hold_on && f.iq && f.channels > 0 && f.samples_per_ch > 0){
+            HeldFrame hf;
+            const size_t n = (size_t)f.channels * f.samples_per_ch;
+            if(held.size() >= kHeldMax){    // 가장 오래된 버퍼를 재활용
+                hf = std::move(held.front());
+                held.pop_front();
+            }
+            hf.iq.resize(n);
+            memcpy(hf.iq.data(), f.iq, n * sizeof(std::complex<float>));
+            hf.channels       = f.channels;
+            hf.samples_per_ch = f.samples_per_ch;
+            hf.overdrive      = h.adc_overdrive_flags;
+            hf.rf_center_hz   = h.rf_center_freq;
+            hf.sampling_hz    = h.sampling_freq;
+            hf.usable         = usable_for_df(h) && !f.stale && h.frame_type == FRAME_DATA;
+            held.push_back(std::move(hf));
+        }
+
         // ── 새 요청 집기 ─────────────────────────────────────────────────
         if(!measuring && req_pending.exchange(false, std::memory_order_acquire)){
             { std::lock_guard<std::mutex> lk(slot_mtx); cur = req; }
@@ -292,6 +342,32 @@ void Engine::Impl::loop(){
             frames_done.store(0);
             frames_want.store(cur.frames);
             is_armed.store(true, std::memory_order_release);
+
+            // ── 버스트 소급: 보관해 둔 직전 프레임부터 적분 ──────────────
+            // 다음에 올 프레임을 기다리면 26 ms 버스트는 이미 지나간 뒤다.
+            if(cur.use_backlog){
+                hold_last_use_ms = now_ms();
+                if(!hold_on){
+                    // 이번 요청은 보관본이 없어 소급이 안 된다. 다음 요청부터
+                    // 쓸 수 있게 켜만 두고, 이번 건은 기존대로 앞을 보고 잰다.
+                    hold_on = true;
+                } else {
+                    for(const HeldFrame& hf : held){
+                        if(got >= cur.frames) break;
+                        if(!hf.usable){ discarded++; continue; }
+                        // 보관 시점과 지금의 튜닝/샘플레이트가 다르면 그 프레임은
+                        // 이 요청의 채널과 무관하다 (재튠 직후). 섞으면 안 된다.
+                        if(hf.rf_center_hz != h.rf_center_freq ||
+                           hf.sampling_hz  != h.sampling_freq  ||
+                           hf.channels     != h.active_ant_chs){ discarded++; continue; }
+                        if(hf.overdrive){ discarded++; od_mask |= hf.overdrive; continue; }
+                        if(xspec.add_frame(hf.iq.data(), hf.samples_per_ch)){
+                            got++;
+                            frames_done.store(got);
+                        }
+                    }
+                }
+            }
         }
 
         // ── 측정 진행 ────────────────────────────────────────────────────
@@ -301,32 +377,38 @@ void Engine::Impl::loop(){
                 measuring = false;
                 continue;
             }
-            budget--;
-            if(!usable_for_df(h) || f.stale || !f.iq){
-                // CAL 버스트·DUMMY·미캘리브레이션 프레임은 버리고 예산만 쓴다.
-                discarded++;
-                if(budget <= 0){
-                    Status s = (h.delay_sync_flag && h.iq_sync_flag) ? Status::Timeout
-                                                                     : Status::NotCalibrated;
-                    fail(cur, s);
-                    measuring = false;
+            // 소급(use_backlog)으로 이미 목표 프레임을 채웠으면 지금 프레임은
+            // 더하지 않고 바로 푼다. 그러지 않으면 버스트가 끝난 뒤의 잡음
+            // 프레임이 섞여 애써 모은 버스트 구간을 희석한다.
+            const bool backlog_filled = (got >= cur.frames);
+            if(!backlog_filled){
+                budget--;
+                if(!usable_for_df(h) || f.stale || !f.iq){
+                    // CAL 버스트·DUMMY·미캘리브레이션 프레임은 버리고 예산만 쓴다.
+                    discarded++;
+                    if(budget <= 0){
+                        Status s = (h.delay_sync_flag && h.iq_sync_flag) ? Status::Timeout
+                                                                         : Status::NotCalibrated;
+                        fail(cur, s);
+                        measuring = false;
+                    }
+                    continue;
                 }
-                continue;
+                // ── 과입력 프레임은 누적하지 않고 버린다 ──────────────────
+                // ADC 클리핑은 측정 대상 그 자체인 채널간 위상을 파괴하는 경성
+                // 비선형이다. 그런데 클리핑된 프레임도 강한 지배 고유값과 높은
+                // PAPR 을 만들어 수락 규칙을 그대로 통과한다 — 즉 결과가 "자신만만
+                // 하게 틀린 방위"가 되고 출력만 봐서는 구분할 방법이 없다.
+                // 예전엔 전량 누적하고 플래그만 od_mask 에 OR 해 표시용으로 썼다.
+                if(h.adc_overdrive_flags){
+                    discarded++;
+                    od_mask |= h.adc_overdrive_flags;
+                } else if(xspec.add_frame(f.iq, f.samples_per_ch)){
+                    got++;
+                    frames_done.store(got);
+                }
+                if(got < cur.frames && budget > 0) continue;
             }
-            // ── 과입력 프레임은 누적하지 않고 버린다 ──────────────────────
-            // ADC 클리핑은 측정 대상 그 자체인 채널간 위상을 파괴하는 경성
-            // 비선형이다. 그런데 클리핑된 프레임도 강한 지배 고유값과 높은
-            // PAPR 을 만들어 수락 규칙을 그대로 통과한다 — 즉 결과가 "자신만만
-            // 하게 틀린 방위"가 되고 출력만 봐서는 구분할 방법이 없다.
-            // 예전엔 전량 누적하고 플래그만 od_mask 에 OR 해 표시용으로 썼다.
-            if(h.adc_overdrive_flags){
-                discarded++;
-                od_mask |= h.adc_overdrive_flags;
-            } else if(xspec.add_frame(f.iq, f.samples_per_ch)){
-                got++;
-                frames_done.store(got);
-            }
-            if(got < cur.frames && budget > 0) continue;
             if(got == 0){
                 // 쓸 만한 프레임이 하나도 없었다. 원인이 과입력이면 그렇게
                 // 말해준다 — enable_control 이 켜져 있으면 운용자가 DAQ gain 을

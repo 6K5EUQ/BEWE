@@ -29,7 +29,7 @@ bool FFTViewer::df_engine_ready() const { return false; }
 bool FFTViewer::df_measuring()    const { return false; }
 void FFTViewer::df_stop_engine()        {}
 
-bool FFTViewer::df_submit(double, double, int, int){ return false; }
+bool FFTViewer::df_submit(double, double, int, int, bool){ return false; }
 
 // HOST 가 방송한 DF_RESULT 를 소비한다. 세대 카운터를 보고 변화가 있을 때만
 // 옮기므로 패널이 닫혀 있어도 쌓이지 않는다 (한 칸 슬롯 = 항상 최신).

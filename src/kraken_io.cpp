@@ -445,7 +445,8 @@ int FFTViewer::df_link_state() const {
     }
 }
 
-bool FFTViewer::df_submit(double center_hz, double bw_hz, int arr_idx, int dnum){
+bool FFTViewer::df_submit(double center_hz, double bw_hz, int arr_idx, int dnum,
+                          bool use_backlog){
     auto& K = kst();
     if(!K.engine || !K.engine->running()) return false;
     df::Config c = K.engine->config();
@@ -458,6 +459,7 @@ bool FFTViewer::df_submit(double center_hz, double bw_hz, int arr_idx, int dnum)
     q.ui_tag       = arr_idx;
     q.ui_dnum      = dnum;
     q.seq          = ++df_seq;
+    q.use_backlog  = use_backlog;
     return K.engine->submit(q);
 }
 
@@ -584,7 +586,9 @@ bool FFTViewer::df_request_by_display_num(int dnum, bool from_auto){
         df_post_refusal(dnum, msg); return false;
     }
 
-    if(!df_submit(cf_mhz * 1e6, bw_hz, arr, dnum)){
+    // AUTO 요청은 스컬치가 막 열린 것을 보고 나온다. 버스트 신호라면 그 사이
+    // 송신이 끝났을 수 있으므로 엔진이 들고 있는 직전 프레임부터 적분하게 한다.
+    if(!df_submit(cf_mhz * 1e6, bw_hz, arr, dnum, /*use_backlog=*/from_auto)){
         df_post_refusal(dnum, "busy"); return false;
     }
     return true;
