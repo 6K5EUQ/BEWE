@@ -456,7 +456,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     // 누른 그 프레임에 setup_open 을 바로 읽으면 지도 폭은 옛 값(패널 없음)인데
     // 패널만 그려져 지도 위에 겹친다. 토글은 다음 프레임부터 반영한다.
     const bool  setup_shown = setup_open;
-    constexpr float kSetupW = 340.f;      // 설정 패널 폭 (오버레이 버튼 기준에도 쓰임)
+    constexpr float kSetupW = 340.f;      // 설정 패널 폭
     const float setup_w = setup_shown ? kSetupW : 0.f;
     float tw, mapw;
     if(mv.big){ tw = 0.f; mapw = W - setup_w - (setup_w > 0 ? 4.f : 0.f); }
@@ -667,46 +667,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     (void)modview_map::draw_map("##df_map", mv, pts, ImVec2(mapw, body_h),
                               just_opened, &stns, nullptr);
 
-    // ── 지도 우상단 조작 오버레이 (헤더바 대체) ──────────────────────────
-    // draw_map **뒤에** 등록한다: 나중에 그려야 지도 위에 보이고, 지도 캔버스
-    // 버튼이 SetNextItemAllowOverlap 을 걸어 두어 클릭도 이쪽이 가져간다.
-    // 예전 헤더 스트립을 없애면서 남은 조작만 지도 위로 옮겼다. 지도를 가리지
-    // 않게 우상단 모서리에 붙이고, 필요한 것만 둔다.
-    {
-        const float BW = 62.f, BH = 22.f, PAD = 8.f, GAPB = 4.f;
-        // 오른쪽에서 왼쪽으로: SETUP, CLEAR, (잠금 중이면) 주파수 해제 버튼.
-        //
-        // 기준을 지도 우상단으로 잡으면 SETUP 을 여는 순간 지도가 패널 폭만큼
-        // 좁아지며 버튼이 같이 왼쪽으로 끌려간다 (누른 버튼이 손 밑에서 도망간다).
-        // 그렇다고 창 오른쪽 끝에 붙이면 열린 패널 위를 덮는다. 그래서 **패널이
-        // 열렸을 때의 지도 폭**을 기준으로 고정한다 — 열고 닫아도 자리가 같고,
-        // 패널과도 겹치지 않는다.
-        const float anchor_w = mapw - (setup_w > 0 ? 0.f : (kSetupW + 4.f));
-        float bx = map_p0.x + std::max(anchor_w, 80.f) - PAD - BW;
-        const float by = map_p0.y + PAD;
-
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.f);
-        ImGui::SetCursorScreenPos(ImVec2(bx, by));
-        const bool setup_hi = setup_open;
-        if(setup_hi) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f,0.45f,0.6f,1.f));
-        if(ImGui::Button("SETUP", ImVec2(BW, BH))) setup_open = !setup_open;
-        if(setup_hi) ImGui::PopStyleColor();
-
-
-        // 주파수 잠금 중이면 무엇만 보이는지 알리고, 누르면 푼다.
-        if(freq_lock){
-            const float LW = 108.f;
-            bx -= LW + GAPB;
-            ImGui::SetCursorScreenPos(ImVec2(bx, by));
-            const float lock_mhz = (float)freq_lock / 1000.0f;
-            char lb[48]; snprintf(lb, sizeof lb, "%.4f  X", lock_mhz);
-            ImGui::PushStyleColor(ImGuiCol_Text,
-                ImGui::ColorConvertU32ToFloat4(lob_color_for_freq(lock_mhz).glow));
-            if(ImGui::Button(lb, ImVec2(LW, BH))) freq_lock = 0;
-            ImGui::PopStyleColor();
-        }
-        ImGui::PopStyleVar();
-    }
 
 
 
@@ -998,6 +958,43 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 hold_until = now + 1.0;
             }
         }
+    }
+
+    // ── 우상단 조작 오버레이 (헤더바 대체) ────────────────────────────────
+    // 지도와 설정 패널을 **모두 그린 뒤** 마지막에 등록한다. 그래야 둘 중 무엇
+    // 위에든 얹히고, 지도 캔버스가 SetNextItemAllowOverlap 을 걸어 두어 클릭도
+    // 이쪽이 가져간다.
+    //
+    // 기준은 창 오른쪽 끝이다 — 운용자에게 SETUP 은 언제나 화면 우상단 같은
+    // 자리에 있어야 하고, 패널을 열었다고 버튼이 옮겨 다니면 안 된다.
+    {
+        const float BW = 62.f, BH = 22.f, PAD = 8.f, GAPB = 4.f;
+        // 오른쪽에서 왼쪽으로: SETUP, (잠금 중이면) 주파수 해제 버튼
+        const float right_edge = map_p0.x + mapw + (setup_w > 0 ? setup_w + 4.f : 0.f);
+        float bx = right_edge - PAD - BW;
+        const float by = map_p0.y + PAD;
+
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.f);
+        ImGui::SetCursorScreenPos(ImVec2(bx, by));
+        const bool setup_hi = setup_open;
+        if(setup_hi) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f,0.45f,0.6f,1.f));
+        if(ImGui::Button("SETUP", ImVec2(BW, BH))) setup_open = !setup_open;
+        if(setup_hi) ImGui::PopStyleColor();
+
+
+        // 주파수 잠금 중이면 무엇만 보이는지 알리고, 누르면 푼다.
+        if(freq_lock){
+            const float LW = 108.f;
+            bx -= LW + GAPB;
+            ImGui::SetCursorScreenPos(ImVec2(bx, by));
+            const float lock_mhz = (float)freq_lock / 1000.0f;
+            char lb[48]; snprintf(lb, sizeof lb, "%.4f  X", lock_mhz);
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                ImGui::ColorConvertU32ToFloat4(lob_color_for_freq(lock_mhz).glow));
+            if(ImGui::Button(lb, ImVec2(LW, BH))) freq_lock = 0;
+            ImGui::PopStyleColor();
+        }
+        ImGui::PopStyleVar();
     }
 
     // Del: 선택한 LOB 을 이력에서 지운다. 선택 규약은 표와 같다 —
