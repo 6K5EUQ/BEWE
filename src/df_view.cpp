@@ -692,13 +692,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         if(ImGui::Button("SETUP", ImVec2(BW, BH))) setup_open = !setup_open;
         if(setup_hi) ImGui::PopStyleColor();
 
-        bx -= BW + GAPB;
-        ImGui::SetCursorScreenPos(ImVec2(bx, by));
-        if(ImGui::Button("CLEAR", ImVec2(BW, BH))){
-            v.df_hist_n = 0; v.df_hist_head = 0; sel.clear();
-            v.df_last_valid = false; freq_lock = 0;
-            last_seq = v.df_hist_seq; last_vis_n = 0;
-        }
 
         // 주파수 잠금 중이면 무엇만 보이는지 알리고, 누르면 푼다.
         if(freq_lock){
@@ -1004,6 +997,33 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 v.df_set_cfg(ui);
                 hold_until = now + 1.0;
             }
+        }
+    }
+
+    // Del: 선택한 LOB 을 이력에서 지운다. 선택 규약은 표와 같다 —
+    // 클릭=단일, Ctrl+클릭=토글, Shift+클릭=범위. 주파수 잠금 중이면 그 주파수
+    // 전체가 대상이다 (지도에 보이는 것과 지워지는 것이 일치해야 한다).
+    if(win_focus && !typing && !sel.keys.empty() &&
+       ImGui::IsKeyPressed(ImGuiKey_Delete, false)){
+        std::set<uint32_t> kill;
+        for(const std::string& k : sel.keys) kill.insert((uint32_t)strtoul(k.c_str(), nullptr, 10));
+        const int removed = v.df_hist_erase(kill);
+        if(removed > 0){
+            sel.clear();
+            v.df_last_valid = false;   // 지운 것이 마지막 결과였을 수 있다
+            last_vis_n = 0;
+        }
+    }
+    // 주파수 잠금 상태에서의 Del — 표 선택이 비어 있어도 잠근 주파수를 통째로 지운다.
+    if(win_focus && !typing && sel.keys.empty() && freq_lock &&
+       ImGui::IsKeyPressed(ImGuiKey_Delete, false)){
+        std::set<uint32_t> kill;
+        for(int i = 0; i < v.df_hist_n; i++){
+            const FFTViewer::DFFix& f = v.df_hist_at(i);
+            if((uint32_t)(f.cf_mhz * 1000.0f + 0.5f) == freq_lock) kill.insert(f.seq);
+        }
+        if(v.df_hist_erase(kill) > 0){
+            freq_lock = 0; v.df_last_valid = false; last_vis_n = 0;
         }
     }
 

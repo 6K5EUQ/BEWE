@@ -40,6 +40,7 @@
 #include <atomic>
 #include <chrono>
 #include <algorithm>
+#include <set>
 #include <deque>
 #include <condition_variable>
 #include <memory>
@@ -1115,6 +1116,11 @@ public:
     // 두 곳에서 각자 필드를 옮기면 반드시 갈라진다.
     void df_apply_result(const PktDfResult& r, const uint8_t* spec_q);
     void df_push_fix(const DFFix& f);
+    // seq 집합에 든 항목을 이력에서 지운다 (반환 = 지운 개수).
+    // 링 중간을 비우면 df_hist_at 의 순서 계산이 깨지므로, 남은 것을 앞으로
+    // 모아 head/n 을 다시 잡는다. 링 인덱스가 아니라 seq 로 받는 이유는 UI 의
+    // 선택이 seq 문자열 키라서다 (인덱스는 새 결과가 들어오면 밀린다).
+    int  df_hist_erase(const std::set<uint32_t>& seqs);
 
     // 설정 패널이 그리는 "마지막 결과". UI 스레드만 읽고 쓴다.
     bool  df_last_valid = false;

@@ -327,6 +327,25 @@ void FFTViewer::df_push_fix(const DFFix& f){
     if(df_hist_n < DF_HIST_MAX) df_hist_n++;
 }
 
+// 선택한 항목을 이력에서 지운다. 링이라 중간을 비울 수 없으므로, 남길 것만
+// 시간순으로 읽어 앞에서부터 다시 채우고 head/n 을 재설정한다 (seq 는 보존 —
+// UI 선택 키가 그 값이고, 새 push 는 df_hist_seq 에서 이어 붙는다).
+int FFTViewer::df_hist_erase(const std::set<uint32_t>& seqs){
+    if(seqs.empty() || df_hist_n <= 0) return 0;
+    DFFix keep[DF_HIST_MAX];
+    int k = 0;
+    for(int i = 0; i < df_hist_n; i++){
+        const DFFix& f = df_hist_at(i);
+        if(seqs.count(f.seq)) continue;
+        keep[k++] = f;
+    }
+    const int removed = df_hist_n - k;
+    for(int i = 0; i < k; i++) df_hist[i] = keep[i];
+    df_hist_n    = k;
+    df_hist_head = (k == DF_HIST_MAX) ? 0 : k;
+    return removed;
+}
+
 void FFTViewer::df_apply_result(const PktDfResult& r, const uint8_t* spec_q){
     // 거절(kind != 0)은 이력에 남기지 않는다. AUTO DF 가 열린 채널을 주기적으로
     // 재면서 "no signal" 만 초당 몇 줄씩 쌓여, 정작 봐야 할 측정값을 표 밖으로
