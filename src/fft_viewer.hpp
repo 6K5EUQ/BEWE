@@ -1091,7 +1091,11 @@ public:
         char    note[64] = {};
         uint8_t spec_q[360] = {};
     };
-    static constexpr int DF_HIST_MAX = 64;
+    // 이력 링. 64 는 AUTO DF 가 5초 주기로 도는 지금 너무 짧다 — 채널 둘만
+    // 켜도 3분이면 한 바퀴가 돌아 앞의 측정이 사라진다 (운용자 눈에는 "LOB 이
+    // 저절로 지워지는" 현상으로 보인다). DFFix 가 512 B 라 512 칸이 262 KB 고,
+    // FFTViewer 는 3.25 MB 짜리 스택 객체이며 스택 상한이 8 MB 라 여유가 있다.
+    static constexpr int DF_HIST_MAX = 512;
     DFFix df_hist[DF_HIST_MAX];
     int   df_hist_n = 0;          // 채워진 개수 (<= DF_HIST_MAX)
     int   df_hist_head = 0;       // 다음에 쓸 위치
