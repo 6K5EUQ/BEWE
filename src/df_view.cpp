@@ -816,8 +816,21 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             const bool dragged = (dg.x*dg.x + dg.y*dg.y) > 16.f;
             if(inside) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             if(inside && !dragged && ImGui::IsMouseReleased(ImGuiMouseButton_Left)){
-                sel.click(key_of(vis[lob_hit_p]), lob_hit_p, key_at_vis,
-                          (int)vis.size(), io.KeyCtrl, io.KeyShift);
+                // 선 하나를 집으면 **그 주파수 전부**를 고른다 (표의 주파수 셀과
+                // 같은 동작). 한 선만 골라 봐야 방위선 하나로는 교차가 없어
+                // 표적 위치가 안 나온다 — 운용자가 선을 짚는 뜻은 "이 표적을
+                // 보겠다" 이지 "이 한 번의 측정만 보겠다" 가 아니다.
+                // Ctrl/Shift 는 종전대로 행 단위 선택으로 남긴다.
+                if(io.KeyCtrl || io.KeyShift){
+                    freq_lock = 0;
+                    sel.click(key_of(vis[lob_hit_p]), lob_hit_p, key_at_vis,
+                              (int)vis.size(), io.KeyCtrl, io.KeyShift);
+                } else {
+                    const FFTViewer::DFFix& hf = v.df_hist_at(vis[lob_hit_p]);
+                    const uint32_t want = (uint32_t)(hf.cf_mhz * 1000.0f + 0.5f);
+                    sel.clear();     // 행 선택과 섞이면 무엇이 그려지는지 모호해진다
+                    freq_lock = (freq_lock == want) ? 0 : want;
+                }
             }
         }
     }
