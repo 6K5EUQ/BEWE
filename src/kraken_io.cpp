@@ -69,10 +69,7 @@ KrakenState& kst(){ static KrakenState s; return s; }
 // 전부 int16 interleaved 를 전제하므로 변환이 필요하다. BladeRF/Pluto 와 같은
 // SC16_Q11 스케일(2048)로 맞춰야 dB 눈금 / 스퀠치 임계 / 녹음 파일이 백엔드마다
 // 달라지지 않는다. +-1.0 -> +-2048 은 int16 포화까지 24 dB 여유.
-inline int16_t kr_f2i(float f){
-    const float s = f * 2048.0f;
-    return (int16_t)(s > 32767.f ? 32767 : (s < -32768.f ? -32768 : (int)lrintf(s)));
-}
+// (변환 자체는 ch0 sink 의 volk_32f_s32f_convert_16i — 동일 스케일/포화/라운딩.)
 
 constexpr int64_t kKrakenRecalGraceMs = 8000;   // FREQ 후 DF 를 못 믿는 구간
 constexpr int64_t kFreqCoalesceMs     = 1000;   // 주파수축 드래그 합치기
@@ -170,10 +167,11 @@ bool FFTViewer::initialize_kraken(float cf_mhz){
         if(!lk.owns_lock()){ S.dropped++; return; }   // 캡처가 붙잡고 있으면 이번 프레임은 버린다
         if(S.ready){ S.dropped++; }                   // 아직 안 가져갔으면 최신 것으로 덮는다
         if(S.stage.size() < n*2) S.stage.resize(n*2);
-        for(size_t i = 0; i < n; i++){
-            S.stage[i*2+0] = kr_f2i(ch0[i].real());
-            S.stage[i*2+1] = kr_f2i(ch0[i].imag());
-        }
+        // std::complex<float> 는 interleaved float 연속 배열 — VOLK 커널이 kr_f2i 와
+        // 동일한 스케일·포화·nearest-even 라운딩으로 한 번에 변환 (스칼라 루프 대체)
+        volk_32f_s32f_convert_16i(S.stage.data(),
+                                  reinterpret_cast<const float*>(ch0),
+                                  2048.0f, (unsigned)(n*2));
         S.stage_n = n; S.cf_hz = cf; S.fs_hz = fs; S.overdrive = od;
         S.ready = true;
         lk.unlock();
@@ -270,8 +268,10 @@ void FFTViewer::capture_and_process_kraken(){
                     continue;                      // 타임아웃 — 루프 조건 다시 검사
                 if(!K.ready) continue;
                 n = K.stage_n;
+                // 4MB memcpy 대신 버퍼 소유권 교환 — sink 쪽은 resize-on-demand 라
+                // 다음 프레임에서 필요 크기로 알아서 키운다.
+                iq16.swap(K.stage);
                 if(iq16.size() < n*2) iq16.resize(n*2);
-                memcpy(iq16.data(), K.stage.data(), n*2*sizeof(int16_t));
                 K.ready = false;
             }
             if(n == 0) continue;
@@ -338,72 +338,7 @@ void FFTViewer::capture_and_process_kraken(){
                     rx_pos+=fft_input_size; rx_avail-=fft_input_size;
                     continue;
                 }
-                int fi=total_ffts%FFT_HISTORY_ROWS;
-                float* rowp=fft_data.data()+fi*fft_size;
-                {std::lock_guard<std::mutex> lk(data_mtx);
-                 volk_32f_log2_32f(rowp, pacc.data(), (unsigned int)fft_size);
-                 volk_32f_s32f_multiply_32f(rowp, rowp, 3.01029996f, (unsigned int)fft_size);
-                 const float row_off = 10.0f*log10f((float)fcnt);
-                 for(int i=0;i<fft_size;i++) rowp[i] -= row_off;
-
-                 if(autoscale_req.exchange(false)){
-                     autoscale_accum.clear(); autoscale_init=false; autoscale_active=true;
-                     autoscale_wp=0; autoscale_buf_full=false;
-                     sq_recalib_req.store(true, std::memory_order_relaxed);
-                 }
-                 if(autoscale_active){
-                     auto now_as=std::chrono::steady_clock::now();
-                     if(autoscale_start==std::chrono::steady_clock::time_point{})
-                         autoscale_start=now_as;
-                     if(!autoscale_init){
-                         size_t cap=(size_t)fft_size*100;
-                         if(autoscale_accum.size()!=cap) autoscale_accum.assign(cap,0.0f);
-                         autoscale_wp=0; autoscale_buf_full=false;
-                         autoscale_last=now_as;
-                         autoscale_init=true;
-                     }
-                     size_t cap=autoscale_accum.size();
-                     for(int i=1;i<fft_size;i++){
-                         autoscale_accum[autoscale_wp]=rowp[i];
-                         if(++autoscale_wp>=cap){ autoscale_wp=0; autoscale_buf_full=true; }
-                     }
-                     float el=std::chrono::duration<float>(now_as-autoscale_last).count();
-                     float el_total=std::chrono::duration<float>(now_as-autoscale_start).count();
-                     bool  deadline=el_total>=AUTOSCALE_DEADLINE_S;
-                     if((el>=1.0f||deadline)&&(autoscale_buf_full||autoscale_wp>0)){
-                         size_t nn=autoscale_buf_full?cap:autoscale_wp;
-                         std::vector<float> tmp(autoscale_accum.begin(),
-                                                autoscale_accum.begin()+(ptrdiff_t)nn);
-                         size_t idx_lo=(size_t)(nn*0.15f);
-                         std::nth_element(tmp.begin(),tmp.begin()+(ptrdiff_t)idx_lo,tmp.end());
-                         float noise=tmp[idx_lo];
-                         float peak=*std::max_element(tmp.begin(),tmp.end());
-                         display_power_min=noise-5.0f;
-                         display_power_max=peak+20.0f;
-                         if(display_power_max-display_power_min<20.f)
-                             display_power_max=display_power_min+20.f;
-                         header.power_min=display_power_min;
-                         header.power_max=display_power_max;
-                         bewe_log_push(0,"[autoscale]%s noise=%.1f peak=%.1f > pmin=%.1f pmax=%.1f\n",
-                             deadline?" (deadline)":"", noise, peak, display_power_min, display_power_max);
-                         autoscale_active=false; autoscale_init=false;
-                         autoscale_wp=0; autoscale_buf_full=false;
-                         autoscale_start=std::chrono::steady_clock::time_point{};
-                         cached_sp_idx=-1;
-                     }
-                 }
-                 total_ffts++; current_fft_idx=total_ffts-1;
-                 header.num_ffts=std::min(total_ffts,FFT_HISTORY_ROWS);
-                 row_write_pos[current_fft_idx%MAX_FFTS_MEMORY]=tm_iq_write_sample;
-                 row_wall_ms[current_fft_idx%MAX_FFTS_MEMORY]=(int64_t)(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
-                 if(tm_iq_on.load(std::memory_order_relaxed))
-                     tm_mark_rows(current_fft_idx%MAX_FFTS_MEMORY);
-                 else
-                     iq_row_avail[current_fft_idx%MAX_FFTS_MEMORY]=false;
-                 tm_add_time_tag(current_fft_idx);
-                 net_bcast_seq.fetch_add(1, std::memory_order_release);
-                 net_bcast_cv.notify_one();
-                }
+                commit_fft_row(pacc, fcnt);   // 공용 커밋 (bladerf_io.cpp — 4백엔드 단일 정본)
                 std::fill(pacc.begin(),pacc.end(),0.0f); fcnt=0;
 
                 // 행 하나가 담는 실제 시간만큼 기다렸다 다음 행을 낸다.
@@ -442,17 +377,7 @@ bool FFTViewer::df_engine_ready() const {
 
 int FFTViewer::df_link_state() const {
     auto& K = kst();
-    // JOIN 은 HOST 의 DF 를 원격으로 쓴다. HOST 의 백엔드 종류(remote_hw==3)까지는
-    // STATUS 패킷으로 알 수 있지만 캘리브레이션 상태까지는 모른다 — 그래서 초록이
-    // 아니라 노랑으로 둔다. 거짓 초록보다 정직한 노랑이 낫다.
-    if(net_cli){
-        if(!net_cli->is_connected()) return 0;
-        // HOST 가 하트비트로 실제 가용도를 보내준다 (0=불가 1=가능 2=준비중).
-        // 여기 값 체계는 이 함수의 반환 규약(0=down 1=calibrating 2=streaming)과
-        // 다르므로 옮겨 담는다.
-        const uint8_t d = net_cli->remote_df_state.load();
-        return (d == 1) ? 2 : (d == 2 ? 1 : 0);
-    }
+    // (JOIN arm 제거 — 이 TU 는 CLI 전용이라 net_cli 는 항상 null. JOIN 쪽 정본은 df_join.cpp)
     if(!K.engine || !K.engine->running()) return 0;
     switch(K.engine->status().link){
         case df::LinkState::Streaming:   return 2;
@@ -495,7 +420,7 @@ const char* FFTViewer::df_short_reason(const char* detail){
 void FFTViewer::df_format_line(char* out, size_t n, bool detailed) const {
     const auto& r = pending_df_result;
     if(r.ok){
-        snprintf(out, n, "CH%d: %.1f\u00B0 (SNR : %.1fdB)%s",
+        snprintf(out, n, "CH%d: %.1f deg (SNR : %.1f dB)%s",
                  r.dnum, r.bearing, r.snr,
                  r.overdrive ? " [OVERDRIVE]" : "");
         return;
@@ -532,32 +457,6 @@ void FFTViewer::df_post_refusal(int dnum, const char* msg){
 bool FFTViewer::df_request_by_display_num(int dnum){
     auto& K = kst();
     char msg[160];
-
-    // ── JOIN: 로컬에 SDR 이 없으니 HOST 에 대신 시킨다 ──────────────────
-    // 채널 배열은 CHANNEL_SYNC 로 동기화되어 표시번호가 HOST 와 같으므로,
-    // 번호를 그대로 넘기면 된다. 결과는 HOST 가 broadcast_chat("DF", ...) 로
-    // 모두에게 돌려주므로 여기서 따로 받을 게 없다.
-    if(net_cli){
-        if(!net_cli->is_connected()){
-            df_post_refusal(dnum, "no link"); return false;
-        }
-        if(net_cli->remote_hw.load() != 3){
-            df_post_refusal(dnum, "Not Available");
-            return false;
-        }
-        int found = -1;
-        for(int i = 0; i < MAX_CHANNELS; i++){
-            if(!channels[i].filter_active) continue;
-            if(freq_sorted_display_num(i) == dnum){ found = i; break; }
-        }
-        if(found < 0){
-            df_post_refusal(dnum, "no such filter"); return false;
-        }
-        // 채팅이 아니라 전용 커맨드로 보낸다. 채팅으로 보내면 "DGS-x: /df 1" 이
-        // 대화 로그에 남아 시끄럽고, 명령이 사람 입력인 척 섞인다.
-        net_cli->cmd_df_measure(dnum);
-        return true;
-    }
 
     if(hw.type != HWType::KRAKEN){
         snprintf(msg, sizeof msg, "Not Available");
@@ -646,14 +545,6 @@ void FFTViewer::df_pump(){
     snprintf(p.err, sizeof p.err, "%s",
              r.note[0] ? r.note : df::status_text(r.status));
 
-    if(p.ok){
-        df_last_valid = true;
-        df_last_dnum = r.ui_dnum;
-        df_last_cf_mhz = p.cf_mhz; df_last_bw_khz = p.bw_khz;
-        df_last_bearing = p.bearing; df_last_bearing_rel = p.bearing_rel;
-        df_last_conf = p.conf; df_last_snr = p.snr; df_last_pwr = p.pwr;
-        memcpy(df_last_spectrum, r.spectrum_db, sizeof df_last_spectrum);
-    }
     p.pending.store(true, std::memory_order_release);
 }
 
@@ -707,25 +598,15 @@ static void pkt_to_cfg(const PktDfConfig& p, df::Config& c){
 }
 
 void FFTViewer::df_get_cfg(PktDfConfig& out) const {
-    if(net_cli){
-        if(net_cli->df_cfg_valid.load()){
-            std::lock_guard<std::mutex> lk(net_cli->df_cfg_mtx);
-            out = net_cli->df_cfg;
-            return;
-        }
-        // 아직 HOST 방송을 못 받았으면 기본값을 보여준다 (빈 화면보다 낫다).
-        cfg_to_pkt(df::Config{}, out);
-        return;
-    }
     auto& K = kst();
     std::lock_guard<std::mutex> lk(K.cfg_mtx);
     cfg_to_pkt(K.cfg, out);
 }
 
 void FFTViewer::df_set_cfg(const PktDfConfig& in){
-    if(net_cli){ net_cli->send_df_config(in); return; }   // 요청만. 정본은 HOST 가 돌려준다
     auto& K = kst();
     df::Config c;
+    bool need_echo = false;
     {
         std::lock_guard<std::mutex> lk(K.cfg_mtx);
         c = K.cfg;
@@ -733,10 +614,12 @@ void FFTViewer::df_set_cfg(const PktDfConfig& in){
         char err[128] = {};
         if(!c.validate(err, sizeof err)){
             bewe_log_push(2,"[DF] config rejected: %s\n", err);
-            return;
+            need_echo = true;   // 정본을 되쏴 요청자 위젯을 진실로 되돌린다
         }
-        K.cfg = c;
+        if(!need_echo) K.cfg = c;
     }
+    // 거절이면 K.cfg 는 그대로다 — 그 값을 다시 방송해 JOIN 이 유령값을 붙들지 않게 한다.
+    if(need_echo){ df_broadcast_cfg(); return; }
     if(K.engine) K.engine->apply_config(c);
     df_broadcast_cfg();
 }
@@ -753,45 +636,4 @@ double FFTViewer::df_snr_threshold() const {
     return p.snr_thr_db;
 }
 
-void FFTViewer::df_get_live(FFTViewer::DFLive& o) const {
-    auto& K = kst();
-    o = FFTViewer::DFLive{};
-    if(!K.engine || !K.engine->running()) return;
-    const df::DaqStatus s = K.engine->status();
-    switch(s.link){
-        case df::LinkState::Streaming:   o.link = 2; break;
-        case df::LinkState::Calibrating: o.link = 1; break;
-        default:                         o.link = 0; break;
-    }
-    o.usable      = s.usable;
-    o.sync_state  = s.sync_state;
-    o.delay_sync  = s.delay_sync_flag;
-    o.iq_sync     = s.iq_sync_flag;
-    o.noise_src   = s.noise_source_state;
-    o.channels    = s.active_ant_chs;
-    o.overdrive   = s.adc_overdrive_flags;
-    o.daq_cf_mhz  = s.rf_center_hz / 1e6;
-    o.daq_fs_msps = s.sampling_hz  / 1e6;
-    o.frame_rate_hz = s.frame_rate_hz;
-    o.recv_mbps   = s.recv_mbps;
-    o.frames_ok   = s.frames_ok;
-    o.frames_cal  = s.frames_cal;
-    o.frames_bad  = s.frames_bad;
-    o.gaps        = s.cpi_gaps;
-    o.reconnects  = s.reconnects;
-    for(int i=0;i<8;i++) o.gain_tenths[i] = s.if_gain_tenths[i];
-    snprintf(o.hw_id, sizeof o.hw_id, "%s", s.hardware_id);
-    snprintf(o.last_error, sizeof o.last_error, "%s", s.last_error);
-    o.measuring = K.engine->armed();
-    o.progress  = K.engine->progress();
-
-    // 격자엽 지표는 현재 DAQ 중심주파수 기준으로 보여준다 (측정은 채널 주파수를 쓴다).
-    df::Config c = K.engine->config();
-    if(s.rf_center_hz > 0){
-        df::Manifold mf;
-        mf.ensure((double)s.rf_center_hz, c.radius_m, c.elements, c.sense);
-        o.lambda_m  = mf.lambda_m();
-        o.ambiguity = mf.ambiguity_ratio();
-    }
-}
 

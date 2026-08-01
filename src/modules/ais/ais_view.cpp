@@ -672,8 +672,10 @@ void draw_content(FFTViewer& v, bool just_opened){
             std::lock_guard<std::mutex> lk(mtx);
             std::set<uint32_t> rxmmsi;   // 그 기지가 수신한 MMSI
             for(const AisRecord& m : log){
-                std::string st = (m.station[0] && strcmp(m.station,"LOCAL")) ? m.station : v.station_name;
-                if(st==sel_station) rxmmsi.insert(m.mmsi);
+                // 레코드당 std::string 힙할당 금지 — 포인터 비교로 동일 판정
+                const char* stp = (m.station[0] && strcmp(m.station,"LOCAL")) ? m.station
+                                                                              : v.station_name.c_str();
+                if(sel_station == stp) rxmmsi.insert(m.mmsi);
             }
             for(const auto& mp : pts)
                 if(rxmmsi.count((uint32_t)mp.id)){
@@ -960,11 +962,24 @@ void draw_content(FFTViewer& v, bool just_opened){
             if(x->a.sev!=y->a.sev) return x->a.sev>y->a.sev;
             return x->a.t_ms>y->a.t_ms; });
         // MMSI → 선명 조회 (AIS log; 없으면 빈문자). "MMSI (이름)" 라벨 생성.
+        // log_gen 세대 캐시 — 카드/툴팁 라벨마다 전체 로그 역스캔 방지.
+        // 전방 스캔 덮어쓰기 = 최신 비어있지 않은 이름 (역스캔 first-hit 과 동일 결과).
+        static std::map<uint32_t, std::array<char,24>> name_cache;
+        static uint64_t name_cache_gen=~0ull;
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            if(log_gen!=name_cache_gen){
+                name_cache_gen=log_gen;
+                name_cache.clear();
+                for(const AisRecord& m : log)
+                    if(m.name[0]){ auto& a=name_cache[m.mmsi];
+                        strncpy(a.data(), m.name, 23); a[23]=0; }
+            }
+        }
         auto name_of=[&](uint32_t mm, char* o, size_t cap){
             o[0]=0; if(!mm) return;
-            std::lock_guard<std::mutex> lk(mtx);
-            for(auto it=log.rbegin(); it!=log.rend(); ++it)
-                if(it->mmsi==mm && it->name[0]){ strncpy(o,it->name,cap-1); o[cap-1]=0; return; }
+            auto itn=name_cache.find(mm);
+            if(itn!=name_cache.end()){ strncpy(o,itn->second.data(),cap-1); o[cap-1]=0; }
         };
         auto label=[&](uint32_t mm, char* o, size_t cap){   // 이름 있으면 이름만, 없으면 MMSI
             char nm[24]; name_of(mm,nm,sizeof(nm));
@@ -1040,9 +1055,13 @@ void draw_content(FFTViewer& v, bool just_opened){
     }
 #endif
 
-    // 선택 배 focus 를 최신 수신 레코드로 매 프레임 갱신 (GPS 등 계속 업데이트)
+    // 선택 배 focus 를 최신 수신 레코드로 갱신 — log_gen 세대 게이트
+    // (log 가 안 바뀐 프레임엔 결과도 동일하므로 10만 레코드 역스캔 생략)
     if(has_focus && sel_mmsi){
         std::lock_guard<std::mutex> lk(mtx);
+        static uint64_t c_f_gen=~0ull; static uint32_t c_f_mmsi=0;
+        if(log_gen!=c_f_gen || sel_mmsi!=c_f_mmsi){
+        c_f_gen=log_gen; c_f_mmsi=sel_mmsi;
         AisRecord nm{}; bool got=false;
         // 최신 레코드 = 동적(위치/속도) 베이스. 정적(이름/호출/선종/IMO/목적지/ETA/흘수)은
         // 그 필드를 가진 가장 최근 레코드에서 채움 (정적은 Type5/19/24 에만 있어 위치msg엔 없음).
@@ -1061,6 +1080,7 @@ void draw_content(FFTViewer& v, bool just_opened){
             if(nm.name[0]&&nm.imo&&nm.dest[0]&&nm.draught>=0&&nm.eta_mon) break;   // 다 채우면 조기 종료
         }
         if(got) focus=nm;
+        }
     }
     // ── 선택 선박 정보: 일반 모드=하단 세부패널 / 전체화면=우상단 카드 (flightradar 스타일) ──
     auto draw_detail_body=[&](){

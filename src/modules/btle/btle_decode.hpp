@@ -44,6 +44,9 @@ public:
         adv_chan = adv_channel;
         buf.clear(); buf_amp.clear(); samp_base=0;
         build_ref();
+        // 비트 중심 오프셋 사전계산 — samp() 가 입력 샘플당 수십 회 불리므로
+        // llround((k+0.5)*spb) 를 매번 계산하지 않는다 (동일 정수).
+        for(int k=0;k<OFF_TAB_N;k++) off_tab_[k]=(int32_t)llround((k+0.5)*spb);
     }
 
     // 워커가 FM판별 샘플(d) + 동위치 순시전력(amp=oi²+oq²) 묶음을 투입. AA 동기 스캔 + 해독.
@@ -80,10 +83,13 @@ private:
     std::vector<float> buf;
     std::vector<float> buf_amp;   // buf 동위치 순시전력 (RSSI 산출용)
     uint8_t ref_[SYNC_BITS];   // 기대 동기 비트 (프리앰블+AA)
+    // k → 샘플 오프셋 사전계산 (reset 에서 채움). 최대 k = SYNC_BITS + 42B*8 - 1.
+    static constexpr int OFF_TAB_N = SYNC_BITS + 44*8;
+    int32_t off_tab_[OFF_TAB_N] = {};
 
     // ── 비트 k 중심의 FM판별 소프트값 (oversampled) ──
     inline float samp(size_t j, int k) const {
-        long idx = (long)j + (long)llround((k+0.5)*spb);
+        long idx = (long)j + off_tab_[k];
         if(idx<0 || idx>=(long)buf.size()) return 0.f;
         return buf[idx];
     }

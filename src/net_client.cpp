@@ -875,16 +875,6 @@ bool NetClient::cmd_set_ch_mode(int idx, int mode){
     c.set_ch_mode.idx=(uint8_t)idx; c.set_ch_mode.mode=(uint8_t)mode;
     return send_cmd(c);
 }
-bool NetClient::cmd_set_ch_audio(int idx, uint32_t mask){
-    PktCmd c{}; c.cmd=(uint8_t)CmdType::SET_CH_AUDIO;
-    c.set_ch_audio.idx=(uint8_t)idx; c.set_ch_audio.mask=mask;
-    return send_cmd(c);
-}
-bool NetClient::cmd_set_ch_pan(int idx, int pan){
-    PktCmd c{}; c.cmd=(uint8_t)CmdType::SET_CH_PAN;
-    c.set_ch_pan.idx=(uint8_t)idx; c.set_ch_pan.pan=(int8_t)pan;
-    return send_cmd(c);
-}
 bool NetClient::cmd_set_sq_thresh(int idx, float thr){
     PktCmd c{}; c.cmd=(uint8_t)CmdType::SET_SQ_THRESH;
     c.set_sq_thresh.idx=(uint8_t)idx; c.set_sq_thresh.thr=thr;
@@ -896,11 +886,6 @@ bool NetClient::cmd_set_autoscale(){
 }
 bool NetClient::send_df_config(const PktDfConfig& c){
     return raw_send(PacketType::DF_CONFIG, &c, sizeof(c));
-}
-bool NetClient::cmd_df_set_snr(int snr_db){
-    PktCmd c{}; c.cmd=(uint8_t)CmdType::DF_SET_SNR;
-    c.df_set_snr.snr_db=(int8_t)snr_db;
-    return send_cmd(c);
 }
 bool NetClient::cmd_df_measure(int dnum){
     PktCmd c{}; c.cmd=(uint8_t)CmdType::DF_MEASURE;
@@ -914,16 +899,6 @@ bool NetClient::cmd_set_ch_detect(int idx, bool on){
 }
 bool NetClient::cmd_toggle_tm_iq(){
     PktCmd c{}; c.cmd=(uint8_t)CmdType::TOGGLE_TM_IQ;
-    return send_cmd(c);
-}
-bool NetClient::cmd_set_capture_pause(bool pause){
-    PktCmd c{}; c.cmd=(uint8_t)CmdType::SET_CAPTURE_PAUSE;
-    c.set_capture_pause.pause=pause?1:0;
-    return send_cmd(c);
-}
-bool NetClient::cmd_set_spectrum_pause(bool pause){
-    PktCmd c{}; c.cmd=(uint8_t)CmdType::SET_SPECTRUM_PAUSE;
-    c.set_spectrum_pause.pause=pause?1:0;
     return send_cmd(c);
 }
 bool NetClient::cmd_chassis_reset(){
@@ -960,22 +935,6 @@ bool NetClient::cmd_set_antenna(const char* antenna){
 bool NetClient::cmd_set_hw(const char* sdr_name){
     PktCmd c{}; c.cmd=(uint8_t)CmdType::SET_HW;
     strncpy(c.set_hw.name, sdr_name ? sdr_name : "", sizeof(c.set_hw.name)-1);
-    return send_cmd(c);
-}
-bool NetClient::cmd_add_sched(int64_t start_time, float duration_sec, float freq_mhz, float bw_khz,
-                              const char* target){
-    PktCmd c{}; c.cmd=(uint8_t)CmdType::ADD_SCHED;
-    c.add_sched.start_time   = start_time;
-    c.add_sched.duration_sec = duration_sec;
-    c.add_sched.freq_mhz     = freq_mhz;
-    c.add_sched.bw_khz       = bw_khz;
-    strncpy(c.add_sched.target, target ? target : "", sizeof(c.add_sched.target)-1);
-    return send_cmd(c);
-}
-bool NetClient::cmd_remove_sched(int64_t start_time, float freq_mhz){
-    PktCmd c{}; c.cmd=(uint8_t)CmdType::REMOVE_SCHED;
-    c.remove_sched.start_time = start_time;
-    c.remove_sched.freq_mhz   = freq_mhz;
     return send_cmd(c);
 }
 void NetClient::flush_pending_band_plan(){
@@ -1027,19 +986,6 @@ bool NetClient::cmd_band_cat_delete(uint8_t id){
     PktBandCatDelete d{}; d.id = id;
     return raw_send(PacketType::BAND_CAT_DELETE, &d, sizeof(d));
 }
-bool NetClient::cmd_lwf_list_req(){
-    return raw_send(PacketType::LWF_LIST_REQ, nullptr, 0);
-}
-bool NetClient::cmd_lwf_dl_req(const char* filename){
-    PktLwfDlReq r{};
-    if(filename) strncpy(r.filename, filename, sizeof(r.filename)-1);
-    return raw_send(PacketType::LWF_DL_REQ, &r, sizeof(r));
-}
-bool NetClient::cmd_lwf_delete_req(const char* filename){
-    PktLwfDlReq r{};
-    if(filename) strncpy(r.filename, filename, sizeof(r.filename)-1);
-    return raw_send(PacketType::LWF_DELETE_REQ, &r, sizeof(r));
-}
 bool NetClient::cmd_request_region(int32_t fft_top, int32_t fft_bot,
                                     float freq_lo, float freq_hi,
                                     int64_t time_start_ms, int64_t time_end_ms,
@@ -1049,16 +995,6 @@ bool NetClient::cmd_request_region(int32_t fft_top, int32_t fft_bot,
     c.request_region.freq_lo=freq_lo; c.request_region.freq_hi=freq_hi;
     c.request_region.time_start_ms=time_start_ms; c.request_region.time_end_ms=time_end_ms;
     c.request_region.samp_start=samp_start; c.request_region.samp_end=samp_end;
-    return send_cmd(c);
-}
-bool NetClient::cmd_start_iq_rec(int ch_idx){
-    PktCmd c{}; c.cmd=(uint8_t)CmdType::START_IQ_REC;
-    c.start_iq_rec.idx=(uint8_t)ch_idx;
-    return send_cmd(c);
-}
-bool NetClient::cmd_stop_iq_rec(int ch_idx){
-    PktCmd c{}; c.cmd=(uint8_t)CmdType::STOP_IQ_REC;
-    c.stop_iq_rec.idx=(uint8_t)ch_idx;
     return send_cmd(c);
 }
 bool NetClient::cmd_db_delete(const char* filename, const char* operator_name){
@@ -1212,15 +1148,6 @@ bool NetClient::send_mission_file_delete(const MissionFileKey& key){
     return raw_send(PacketType::MISSION_FILE_DELETE, &r, sizeof(r));
 }
 
-bool NetClient::send_mission_file_rename(const MissionFileKey& key,
-                                         const char* new_filename){
-    PktMissionFileRename r{};
-    r.key = key;
-    if(new_filename){
-        strncpy(r.new_filename, new_filename, sizeof(r.new_filename) - 1);
-    }
-    return raw_send(PacketType::MISSION_FILE_RENAME, &r, sizeof(r));
-}
 bool NetClient::send_mission_file_set_note(const MissionFileKey& key, const char* note){
     PktMissionFileSetNote r{};
     r.key = key;
@@ -1265,7 +1192,9 @@ bool NetClient::cmd_db_save(const char* filepath, const char* operator_name){
         if(n == 0) break;
         auto* d = reinterpret_cast<PktDbSaveData*>(buf.data());
         d->transfer_id = 1;
-        d->is_last = (feof(fp) ? 1 : 0);
+        // 오프셋 산술 — feof 는 64KiB 배수 파일에서 마지막 정규 read 후에도 false 라
+        // is_last 가 영영 안 실리는 버그가 있었다 (net_server send_file_to 와 동일 수정)
+        d->is_last = (sent + n >= fsz) ? 1 : 0;
         d->chunk_bytes = (uint32_t)n;
         size_t pkt_total = sizeof(PktDbSaveData) + n;
         raw_send(PacketType::DB_SAVE_DATA, buf.data(), (uint32_t)pkt_total);

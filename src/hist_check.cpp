@@ -412,7 +412,6 @@ void stop(){
     if(g_thr.joinable()) g_thr.join();
 }
 
-bool is_active(){ return g_running.load(); }
 
 void on_hist_stat(const uint8_t* bewe_pkt, size_t len){
     if(len < 9 + sizeof(PktHistStat)) return;

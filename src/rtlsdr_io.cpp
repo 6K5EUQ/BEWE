@@ -333,15 +333,15 @@ void FFTViewer::capture_and_process_rtl(){
                 dev_rtl = nullptr;
                 break;
             }
-            // uint8 > int16 변환 (ring/TM IQ용)
-            for(int i=0; i<rx_chunk*2; i++){
-                iq16[i] = (int16_t)((int)raw[i] - 128) << 4;
-            }
             // IQ Ring write: 전체 청크
             bool need_ring = rec_on.load(std::memory_order_relaxed);
             if(!need_ring) for(int i=0;i<MAX_CHANNELS;i++) if(channels[i].dem_run.load()){need_ring=true;break;}
             bool need_tm = tm_iq_on.load(std::memory_order_relaxed) && (warmup_cnt>=WARMUP_FFTS);
             if(need_ring || need_tm){
+                // uint8 > int16 변환 (ring/TM IQ 소비자만 씀 — FFT 는 raw 직접 읽음)
+                for(int i=0; i<rx_chunk*2; i++){
+                    iq16[i] = (int16_t)((int)raw[i] - 128) << 4;
+                }
                 size_t wp=ring_wp.load(std::memory_order_relaxed);
                 size_t n=(size_t)rx_chunk, cap=IQ_RING_CAPACITY;
                 if(wp+n<=cap) memcpy(&ring[wp*2],iq16,n*2*sizeof(int16_t));
@@ -397,78 +397,7 @@ void FFTViewer::capture_and_process_rtl(){
                     rx_pos+=fft_input_size; rx_avail-=fft_input_size;
                     continue;
                 }
-                int fi=total_ffts%FFT_HISTORY_ROWS;
-                float* rowp=fft_data.data()+fi*fft_size;
-                {std::lock_guard<std::mutex> lk(data_mtx);
-                 // current_spectrum은 UI 스레드 전용 > 캡처 쓰기 금지 (race 유발)
-                 // dB 변환: 10*log10(pacc/fcnt) = 3.0103*log2(pacc) - 10*log10(fcnt).
-                 // 스칼라 log10f 루프(bin 당 1회) → VOLK SIMD log2 로 교체 (NEON/AVX).
-                 // pacc 는 항상 >=1e-10 (누적 시 +1e-10f) 이라 -inf 없음. 오차 <1e-3 dB.
-                 {
-                     volk_32f_log2_32f(rowp, pacc.data(), (unsigned int)fft_size);
-                     volk_32f_s32f_multiply_32f(rowp, rowp, 3.01029996f, (unsigned int)fft_size);
-                     const float row_off = 10.0f*log10f((float)fcnt);
-                     for(int i=0;i<fft_size;i++) rowp[i] -= row_off;
-                 }
-                 // 비-캡처 스레드 요청 처리 (set_frequency/init) — 여기서만 autoscale 상태 변경 (레이스 X)
-                 if(autoscale_req.exchange(false)){
-                     autoscale_accum.clear(); autoscale_init=false; autoscale_active=true;
-                     autoscale_wp=0; autoscale_buf_full=false;
-                     sq_recalib_req.store(true, std::memory_order_relaxed);  // 노이즈플로어 변동 → 자동 스컬치 재캘리브
-                 }
-                 if(autoscale_active){
-                     auto now_as=std::chrono::steady_clock::now();
-                     if(autoscale_start==std::chrono::steady_clock::time_point{})
-                         autoscale_start=now_as;   // 데드라인 기준 — 재트리거로 되감지 않는다
-                     if(!autoscale_init){
-                         size_t cap=(size_t)fft_size*100;
-                         if(autoscale_accum.size()!=cap) autoscale_accum.assign(cap,0.0f);
-                         autoscale_wp=0; autoscale_buf_full=false;
-                         autoscale_last=now_as;
-                         autoscale_init=true;
-                     }
-                     size_t cap=autoscale_accum.size();
-                     for(int i=1;i<fft_size;i++){
-                         autoscale_accum[autoscale_wp]=rowp[i];
-                         if(++autoscale_wp>=cap){ autoscale_wp=0; autoscale_buf_full=true; }
-                     }
-                     float el=std::chrono::duration<float>(now_as-autoscale_last).count();
-                     float el_total=std::chrono::duration<float>(now_as-autoscale_start).count();
-                     bool  deadline=el_total>=AUTOSCALE_DEADLINE_S;   // 재트리거 폭주 시 강제 확정
-                     if((el>=1.0f||deadline)&&(autoscale_buf_full||autoscale_wp>0)){
-                         size_t n=autoscale_buf_full?cap:autoscale_wp;
-                         std::vector<float> tmp(autoscale_accum.begin(),
-                                                autoscale_accum.begin()+(ptrdiff_t)n);
-                         size_t idx_lo=(size_t)(n*0.15f);
-                         std::nth_element(tmp.begin(),tmp.begin()+(ptrdiff_t)idx_lo,tmp.end());
-                         float noise=tmp[idx_lo];
-                         float peak=*std::max_element(tmp.begin(),tmp.end());
-                         display_power_min=noise-5.0f;
-                         display_power_max=peak+20.0f;
-                         if(display_power_max-display_power_min<20.f)
-                             display_power_max=display_power_min+20.f;
-                         header.power_min=display_power_min;
-                         header.power_max=display_power_max;
-                         bewe_log_push(0,"[autoscale]%s noise=%.1f peak=%.1f → pmin=%.1f pmax=%.1f\n",
-                             deadline?" (deadline)":"", noise, peak, display_power_min, display_power_max);
-                         autoscale_active=false; autoscale_init=false;
-                         autoscale_wp=0; autoscale_buf_full=false;
-                         autoscale_start=std::chrono::steady_clock::time_point{};
-                         cached_sp_idx=-1;
-                     }
-                 }
-                 total_ffts++; current_fft_idx=total_ffts-1;
-                 header.num_ffts=std::min(total_ffts,FFT_HISTORY_ROWS);
-                 row_write_pos[current_fft_idx%MAX_FFTS_MEMORY]=tm_iq_write_sample;
-                 row_wall_ms[current_fft_idx%MAX_FFTS_MEMORY]=(int64_t)(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
-                 if(tm_iq_on.load(std::memory_order_relaxed))
-                     tm_mark_rows(current_fft_idx%MAX_FFTS_MEMORY);
-                 else
-                     iq_row_avail[current_fft_idx%MAX_FFTS_MEMORY]=false;
-                 tm_add_time_tag(current_fft_idx);
-                 net_bcast_seq.fetch_add(1, std::memory_order_release);
-                 net_bcast_cv.notify_one();
-                }
+                commit_fft_row(pacc, fcnt);   // 공용 커밋 (bladerf_io.cpp — 4백엔드 단일 정본)
                 std::fill(pacc.begin(),pacc.end(),0.0f); fcnt=0;
             }
         } // end !spectrum_pause

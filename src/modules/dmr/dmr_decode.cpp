@@ -202,7 +202,7 @@ void worker(FFTViewer& v, int ch_idx){
             prev_i=oi; prev_q=oq;
             box_sum += dft - box[box_pos]; box[box_pos]=dft;
             if(++box_pos>=W) box_pos=0;
-            if(gate) dec.feed((float)(box_sum/W));   // 스컬치 열림 구간만 복조
+            dec.feed((float)(box_sum/W));   // 스컬치 열림 구간만 복조 (gate 닫힘은 위에서 continue)
         }
         my_rp.store((rp+avail)&IQ_RING_MASK,std::memory_order_release);
 

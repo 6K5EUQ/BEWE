@@ -67,7 +67,6 @@ void bewe_mod_route(FFTViewer& v, bool host_side, const uint8_t* payload, size_t
 void bewe_mod_host_announce(FFTViewer& v);                       // 전 모듈 STATE 브로드캐스트 (conn_open 등)
 void bewe_mod_host_mask_clear(FFTViewer& v, const char* id, int ch); // 워커 자연 종료 → mask 정리+브로드캐스트
 uint64_t bewe_mod_host_mask(const char* id);                     // HOST 자기 mask (ch 0~63)
-bool bewe_mod_ch_has_decoder(int ch);                            // 이 채널서 도는 디코더 1개+ 있으면 true
 bool bewe_mod_ch_decode_on(bool remote, int ch);                 // decode 활성 여부 (HOST=host_mask / JOIN=targets 미러)
 // 이 채널에 켜진 디코더들이 요구하는 대역폭 (Hz). 없거나 전부 미지정이면 0.
 // 여러 디코더가 동시에 켜져 있으면 가장 넓은 규격을 쓴다 (좁게 잡으면 신호가 잘린다).

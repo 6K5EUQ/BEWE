@@ -37,6 +37,9 @@ public:
         ch  = ch_idx;
         buf.clear(); samp_base=0; cpr.clear(); roster.clear();
         build_syndrome();
+        // 0.5µs 격자 오프셋 사전계산 — win() 이 샘플당 수십 회 불리므로 llround 를
+        // 매번 계산하지 않는다 (동일 정수). 인덱스 h = µs*2, 최대 120µs.
+        for(int h=0; h<OFF_HALF_N; h++) off_half_[h]=(int32_t)llround(h*0.5*spb);
     }
 
     // 워커가 magnitude 샘플 묶음을 투입. 내부에서 프리앰블 스캔 + 해독.
@@ -69,6 +72,9 @@ private:
     double sr=2400000.0, spb=2.4, samp_base=0;
     int    ch=0;
     std::vector<float> buf;
+    // 0.5µs 격자 → 샘플 오프셋 표 (reset 에서 채움). 최대 사용 = (8+111.5)+0.5 = 120µs.
+    static constexpr int OFF_HALF_N = 242;
+    int32_t off_half_[OFF_HALF_N] = {};
 
     // ── CPR(Compact Position Reporting) 짝(even/odd) 보관 + 마지막 위치 ──
     struct CprState {
@@ -83,9 +89,11 @@ private:
     std::unordered_map<uint32_t,int> synd112, synd56;
 
     // ── magnitude 윈도우 평균 (µs 오프셋 [u0, u0+0.5) ) ─────────────────────
+    // u0 는 항상 0.5µs 격자 — 사전계산 표에서 오프셋을 꺼낸다 (llround 와 동일 정수)
     inline float win(size_t j, double u0) const {
-        long a=(long)(j + (size_t)llround(u0*spb));
-        long b=(long)(j + (size_t)llround((u0+0.5)*spb));
+        int  h=(int)(u0*2.0 + 0.5);
+        long a=(long)j + off_half_[h];
+        long b=(long)j + off_half_[h+1];
         if(b<=a) b=a+1;
         float s=0; int c=0;
         long N=(long)buf.size();

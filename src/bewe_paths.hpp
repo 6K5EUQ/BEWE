@@ -61,11 +61,6 @@ static inline std::string record_dir()       { return recordings_dir()+"/record"
 static inline std::string record_iq_dir()    { return record_dir()+"/iq"; }
 static inline std::string record_audio_dir() { return record_dir()+"/audio"; }
 
-// ── 이전 세션 녹음 폴더 (프로그램 종료 시 record에서 이동) ──────────────
-static inline std::string private_dir()       { return recordings_dir()+"/private"; }
-static inline std::string private_iq_dir()    { return private_dir()+"/iq"; }
-static inline std::string private_audio_dir() { return private_dir()+"/audio"; }
-
 // ── Database (Central Server 로컬 저장) ──────────────────────────────────
 // Central server의 ./BEWE/DataBase/{operator}/ 에 저장
 // 클라이언트 측에서도 로컬 DB 캐시로 사용
@@ -155,15 +150,6 @@ static inline std::string mission_info_path(const std::string& station, int year
 static inline std::string missions_json_path(){
     return missions_root()+"/missions.json";
 }
-// 마이그레이션 전용: legacy 경로 (station 없음) — mission_migrate_old_layout 에서만 사용.
-static inline std::string legacy_missions_year_dir(int year){
-    char b[16]; snprintf(b, sizeof(b), "/%04d", year);
-    return missions_root()+b;
-}
-static inline std::string legacy_mission_dir(int year, const std::string& code){
-    return legacy_missions_year_dir(year)+"/"+code;
-}
-
 // 디렉터리 없으면 자동 생성 (실제 입출력이 일어나는 폴더만)
 static inline void ensure_dirs(){
     auto mk=[](const std::string& p){ mkdir(p.c_str(),0755); };

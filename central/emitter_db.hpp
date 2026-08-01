@@ -98,8 +98,6 @@ public:
                         uint16_t off, uint16_t lim,
                         std::vector<Sighting>& out, uint16_t& total);
 
-    bool find_emitter(const std::string& uid, Emitter& out) const;
-    bool find_sighting(const std::string& sid, Sighting& out) const;
 
     size_t emitter_count() const;
     size_t sighting_count() const;

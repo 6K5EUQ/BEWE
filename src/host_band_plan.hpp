@@ -36,8 +36,5 @@ void snapshot_pkt(PktBandPlan& out);
 // Applies, persists, rebuilds cache. Caller is responsible for broadcast
 // (since broadcast needs NetServer access, kept out of this module).
 // Returns true if state changed.
-bool host_local_add   (const PktBandEntry&  in);
-bool host_local_update(const PktBandEntry&  in);
-bool host_local_remove(const PktBandRemove& rm);
 
 } // namespace HostBandPlan

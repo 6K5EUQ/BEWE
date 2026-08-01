@@ -77,6 +77,10 @@ int                 g_last_total_ffts = 0;
 // 헤더가 5Hz 라고 거짓말하게 된다. 여기서 직접 재면 모든 모드에서 맞다.
 float               g_meas_row_rate = 0.f;
 
+// ingest_new_rows 가 data_mtx 안에서 떠 두는 양자화 범위 스냅샷 (워커 스레드 전용).
+// quant-rotate 검사가 이 값을 읽어 별도 data_mtx 획득을 없앤다.
+float               g_seen_pmin = 0.f, g_seen_pmax = 0.f;
+
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 void close_file_locked(){
@@ -329,6 +333,10 @@ bool ingest_new_rows(FFTViewer* v){
     const float inv = 255.f / range;
 
     std::lock_guard<std::mutex> lk(v->data_mtx);
+    // 같은 락 획득에 편승해 양자화 범위 스냅샷 갱신 — 워커 루프의 quant-rotate
+    // 검사가 별도 data_mtx 획득 없이 이 값을 읽는다 (감지 지연 동일).
+    g_seen_pmin = v->header.power_min;
+    g_seen_pmax = v->header.power_max;
     int now = v->total_ffts;
     if(now <= g_last_total_ffts){ return false; }
 
@@ -424,17 +432,20 @@ void worker_loop(){
             continue;
         }
         // 캡처 행레이트 실측 (1초 창). 파일이 열려 있든 아니든 계속 잰다.
+        // total_ffts 는 1초 경계에서만 필요 — 캡처 스레드 data_mtx 를 50Hz 로 두드리지 않는다.
         {
             static clk::time_point rr_last = clk::now();
             static int             rr_base = -1;
-            int cur_total;
-            { std::lock_guard<std::mutex> lk(g_v->data_mtx); cur_total = g_v->total_ffts; }
-            if(rr_base < 0) rr_base = cur_total;
             double el = std::chrono::duration<double>(clk::now() - rr_last).count();
-            if(el >= 1.0){
-                int d = cur_total - rr_base;
-                if(d > 0) g_meas_row_rate = (float)(d / el);
-                rr_last = clk::now(); rr_base = cur_total;
+            if(rr_base < 0 || el >= 1.0){
+                int cur_total;
+                { std::lock_guard<std::mutex> lk(g_v->data_mtx); cur_total = g_v->total_ffts; }
+                if(rr_base < 0) rr_base = cur_total;
+                if(el >= 1.0){
+                    int d = cur_total - rr_base;
+                    if(d > 0) g_meas_row_rate = (float)(d / el);
+                    rr_last = clk::now(); rr_base = cur_total;
+                }
             }
         }
 
@@ -509,9 +520,8 @@ void worker_loop(){
         // 한 파일에 두 기준의 행이 섞이면 어느 쪽으로 역산해도 절반이 틀린다 —
         // Central 이 같은 이유로 스트림을 rotate 한다(central_mission_archive.cpp).
         if(g_fp){
-            float pmin, pmax;
-            { std::lock_guard<std::mutex> lk(g_v->data_mtx);
-              pmin = g_v->header.power_min; pmax = g_v->header.power_max; }
+            // ingest_new_rows 가 방금 같은 락 안에서 떠 둔 스냅샷 사용 (추가 락 없음)
+            float pmin = g_seen_pmin, pmax = g_seen_pmax;
             if(pmax > pmin &&
                (fabsf(pmin - g_hdr_cur.db_min) > 0.01f ||
                 fabsf(pmax - g_hdr_cur.db_max) > 0.01f)){

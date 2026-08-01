@@ -61,7 +61,7 @@ void FFTViewer::tm_iq_open(){
     tm_iq_write_sample=0; tm_iq_flushed_sample=0;
     tm_iq_chunk_write=0; tm_iq_chunk_sample_start=0;
     memset(tm_iq_chunk_time,0,sizeof(tm_iq_chunk_time));
-    { std::lock_guard<std::mutex> lk(tm_iq_q_mtx); tm_iq_q.clear(); tm_iq_q_bytes=0; }
+    { std::lock_guard<std::mutex> lk(tm_iq_q_mtx); tm_iq_q.clear(); tm_iq_q_bytes=0; tm_iq_free.clear(); }
     tm_iq_dropped_bytes.store(0);
     tm_iq_write_failed.store(false);
     tm_iq_wr_run.store(true);
@@ -95,6 +95,7 @@ void FFTViewer::tm_iq_close_locked(){
         bewe_log_push(0,"TM IQ rolling: closed  %.2f sec\n",(double)actual/header.sample_rate);
     }
     tm_iq_file_ready=false; tm_iq_write_sample=0; tm_iq_flushed_sample=0;
+    { std::lock_guard<std::mutex> lk(tm_iq_q_mtx); tm_iq_free.clear(); }
     memset(tm_iq_chunk_time,0,sizeof(tm_iq_chunk_time));
     LongWaterfall::request_rotate();   // close current long-waterfall file
 }
@@ -103,6 +104,10 @@ void FFTViewer::tm_iq_close_locked(){
 // tm_iq_wr_run=false 후에도 큐 잔여분을 모두 쓰고 종료.
 void FFTViewer::tm_iq_writer_loop(){
     bool write_failed=false;
+    auto recycle=[&](std::vector<int16_t>&& v){
+        std::lock_guard<std::mutex> lk(tm_iq_q_mtx);
+        if(tm_iq_free.size()<TM_IQ_FREE_MAX) tm_iq_free.push_back(std::move(v));
+    };
     for(;;){
         TmIqChunk ck;
         {
@@ -119,6 +124,7 @@ void FFTViewer::tm_iq_writer_loop(){
         }
         if(write_failed){ // pwrite 실패 후: 큐만 비움 (재개는 close→open)
             tm_iq_dropped_bytes.fetch_add(ck.data.size()*sizeof(int16_t),std::memory_order_relaxed);
+            recycle(std::move(ck.data));
             continue;
         }
         // SC16_Q11 → ×16 스케일링: ±2048 → ±32768 (URH 풀스케일 정규화)
@@ -151,6 +157,7 @@ void FFTViewer::tm_iq_writer_loop(){
         // 디스크 기록 완료 워터마크 — 읽기 소비자(region/TM replay)는 여기까지만 신뢰
         if(!write_failed)
             tm_iq_flushed_sample.store(ck.start_sample+n, std::memory_order_release);
+        recycle(std::move(ck.data));
     }
 }
 
@@ -159,6 +166,10 @@ void FFTViewer::tm_iq_write(const int16_t* buf, int n_pairs){
     // 캡처 스레드: 복사+enqueue만. 스케일링/디스크는 writer 스레드 (캡처 비블로킹).
     TmIqChunk ck;
     ck.start_sample = tm_iq_write_sample.load(std::memory_order_relaxed);
+    {   // 재활용 버퍼 pop — capacity 확보돼 있어 아래 assign 이 재할당 없이 복사만 함
+        std::lock_guard<std::mutex> lk(tm_iq_q_mtx);
+        if(!tm_iq_free.empty()){ ck.data = std::move(tm_iq_free.back()); tm_iq_free.pop_back(); }
+    }
     ck.data.assign(buf, buf+(size_t)n_pairs*2);
     tm_iq_write_sample.store(ck.start_sample + n_pairs, std::memory_order_relaxed);
     size_t bytes = ck.data.size()*sizeof(int16_t);
@@ -168,6 +179,7 @@ void FFTViewer::tm_iq_write(const int16_t* buf, int n_pairs){
         while(tm_iq_q_bytes+bytes > TM_IQ_QUEUE_MAX_BYTES && !tm_iq_q.empty()){
             size_t b = tm_iq_q.front().data.size()*sizeof(int16_t);
             tm_iq_q_bytes -= b; dropped_now += b;
+            if(tm_iq_free.size() < TM_IQ_FREE_MAX) tm_iq_free.push_back(std::move(tm_iq_q.front().data));
             tm_iq_q.pop_front();
         }
         tm_iq_q.push_back(std::move(ck));
@@ -239,43 +251,6 @@ void FFTViewer::toggle_tm_iq(){
     }
 }
 
-time_t FFTViewer::fft_idx_to_wall_time(int fft_idx) const {
-    std::lock_guard<std::mutex> lk(wf_events_mtx);
-    if(wf_events.empty()) return 0;
-
-    // fft_idx 기준으로 가장 가까운 두 이벤트 찾기 (앞뒤)
-    // wf_events는 fft_idx 오름차순이라고 가정
-    const WfEvent* prev = nullptr;
-    const WfEvent* next = nullptr;
-    for(const auto& ev : wf_events){
-        if(ev.fft_idx <= fft_idx) prev = &ev;
-        if(ev.fft_idx >= fft_idx && !next) next = &ev;
-    }
-
-    if(prev && next && prev != next){
-        // 두 이벤트 사이 보간: 실제 wall_time 차이로 rps 추정
-        int64_t fi_diff = next->fft_idx - prev->fft_idx;
-        int64_t wt_diff = (int64_t)next->wall_time - (int64_t)prev->wall_time;
-        if(fi_diff > 0 && wt_diff > 0){
-            int64_t offset = fft_idx - prev->fft_idx;
-            return (time_t)(prev->wall_time + offset * wt_diff / fi_diff);
-        }
-    }
-    if(prev){
-        // prev만 있으면 rps로 외삽
-        float rps = (float)header.sample_rate / (float)fft_input_size / (float)time_average;
-        if(rps <= 0) rps = 37.5f;
-        int64_t offset = fft_idx - prev->fft_idx;
-        return (time_t)(prev->wall_time + (int64_t)(offset / rps));
-    }
-    if(next){
-        float rps = (float)header.sample_rate / (float)fft_input_size / (float)time_average;
-        if(rps <= 0) rps = 37.5f;
-        int64_t offset = fft_idx - next->fft_idx; // 음수
-        return (time_t)(next->wall_time + (int64_t)(offset / rps));
-    }
-    return 0;
-}
 
 int64_t FFTViewer::fft_idx_to_wall_time_ms(int fft_idx) const {
     int slot = fft_idx % MAX_FFTS_MEMORY;

@@ -230,8 +230,20 @@ void draw_content(FFTViewer& v, bool just_opened){
         ImGui::TableHeadersRow();
 
         std::lock_guard<std::mutex> lk(mtx);
-        static std::vector<int> rvis; rvis.clear();
-        if(has_sel) for(int i=0;i<(int)log.size();i++) if(memcmp(log[i].mac,sel_mac,6)==0) rvis.push_back(i);
+        // (개수·양끝 t_ms·선택 MAC) 시그니처 게이트 — 로그 불변 프레임엔 전체 스캔 생략
+        static std::vector<int> rvis;
+        static size_t  c_rn=(size_t)-1; static int64_t c_rt0=0, c_rt1=0;
+        static uint8_t c_rmac[6]={}; static bool c_rsel=false;
+        bool sig_ok = c_rsel==has_sel && log.size()==c_rn &&
+                      (log.empty() || (log.front().t_ms==c_rt0 && log.back().t_ms==c_rt1)) &&
+                      memcmp(c_rmac, sel_mac, 6)==0;
+        if(!sig_ok){
+            c_rsel=has_sel; c_rn=log.size();
+            c_rt0=log.empty()?0:log.front().t_ms; c_rt1=log.empty()?0:log.back().t_ms;
+            memcpy(c_rmac, sel_mac, 6);
+            rvis.clear();
+            if(has_sel) for(int i=0;i<(int)log.size();i++) if(memcmp(log[i].mac,sel_mac,6)==0) rvis.push_back(i);
+        }
 
         ImGuiListClipper rc; rc.Begin((int)rvis.size());
         while(rc.Step()) for(int r=rc.DisplayStart;r<rc.DisplayEnd;r++){

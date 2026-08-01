@@ -297,13 +297,10 @@ public:
     bool cmd_create_ch(int idx, float s, float e);
     bool cmd_delete_ch(int idx);
     bool cmd_set_ch_mode(int idx, int mode);
-    bool cmd_set_ch_audio(int idx, uint32_t mask);
-    bool cmd_set_ch_pan(int idx, int pan);
     bool cmd_set_sq_thresh(int idx, float thr);
     bool cmd_set_autoscale();
     bool cmd_set_ch_detect(int idx, bool on);
     bool cmd_df_measure(int dnum);
-    bool cmd_df_set_snr(int snr_db);
     bool send_df_config(const PktDfConfig& c);
     // HOST 가 방송한 정본 DF 설정. JOIN 패널이 이걸 그린다.
     std::mutex   df_cfg_mtx;
@@ -313,14 +310,10 @@ public:
     bool cmd_toggle_fft_recv(bool enable);  // central에서 이 JOIN으로 FFT 송신 토글 (audio/HB 무관)
     bool cmd_update_ch_range(int idx, float s, float e);
     bool cmd_toggle_tm_iq();
-    bool cmd_set_capture_pause(bool pause);
-    bool cmd_set_spectrum_pause(bool pause);
     bool cmd_request_region(int32_t fft_top, int32_t fft_bot,
                              float freq_lo, float freq_hi,
                              int64_t time_start_ms, int64_t time_end_ms,
                              int64_t samp_start=0, int64_t samp_end=0);
-    bool cmd_start_iq_rec(int ch_idx);
-    bool cmd_stop_iq_rec(int ch_idx);
     bool cmd_chassis_reset();            // JOIN → HOST: trigger chassis 1 reset
     bool cmd_net_reset();               // JOIN → HOST: trigger chassis 2 (net-only) reset
     bool cmd_rx_stop();                   // JOIN → HOST: /rx stop
@@ -329,9 +322,6 @@ public:
     bool cmd_set_sr(float msps);          // JOIN → HOST: SR 변경
     bool cmd_set_antenna(const char* antenna);  // bidirectional: antenna text
     bool cmd_set_hw(const char* sdr_name);       // JOIN → server: switch HOST SDR runtime
-    bool cmd_add_sched(int64_t start_time, float duration_sec, float freq_mhz, float bw_khz,
-                       const char* target);
-    bool cmd_remove_sched(int64_t start_time, float freq_mhz);
     bool cmd_band_add(float freq_lo_mhz, float freq_hi_mhz, uint8_t category,
                       const char* label, const char* description);
     bool cmd_band_remove(float freq_lo_mhz, float freq_hi_mhz);
@@ -339,9 +329,6 @@ public:
                          const char* label, const char* description);
     bool cmd_band_cat_upsert(uint8_t id, const char* name, uint8_t r, uint8_t g, uint8_t b);
     bool cmd_band_cat_delete(uint8_t id);
-    bool cmd_lwf_list_req();
-    bool cmd_lwf_dl_req(const char* filename);
-    bool cmd_lwf_delete_req(const char* filename);
     bool cmd_db_delete(const char* filename, const char* operator_name);
     bool cmd_db_set_note(const char* filename, const char* note);
     bool cmd_db_download(const char* filename, const char* operator_name);
@@ -381,7 +368,6 @@ public:
     // v13.4 — 지정 station 의 미션 메타 요청 (MISSION_SYNC 는 접속 room 것만 오므로).
     bool send_mission_sync_req(const char* station);
     bool send_mission_file_delete(const MissionFileKey& key);
-    bool send_mission_file_rename(const MissionFileKey& key, const char* new_filename);
     bool send_mission_file_set_note(const MissionFileKey& key, const char* note);
     // v13.15 — 아카이브 파일을 Central 내부에서 DB 로 복사 (다운로드 후 재업로드 불필요)
     bool send_db_save_from_archive(const MissionFileKey& key, const char* operator_name);

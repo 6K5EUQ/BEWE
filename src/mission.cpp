@@ -20,6 +20,7 @@
 #include <cstring>
 #include <ctime>
 #include <dirent.h>
+#include <map>
 #include <mutex>
 #include <string>
 #include <sys/stat.h>
@@ -339,10 +340,10 @@ bool FFTViewer::mission_end(){
         if(channels[i].audio_rec_on.load()) stop_join_audio_rec(i);
 #endif
 
-#ifdef BEWE_HOST_BUILD
-    // Mission File Push: 미션 종료 시점에 잔여 파일 모두 enqueue (race-safe)
-    MissionPush::scan_mission_dir_enqueue(ended_year, ended_code);
-#endif
+    // (미션 종료 시점 잔여 파일 enqueue 는 애초에 무동작이었다 — CLOSING 전환 뒤라
+    //  station 이 "_unknown_" 으로 풀려 존재하지 않는 dir 를 스캔했음. 실제 flush 는
+    //  다음 부팅 시 mission_push 초기 스캔이 담당한다. 종료 즉시 업로드가 필요해지면
+    //  station 을 명시 전달하는 별도 구현으로 — 가시 타이밍 변경이라 별도 결정.)
 
     {
         std::lock_guard<std::mutex> lk(mission_mtx);
@@ -815,6 +816,17 @@ inline void mkdirs_for_mission(const std::string& station, int year, const std::
     mkdir(BEWEPaths::mission_year_dir(station, year).c_str(), 0755);
     mkdir(BEWEPaths::mission_dir(station, year, code).c_str(), 0755);
 }
+// active_*_dir 는 폴링 경로에서 불린다 — 같은 dir 의 mkdir 5회를 매 호출 반복하지
+// 않도록 5초에 1회만 재보장 (외부 삭제 자가치유는 유지). 호출측이 mission_mtx 보유.
+inline bool dirs_recheck_due(const std::string& d){
+    static std::map<std::string, time_t> seen;
+    time_t now = time(nullptr);
+    if(seen.size() > 32) seen.clear();
+    auto& t = seen[d];
+    if(now - t < 5) return false;
+    t = now;
+    return true;
+}
 } // anon
 
 std::string FFTViewer::active_iq_dir() const {
@@ -822,8 +834,10 @@ std::string FFTViewer::active_iq_dir() const {
     if(mission_state == Mission::State::ACTIVE && mission_code[0]){
         std::string st = mission_station_name[0] ? mission_station_name : "_unknown_";
         std::string d = BEWEPaths::mission_iq_dir(st, mission_year, mission_code);
-        mkdirs_for_mission(st, mission_year, mission_code);
-        mkdir(d.c_str(), 0755);
+        if(dirs_recheck_due(d)){
+            mkdirs_for_mission(st, mission_year, mission_code);
+            mkdir(d.c_str(), 0755);
+        }
         return d;
     }
     return std::string();
@@ -834,8 +848,10 @@ std::string FFTViewer::active_audio_dir() const {
     if(mission_state == Mission::State::ACTIVE && mission_code[0]){
         std::string st = mission_station_name[0] ? mission_station_name : "_unknown_";
         std::string d = BEWEPaths::mission_audio_dir(st, mission_year, mission_code);
-        mkdirs_for_mission(st, mission_year, mission_code);
-        mkdir(d.c_str(), 0755);
+        if(dirs_recheck_due(d)){
+            mkdirs_for_mission(st, mission_year, mission_code);
+            mkdir(d.c_str(), 0755);
+        }
         return d;
     }
     return std::string();
@@ -846,8 +862,10 @@ std::string FFTViewer::active_hist_dir() const {
     if(mission_state == Mission::State::ACTIVE && mission_code[0]){
         std::string st = mission_station_name[0] ? mission_station_name : "_unknown_";
         std::string d = BEWEPaths::mission_hist_dir(st, mission_year, mission_code);
-        mkdirs_for_mission(st, mission_year, mission_code);
-        mkdir(d.c_str(), 0755);
+        if(dirs_recheck_due(d)){
+            mkdirs_for_mission(st, mission_year, mission_code);
+            mkdir(d.c_str(), 0755);
+        }
         return d;
     }
     return std::string();
@@ -859,14 +877,3 @@ std::string FFTViewer::mission_active_station_name() const {
     return std::string(mission_station_name);
 }
 
-int FFTViewer::mission_active_year() const {
-    std::lock_guard<std::mutex> lk(mission_mtx);
-    if(mission_state != Mission::State::ACTIVE) return 0;
-    return mission_year;
-}
-
-std::string FFTViewer::mission_active_code() const {
-    std::lock_guard<std::mutex> lk(mission_mtx);
-    if(mission_state != Mission::State::ACTIVE) return std::string();
-    return std::string(mission_code);
-}

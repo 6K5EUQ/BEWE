@@ -55,6 +55,7 @@ struct MissionHistStream {
     float       q_db_min = 0.0f;
     float       q_db_max = 0.0f;
     bool        q_valid  = false;   // 첫 프레임을 받아 기준이 확정됐는가
+    time_t      last_flush = 0;     // 행 기록 fflush 1Hz 게이트 (행마다 flush 방지)
 };
 
 struct JoinEntry {
@@ -92,7 +93,13 @@ struct JoinEntry {
 
     // ── 독립 송신 큐 ──────────────────────────────────────────────────────
     // 우선순위: ctrl_queue > audio_queue > send_queue(FFT) > file_queue
-    // 단일 send 스레드가 우선순위 순서로 큐에서 꺼내 전송
+    // 단일 send 스레드가 우선순위 순서로 큐에서 꺼내 전송.
+    // 원소는 shared_ptr — 브로드캐스트 시 페이로드를 JOIN 수만큼 딥카피하지 않고
+    // 같은 버퍼 하나를 전 큐가 공유한다 (enqueue 후 불변).
+    using PktBuf = std::shared_ptr<const std::vector<uint8_t>>;
+    static PktBuf make_pkt(const uint8_t* d, size_t n){
+        return std::make_shared<const std::vector<uint8_t>>(d, d + n);
+    }
     static constexpr size_t SEND_QUEUE_MAX_BYTES  = 2 * 1024 * 1024; // FFT 2MB (~0.5초)
     static constexpr size_t AUDIO_QUEUE_MAX_BYTES = 512 * 1024;      // 오디오 512KB (~0.5초)
     // FILE 큐: 한도 초과 시 enqueue가 BLOCK 되어 host_mux_loop을 통해 HOST까지 backpressure 전파.
@@ -100,15 +107,15 @@ struct JoinEntry {
     static constexpr size_t FILE_QUEUE_MAX_BYTES  = 16 * 1024 * 1024; // 16MB (~64 chunk × 256KB)
 
     // 제어 큐 (AUTH_ACK, CMD_ACK, STATUS, OP_LIST, CH_SYNC 등) — 드롭 없음
-    std::deque<std::vector<uint8_t>> ctrl_queue;
+    std::deque<PktBuf>      ctrl_queue;
     // FILE 큐 (FILE_META 0x0E, FILE_DATA 0x0D) — 드롭 없음, 한도 초과 시 enqueue BLOCK
-    std::deque<std::vector<uint8_t>> file_queue;
+    std::deque<PktBuf>      file_queue;
     size_t                  file_queue_bytes = 0;
     // FFT 큐
-    std::deque<std::vector<uint8_t>> send_queue;
+    std::deque<PktBuf>      send_queue;
     size_t                  send_queue_bytes = 0;
     // 오디오 큐
-    std::deque<std::vector<uint8_t>> audio_queue;
+    std::deque<PktBuf>      audio_queue;
     size_t                  audio_queue_bytes = 0;
 
     std::mutex              send_mtx;   // 모든 큐 공유 lock
@@ -144,7 +151,7 @@ struct JoinEntry {
         // 단일 스레드: ctrl → 오디오 → FFT → file 우선순위 순서로 배치 전송
         send_thr = std::thread([this](){
             while(true){
-                std::vector<std::vector<uint8_t>> batch;
+                std::vector<PktBuf> batch;
                 batch.reserve(32);
                 {
                     std::unique_lock<std::mutex> lk(send_mtx);
@@ -167,7 +174,7 @@ struct JoinEntry {
                         // 부담 없음. file/FFT보다 먼저 batch에 담아 파일 다운로드 중에도
                         // audio 끊김 방지 (다운링크가 느려도 audio는 항상 앞질러 나감).
                         while(!audio_queue.empty()){
-                            size_t sz = audio_queue.front().size();
+                            size_t sz = audio_queue.front()->size();
                             batch.push_back(std::move(audio_queue.front()));
                             audio_queue.pop_front();
                             if(audio_queue_bytes >= sz) audio_queue_bytes -= sz;
@@ -176,7 +183,7 @@ struct JoinEntry {
                         // FFT 최대 4개 (burst 완화) — file보다 우선(2순위).
                         int n = 0;
                         while(!send_queue.empty() && n++ < 4){
-                            size_t sz = send_queue.front().size();
+                            size_t sz = send_queue.front()->size();
                             batch.push_back(std::move(send_queue.front()));
                             send_queue.pop_front();
                             if(send_queue_bytes >= sz) send_queue_bytes -= sz;
@@ -186,7 +193,7 @@ struct JoinEntry {
                         // 지연 감소. iq/file은 3순위라 느려도 됨. drain 시 enqueue 깨움.
                         int nf = 0;
                         while(!file_queue.empty() && nf++ < 2){
-                            size_t sz = file_queue.front().size();
+                            size_t sz = file_queue.front()->size();
                             batch.push_back(std::move(file_queue.front()));
                             file_queue.pop_front();
                             if(file_queue_bytes >= sz) file_queue_bytes -= sz;
@@ -195,7 +202,7 @@ struct JoinEntry {
                         if(nf > 0) file_drain_cv.notify_one();
                     }
                 }
-                for(auto& pkt : batch) send_raw(pkt);
+                for(auto& pkt : batch) send_raw(*pkt);
             }
         });
     }
@@ -209,37 +216,43 @@ struct JoinEntry {
 
     // 제어 패킷 큐에 push (AUTH_ACK, CMD_ACK, STATUS, OP_LIST, CH_SYNC 등)
     // 드롭 없음, FFT보다 항상 먼저 전송
-    void enqueue_ctrl(const uint8_t* data, size_t len){
+    void enqueue_ctrl(const uint8_t* data, size_t len){ enqueue_ctrl(make_pkt(data, len)); }
+    void enqueue_ctrl(PktBuf p){
+        size_t len = p->size();
         std::lock_guard<std::mutex> lk(send_mtx);
-        if(len >= 5 && data[4] == 0x02)
+        if(len >= 5 && (*p)[4] == 0x02)
             printf("[JoinEntry] enqueue_ctrl AUTH_ACK conn_id=%u\n", conn_id);
-        if(len >= 5 && data[4] == 0x20)
+        if(len >= 5 && (*p)[4] == 0x20)
             printf("[JoinEntry] enqueue_ctrl IQ_CHUNK conn_id=%u len=%zu\n", conn_id, len);
-        ctrl_queue.emplace_back(data, data + len);
+        ctrl_queue.push_back(std::move(p));
         send_cv.notify_one();
     }
 
-    // FFT 큐에 push (바이트 기준 32MB 제한)
-    void enqueue_data(const uint8_t* data, size_t len){
+    // FFT 큐에 push (바이트 기준 제한, drop-oldest)
+    void enqueue_data(const uint8_t* data, size_t len){ enqueue_data(make_pkt(data, len)); }
+    void enqueue_data(PktBuf p){
+        size_t len = p->size();
         std::lock_guard<std::mutex> lk(send_mtx);
         // 제어 패킷은 enqueue_ctrl로 보내야 함 — 여기선 FFT만
         while(send_queue_bytes + len > SEND_QUEUE_MAX_BYTES && !send_queue.empty()){
-            send_queue_bytes -= send_queue.front().size();
+            send_queue_bytes -= send_queue.front()->size();
             send_queue.pop_front();
         }
-        send_queue.emplace_back(data, data + len);
+        send_queue.push_back(std::move(p));
         send_queue_bytes += len;
         send_cv.notify_one();
     }
 
-    // 오디오 큐에 push (바이트 기준 16MB 제한)
-    void enqueue_audio(const uint8_t* data, size_t len){
+    // 오디오 큐에 push (바이트 기준 제한, drop-oldest)
+    void enqueue_audio(const uint8_t* data, size_t len){ enqueue_audio(make_pkt(data, len)); }
+    void enqueue_audio(PktBuf p){
+        size_t len = p->size();
         std::lock_guard<std::mutex> lk(send_mtx);
         while(audio_queue_bytes + len > AUDIO_QUEUE_MAX_BYTES && !audio_queue.empty()){
-            audio_queue_bytes -= audio_queue.front().size();
+            audio_queue_bytes -= audio_queue.front()->size();
             audio_queue.pop_front();
         }
-        audio_queue.emplace_back(data, data + len);
+        audio_queue.push_back(std::move(p));
         audio_queue_bytes += len;
         send_cv.notify_one();
     }
@@ -247,7 +260,9 @@ struct JoinEntry {
     // FILE 큐에 push (드롭 없음, 한도 초과 시 BLOCK).
     // 호출자: dispatch_to_joins. 블로킹이 host_mux_loop을 막아 HOST send까지 backpressure 전파.
     // joins_mtx를 들고 있는 동안 호출하면 안 됨 — 호출 측에서 snapshot 패턴으로 lock 해제 후 호출.
-    void enqueue_file(const uint8_t* data, size_t len){
+    void enqueue_file(const uint8_t* data, size_t len){ enqueue_file(make_pkt(data, len)); }
+    void enqueue_file(PktBuf p){
+        size_t len = p->size();
         std::unique_lock<std::mutex> lk(send_mtx);
         // 빈 큐일 땐 한도 무관 통과 (단일 chunk가 한도보다 커도 보낼 수 있도록)
         file_drain_cv.wait(lk, [this, len]{
@@ -256,7 +271,7 @@ struct JoinEntry {
                    file_queue_bytes + len <= FILE_QUEUE_MAX_BYTES;
         });
         if(!alive.load() || send_stop.load()) return;
-        file_queue.emplace_back(data, data + len);
+        file_queue.push_back(std::move(p));
         file_queue_bytes += len;
         send_cv.notify_one();
     }
@@ -272,8 +287,9 @@ struct HostRoom {
 
     mutable std::mutex                    host_send_mtx; // HOST fd write 직렬화
     // HOST fd 송신 큐: join_loop 등이 HOST에 보낼 데이터를 여기에 넣고,
-    // host_mux_loop이 recv 루프에서 매번 flush → blocking send 없이 안전
+    // flush 스레드가 cv 통지를 받아 전송 (구 1kHz busy-poll 제거)
     std::deque<std::vector<uint8_t>>      host_send_queue;
+    std::condition_variable               host_send_cv;
 
     // ── HOST→Central DB 업로드 수신 상태 (룸당 단일 mux_loop 스레드, mutex 불필요) ─
     FILE*       db_fp   = nullptr;
@@ -343,14 +359,16 @@ inline void enqueue_host_send(std::shared_ptr<HostRoom>& room, uint16_t conn_id,
     std::vector<uint8_t> pkt(CENTRAL_MUX_HDR_SIZE + len);
     memcpy(pkt.data(), &mh, CENTRAL_MUX_HDR_SIZE);
     if(len > 0 && data) memcpy(pkt.data() + CENTRAL_MUX_HDR_SIZE, data, len);
-    std::lock_guard<std::mutex> lk(room->host_send_mtx);
-    room->host_send_queue.push_back(std::move(pkt));
+    {
+        std::lock_guard<std::mutex> lk(room->host_send_mtx);
+        room->host_send_queue.push_back(std::move(pkt));
+    }
+    room->host_send_cv.notify_one();
 }
 
 class CentralServer {
 public:
     bool start(int port = CENTRAL_PORT);
-    void run();
     void stop();
 
 private:
@@ -407,7 +425,8 @@ private:
     void broadcast_module_pkt_all(const uint8_t* bewe_pkt, size_t bewe_len, const char* sub_mod);
 
     // DB 파일 목록 스캔 → 모든 JOIN + HOST에 브로드캐스트
-    void broadcast_db_list(std::shared_ptr<HostRoom> room);
+    // only != nullptr 이면 그 JOIN 에만 전송 (신규 auth/재요청 — 나머지는 이미 보유)
+    void broadcast_db_list(std::shared_ptr<HostRoom> room, JoinEntry* only = nullptr);
 
     // BEWE 패킷 빌드 헬퍼 (magic + type + len + payload)
     static std::vector<uint8_t> make_bewe_packet(uint8_t type, const void* payload, uint32_t plen);

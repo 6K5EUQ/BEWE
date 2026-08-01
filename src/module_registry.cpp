@@ -150,12 +150,6 @@ uint64_t bewe_mod_host_mask(const char* id){
     return fw(id).host_mask;
 }
 
-bool bewe_mod_ch_has_decoder(int ch){
-    if(ch<0 || ch>=64) return false;
-    std::lock_guard<std::mutex> lk(g_fw_mtx);
-    for(auto& kv : g_fw) if((kv.second.host_mask>>ch)&1) return true;
-    return false;
-}
 
 // HOST/LOCAL 은 host_mask, JOIN 은 CH_LIST 미러(targets.decode_on) 로 판단 → 양쪽 통일
 bool bewe_mod_ch_decode_on(bool remote, int ch){
@@ -424,28 +418,11 @@ static void stat_rollover_locked(){
         if(g_host_decstart[i] > 0) g_host_decstart[i] = mod_now_ms();   // active 채널은 지금부터 재시작
     }
 }
-// 오늘(KST) 저장 JSONL 에서 채널 ch 디코드 건수 — Data 시드(히스토리 포함 총수).
-// store_append 은 emit(=stat_bump) 과 1:1 이라 JSONL 라인수 = 누적 디코드수.
-static long host_today_count(const char* id, int ch){
-    const char* home = getenv("HOME");
-    std::string base = home ? std::string(home) : std::string(".");
-    int64_t now = (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::system_clock::now().time_since_epoch()).count();
-    struct tm tmv{}; KST::to_tm((time_t)(now/1000), tmv);
-    char d[9]; snprintf(d,sizeof(d),"%04d%02d%02d",tmv.tm_year+1900,tmv.tm_mon+1,tmv.tm_mday);
-    std::string path = base + "/BEWE/modules/" + id + "/" + id + "_" + d + ".jsonl";
-    FILE* f = fopen(path.c_str(),"rb"); if(!f) return 0;
-    long cnt=0; char line[1024];
-    while(fgets(line,sizeof(line),f)){
-        const char* p = strstr(line,"\"ch\":");
-        if(p && atoi(p+5)==ch) cnt++;
-    }
-    fclose(f); return cnt;
-}
 // 오늘 jsonl 채널 카운트 캐시 (3초 TTL, 모듈 id 별) — 오프셋 기반 증분 파싱.
 //  기존엔 3초마다 당일 파일 '전체' 를 재파싱 (파일이 하루 종일 자람 → 수십 MB 반복 읽기).
 //  이제 마지막 파싱 오프셋을 기억하고 append 된 바이트만 읽는다.
-static long host_today_count_cached(const char* id, int ch){
+//  force=true (decode-start 시드): TTL 무시하고 지금 상태까지 증분 파싱 (풀파싱과 동일값).
+static long host_today_count_cached(const char* id, int ch, bool force=false){
     if(ch<0 || ch>=MAX_CHANNELS) return 0;
     static std::mutex m;
     struct Ent { int64_t t=0; char date[9]={0}; long off=0; std::array<long,MAX_CHANNELS> cnt{}; };
@@ -453,7 +430,7 @@ static long host_today_count_cached(const char* id, int ch){
     std::lock_guard<std::mutex> lk(m);
     int64_t now = mod_now_ms();
     auto& e = cache[id];
-    if(now - e.t >= 3000 || e.t==0){
+    if(force || now - e.t >= 3000 || e.t==0){
         e.t = now;
         const char* home = getenv("HOME");
         std::string base = home ? std::string(home) : std::string(".");
@@ -486,7 +463,7 @@ static void host_decstat_start(const char* id, int ch){
     if(ch<0 || ch>=MAX_CHANNELS) return;
     g_host_decstart[ch] = mod_now_ms();
     g_host_decaccum[ch] = 0;                          // 새 decode 세션 → runtime 0 부터
-    long seed = host_today_count(id, ch);             // 오늘 누적(히스토리)으로 시드
+    long seed = host_today_count_cached(id, ch, /*force=*/true); // 오늘 누적(히스토리)으로 시드
     std::lock_guard<std::mutex> lk(g_stat_mtx);
     g_stat_total[stat_key(id, g_my_station, ch)] = seed;
 }

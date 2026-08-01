@@ -248,11 +248,11 @@ uint64_t fingerprint(const FFTViewer& v){
     h = mix(h, (uint64_t)v.header.center_frequency);
     h = mix(h, (uint64_t)v.header.sample_rate);
     h = mix(h, f2u(v.gain_db));
-    {   // DF 설정이 바뀌면 저장되게 fingerprint 에 넣는다.
-        double r=0, hd=0; int el=0, al=0, se=0, af=0, sd=0;
+    {   // DF 설정이 바뀌면 저장되게 fingerprint 에 넣는다. (packed 32B → u64 4회 mix)
         PktDfConfig d{}; v.df_get_cfg(d);
-        const uint8_t* raw = reinterpret_cast<const uint8_t*>(&d);
-        for(size_t i = 0; i < sizeof(d); i++) h = mix(h, raw[i]);
+        static_assert(sizeof(d) % 8 == 0, "PktDfConfig mix assumes 8-byte multiple");
+        uint64_t w[sizeof(d)/8]; memcpy(w, &d, sizeof(d));
+        for(size_t i = 0; i < sizeof(d)/8; i++) h = mix(h, w[i]);
     }
     for(int i=0;i<MAX_CHANNELS;i++){
         const Channel& ch = v.channels[i];

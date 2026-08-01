@@ -19,17 +19,4 @@ inline void to_tm(time_t t, struct tm& out){
     gmtime_r(&shifted, &out);
 }
 
-// "Now" in KST.
-inline void now_tm(struct tm& out){
-    time_t now = time(nullptr);
-    to_tm(now, out);
-}
-
-// Convenience: KST tm as a value.
-inline struct tm to_tm(time_t t){
-    struct tm out{};
-    to_tm(t, out);
-    return out;
-}
-
 } // namespace KST

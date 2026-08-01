@@ -81,12 +81,14 @@ void FFTViewer::log_push(int col, const char* fmt, ...){
     // console
     fprintf(stdout, "%s\n", full);
     fflush(stdout);
-    // buffer
+#ifndef BEWE_HEADLESS
+    // buffer — LOG 오버레이(GUI) 전용. HEADLESS 는 읽는 곳이 없어 채우지 않는다.
     std::lock_guard<std::mutex> lk(log_mtx);
     LogEntry e{}; strncpy(e.msg, full, 511);
-    if(log_buf[col].size() >= (size_t)LOG_MAX) log_buf[col].erase(log_buf[col].begin());
+    if(log_buf[col].size() >= (size_t)LOG_MAX) log_buf[col].pop_front();
     log_buf[col].push_back(e);
     log_scroll[col] = true;
+#endif
 }
 
 // 글로벌 로그 (FFTViewer 인스턴스 없이도 호출 가능)
@@ -148,11 +150,14 @@ void FFTViewer::update_wf_row(int fi){
     (void)fi;
     return;
 #else
+    // data_mtx 는 행 매핑까지만 — GL 업로드는 락 밖 (캡처/수신 스레드 대기 감소)
+    int tex_w, mi;
+    {
     std::lock_guard<std::mutex> lk(data_mtx);
-    int tex_w = std::min(fft_size, WF_TEX_MAX);
+    tex_w = std::min(fft_size, WF_TEX_MAX);
     if(tex_w < 1) tex_w = 1;
     if((int)wf_row_buf.size()!=tex_w) wf_row_buf.resize(tex_w);
-    int mi=fi%MAX_FFTS_MEMORY;
+    mi=fi%MAX_FFTS_MEMORY;
     const float* row=fft_data.data()+mi*fft_size;
     float wmin=display_power_min, wmax=display_power_max;
     float wrng_inv=1.0f/std::max(1.0f,wmax-wmin);
@@ -222,6 +227,7 @@ void FFTViewer::update_wf_row(int fi){
         float b1 = (i+1) * ratio - 1;
         wf_row_buf[tex_half+i]=map_peak(b0, b1);
     }
+    }  // data_mtx 해제
 
     glBindTexture(GL_TEXTURE_2D,waterfall_texture);
     glTexSubImage2D(GL_TEXTURE_2D,0,0,mi,tex_w,1,GL_RGBA,GL_UNSIGNED_BYTE,wf_row_buf.data());
@@ -271,7 +277,6 @@ FFTViewer::~FFTViewer(){
     mix_stop.store(true);
     net_bcast_stop.store(true);
     net_bcast_cv.notify_all();
-    sa_playing.store(false);
     sa_computing.store(false);
     eid_computing.store(false);
 
@@ -280,7 +285,6 @@ FFTViewer::~FFTViewer(){
     join_if(net_bcast_thr);
     join_if(rec_thr);
     join_if(sa_thread);
-    join_if(sa_play_thread);
     join_if(eid_thread);
     for(int i = 0; i < MAX_CHANNELS; ++i){
         join_if(channels[i].dem_thr);
@@ -311,10 +315,20 @@ bool FFTViewer::audio_play_paused() const {
 float FFTViewer::audio_play_pos_sec() const {
     return audio_player ? audio_player->position_sec() : 0.f;
 }
-float FFTViewer::audio_play_total_sec() const {
-    return audio_player ? audio_player->total_sec() : 0.f;
-}
-const std::string& FFTViewer::audio_play_path() const {
-    static const std::string empty;
-    return audio_player ? audio_player->path() : empty;
-}
+
+#ifdef BEWE_HEADLESS
+// ── CLI 링크 스텁 ─────────────────────────────────────────────────────────
+// sa_compute / eid_compute / audio_playback TU 는 GUI 전용이라 CLI 빌드에서
+// 제외된다 (~81KB .text 절감). CLI 에서 이 경로들은 도달 불가지만 참조는
+// 남아 있어 심볼만 채운다 — 전부 no-op (CLI 는 해당 리소스를 만들지 않음).
+void FFTViewer::sa_cleanup(){}
+void FFTViewer::eid_cleanup(){}
+void FFTViewer::sa_start(const std::string&){}
+AudioPlayback::AudioPlayback(){}
+AudioPlayback::~AudioPlayback(){}
+bool AudioPlayback::start(const std::string&, uint32_t, double){ return false; }
+void AudioPlayback::stop(){}
+void AudioPlayback::pause(){}
+void AudioPlayback::resume(){}
+bool AudioPlayback::pop_stereo(float&, float&){ return false; }
+#endif

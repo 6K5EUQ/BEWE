@@ -15,24 +15,13 @@ namespace wifi_dsss {
 using cf=std::complex<float>;
 static const int BARKER[11]={1,-1,1,1,-1,1,1,1,-1,-1,-1};
 
-inline std::vector<cf> resamp22(const std::vector<cf>& in,double isr){
-    const double PI=3.14159265358979323846, OSR=22e6;
-    if(std::fabs(isr-OSR)<1) return in;
-    double step=isr/OSR; if((long)(in.size()/step)<=64) return {};
-    size_t no=(size_t)(in.size()/step)-32; std::vector<cf> o; o.reserve(no); const int T=12;
-    for(size_t m=0;m<no;m++){ double tin=m*step; long c=(long)std::floor(tin); double fr=tin-c; cf a(0,0); double ws=0;
-        for(int k=-T+1;k<=T;k++){ long id=c+k; if(id<0||id>=(long)in.size())continue; double x=PI*(k-fr);
-            double s=(std::fabs(x)<1e-6)?1.0:std::sin(x)/x; double aa=(double)(k-fr)/T; double w=0.42+0.5*std::cos(PI*aa)+0.08*std::cos(2*PI*aa);
-            double h=s*w; a+=in[id]*(float)h; ws+=h; } o.push_back(ws>1e-9?a/(float)ws:a); }
-    return o;
-}
-
 // 채널 baseband → FCS 유효 DSSS 비콘 → on_rec(WifiRecord)
+// (22 MSPS 리샘플은 wifi_ofdm::resample_frac<12> — 공용 폴리페이즈 커널)
 inline void decode_buffer_dsss(const cf* xin,size_t nin,double in_sr,
                                const std::function<void(const WifiRecord&)>& on_rec,int max_pkt=400){
     std::vector<cf> rs; const cf* x; size_t N;
     if(std::fabs(in_sr-22e6)<1){ x=xin; N=nin; }
-    else { std::vector<cf> tmp(xin,xin+nin); rs=resamp22(tmp,in_sr); x=rs.data(); N=rs.size(); }
+    else { rs=wifi_ofdm::resample_frac<12>(xin,nin,in_sr/22e6); x=rs.data(); N=rs.size(); }
     if(N<512) return;
     const int SPS=2, SPSYM=22;
     cf taps[22]; for(int i=0;i<22;i++) taps[i]=cf((float)BARKER[i/2],0);

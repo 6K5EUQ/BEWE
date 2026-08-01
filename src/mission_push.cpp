@@ -426,41 +426,6 @@ void scan_orphans_enqueue(){
         fprintf(stderr, "[MissionPush] boot scan: re-enqueued %d orphan file(s)\n", found);
 }
 
-void scan_mission_dir_enqueue(int year, const char* code){
-    if(!running.load() || !code || !code[0]) return;
-    // station 결정: 현재 ACTIVE mission 의 station_name (또는 history lookup)
-    std::string station;
-    if(g_v) station = g_v->mission_active_station_name();
-    if(station.empty()) station = "_unknown_";
-    auto scan = [&](uint8_t sub){
-        std::string dir;
-        switch(sub){
-            case MFS_IQ:    dir = BEWEPaths::mission_iq_dir(station, year, code); break;
-            case MFS_AUDIO: dir = BEWEPaths::mission_audio_dir(station, year, code); break;
-            case MFS_HIST:  dir = BEWEPaths::mission_hist_dir(station, year, code); break;
-            default: return;
-        }
-        DIR* d = opendir(dir.c_str());
-        if(!d) return;
-        struct dirent* ent;
-        while((ent = readdir(d)) != nullptr){
-            const char* n = ent->d_name;
-            if(!n || n[0] == '.') continue;
-            size_t nlen = strlen(n);
-            if(nlen >= 5  && strcmp(n + nlen - 5,  ".info")       == 0) continue;
-            if(nlen >= 11 && strcmp(n + nlen - 11, ".sigmf-meta") == 0) continue; // IQ sidecar
-            // (.sigmf-data 데이터 파일은 enqueue 대상)
-            // -LIVE.bewehist 는 아직 stream 진행 중일 수 있어 제외
-            if(sub == MFS_HIST && strstr(n, "-LIVE.")) continue;
-            std::string full = dir + "/" + n;
-            enqueue(full, sub);
-        }
-        closedir(d);
-    };
-    scan(MFS_IQ);
-    scan(MFS_AUDIO);
-    // HIST 는 Central LWF stream tap 이 직접 archive 에 mirror — HOST push 안 함.
-}
 
 int pending_count(){
     std::lock_guard<std::mutex> lk(q_mtx);

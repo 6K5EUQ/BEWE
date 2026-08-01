@@ -40,6 +40,5 @@ void notify_finalized(const std::string& path);
 // 결과를 CLI 로그로 출력한다.
 void run_command(const char* args);
 
-bool is_active();
 
 } // namespace HistCheck

@@ -209,13 +209,4 @@ std::string name_of(uint8_t id){
     return "Other";
 }
 
-bool host_local_upsert(const PktBandCategory& in){
-    if(!apply_upsert(in)) return false;
-    save_to_file(); rebuild_cache(); return true;
-}
-bool host_local_delete(uint8_t id){
-    if(!apply_delete(id)) return false;
-    save_to_file(); rebuild_cache(); return true;
-}
-
 } // namespace HostBandCategories

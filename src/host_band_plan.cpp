@@ -272,17 +272,4 @@ void snapshot_pkt(PktBandPlan& out){
     for(int i=0; i<n; i++) out.entries[i] = g_segments[i];
 }
 
-bool host_local_add(const PktBandEntry& in){
-    if(!apply_add(in)) return false;
-    save_to_file(); rebuild_cache(); return true;
-}
-bool host_local_update(const PktBandEntry& in){
-    if(!apply_update(in)) return false;
-    save_to_file(); rebuild_cache(); return true;
-}
-bool host_local_remove(const PktBandRemove& rm){
-    if(!apply_remove(rm)) return false;
-    save_to_file(); rebuild_cache(); return true;
-}
-
 } // namespace HostBandPlan

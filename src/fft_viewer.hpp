@@ -49,7 +49,6 @@
 
 // ── Global log helper (ui.cpp에서 정의, 모든 .cpp에서 사용 가능) ─────────
 extern std::string g_sdr_force; // "" = 자동, "bladerf"|"rtlsdr"|"pluto"
-extern std::vector<std::string> scan_available_sdrs();
 extern bool scan_sdr_present_quiet();  // 상태표시 전용 저빈도 체크 (로그 스팸 없음, hw_detect.cpp 참고)
 extern void bewe_log(const char* fmt, ...);
 // LOG 오버레이용 글로벌 로그 (col: 0=HOST 1=SERVER 2=JOIN)
@@ -261,8 +260,6 @@ public:
     // 현재 활성 미션 station_name (MissionPush key 채우기용). IDLE이면 빈.
     std::string mission_active_station_name() const;
     // 현재 활성 미션 year/code (MissionPush + file LIST_REQ 용).
-    int  mission_active_year() const;
-    std::string mission_active_code() const;
 
     // ── Long Waterfall (24h+ FFT magnitude image) ─────────────────────
     bool              lwf_modal_open = false;     // IMG 버튼 토글 → viewer 모달
@@ -302,7 +299,6 @@ public:
 
     // fft_idx → wall_time 변환 (wf_events 보간, 없으면 rps 기반 추정)
     // 반환값: Unix timestamp (time_t), 0이면 변환 불가
-    time_t fft_idx_to_wall_time(int fft_idx) const;
     // fft_idx → wall_time_ms 변환 (row_wall_ms 직접 참조, 밀리초 정밀도)
     // 반환값: Unix timestamp * 1000 (int64_t), 0이면 변환 불가
     int64_t fft_idx_to_wall_time_ms(int fft_idx) const;
@@ -314,6 +310,7 @@ public:
     // TM IQ 비동기 writer: 캡처 스레드는 복사+enqueue만, ×16 스케일링/pwrite 는 전용
     // 스레드. 디스크가 느리면(SD 실속) 큐 초과분 drop-oldest — 캡처는 절대 블로킹 안 함.
     static constexpr size_t TM_IQ_QUEUE_MAX_BYTES = 64ull<<20; // 64 MiB
+    static constexpr size_t TM_IQ_FREE_MAX = 8;   // 재활용 버퍼 보관 상한 (캡처 청크 단위)
     struct TmIqChunk { int64_t start_sample; std::vector<int16_t> data; };
     std::thread             tm_iq_wr_thr;
     std::atomic<bool>       tm_iq_wr_run{false};
@@ -321,6 +318,7 @@ public:
     std::condition_variable tm_iq_q_cv;
     std::deque<TmIqChunk>   tm_iq_q;          // tm_iq_q_mtx 보호
     size_t                  tm_iq_q_bytes=0;  // tm_iq_q_mtx 보호
+    std::deque<std::vector<int16_t>> tm_iq_free; // 청크 버퍼 재활용 (tm_iq_q_mtx 보호) — 캡처 콜백당 수백 KB 재할당 방지
     std::atomic<uint64_t>   tm_iq_dropped_bytes{0}; // 디스크 지연으로 버린 바이트 누계
     std::atomic<bool>       tm_iq_write_failed{0};  // writer pwrite 실패 → 다음 open 이 close/재생성
     std::mutex              tm_iq_oc_mtx;     // open/close 직렬화 (동시 토글 → thread 이중 assign 방지)
@@ -378,7 +376,6 @@ public:
         int    edit_ftop0=0, edit_fbot0=0; // 드래그 시작 fft 인덱스
     } region;
 
-    void region_save();
     std::string do_region_save_work();
 
     // ── SA (Signal Analyzer) 패널 ─────────────────────────────────────────
@@ -393,7 +390,6 @@ public:
     std::string       sa_temp_path;
     bool              sa_mode        = false;
     float             sa_anim_timer  = 0.0f;  // 로딩 점 애니메이션
-    bool              sa_drag_active = false;
     float right_panel_x   = 0.0f;
 
     // SA 픽셀 버퍼 (스레드 → 메인 스레드 전달)
@@ -426,10 +422,6 @@ public:
     float    sa_sel_drag_ox = 0.f, sa_sel_drag_oy = 0.f; // 드래그 시작 UV
 
     // SA 복조 재생
-    int      sa_demod_mode = 0;   // 0=없음 1=AM 2=FM
-    std::atomic<bool> sa_playing{false};
-    std::thread       sa_play_thread;
-    void sa_play_demod();         // 선택 영역 복조 재생 (별도 스레드)
 
     // ── Scheduled IQ Recording ──────────────────────────────────────────
     struct SchedEntry {
@@ -453,7 +445,6 @@ public:
     std::mutex              sched_mtx;
     int   sched_active_idx  = -1;
     float sched_saved_cf    = 0;
-    bool  sched_panel_open  = false;
     void sched_tick();
     void sched_arm_entry(int idx);
     void sched_begin_rec(int idx);
@@ -493,7 +484,7 @@ public:
     bool log_panel_open = false;
     struct LogEntry { char msg[512]; };
     static constexpr int LOG_MAX = 500;
-    std::vector<LogEntry> log_buf[3];  // 0=HOST 1=SERVER 2=JOIN
+    std::deque<LogEntry> log_buf[3];   // 0=HOST 1=SERVER 2=JOIN (pop_front O(1) — vector erase 는 500×512B memmove)
     std::mutex log_mtx;
     bool log_scroll[3] = {true,true,true};
     void log_push(int col, const char* fmt, ...);
@@ -661,7 +652,6 @@ public:
     // Save File: 현재 eid_ch_i/q 상태(필터·샘플 수정 반영)를 원본 폴더에 새 WAV로 저장.
     // 파일명: IQ_Filtered_... / Audio_Filtered_... 형식, 중복 시 _2, _3 접미.
     // 원본 .info가 있으면 같은 규칙으로 복사. 반환: 생성 경로(실패 시 "").
-    std::string eid_save_filtered();
     // 기본 저장 경로 계산만 수행 (파일명 결정, 중복 _N 처리)
     std::string eid_default_filtered_path();
     // 지정 경로에 WAV만 저장 (헤더/bewe 청크/stereo int16). .info는 호출자 책임.
@@ -777,7 +767,6 @@ public:
     };
     std::vector<FileXfer> file_xfers;
     std::mutex            file_xfer_mtx;
-    std::atomic<uint8_t>  next_transfer_id{1};
 
     // 파일 리스트 한 줄 정보 포맷 — "HH:MM:SS ###.#M" / "HH:MM:SS ###.#G".
     // M/G 모두 5글자 폭으로 통일되어 컬럼 정렬됨.
@@ -970,8 +959,6 @@ public:
     bool  audio_play_active() const;
     bool  audio_play_paused() const;
     float audio_play_pos_sec() const;
-    float audio_play_total_sec() const;
-    const std::string& audio_play_path() const;
     // ── IQ 파일 Audio 탭: AM/FM 복조 후 재생 ──────────────────────────────
     // IQ(stereo) 녹음을 Audio 탭에서 AM/FM 복조해 임시 mono WAV 로 듣기.
     bool        eid_is_iq = false;       // 현재 로드된 EID 파일이 IQ(stereo)인가
@@ -1101,7 +1088,6 @@ public:
     void rec_worker();
     void start_rec();
     void stop_rec();
-    void start_audio_rec(int ch_idx);
     void stop_audio_rec(int ch_idx);
     void start_iq_rec(int ch_idx);
     void stop_iq_rec(int ch_idx);
@@ -1116,6 +1102,8 @@ public:
     // ── fft_viewer.cpp (waterfall + display helpers) ──────────────────────
     void create_waterfall_texture();
     void update_wf_row(int fi);
+    // 캡처 공용 dB 행 커밋 (4개 SDR 백엔드 공통 — 정의는 bladerf_io.cpp, CLI 전용)
+    void commit_fft_row(const std::vector<float>& pacc, int fcnt);
     void get_disp(float& ds, float& de) const;
     float x_to_abs(float x, float gx, float gw) const;
     float abs_to_x(float abs_mhz, float gx, float gw) const;
@@ -1204,7 +1192,6 @@ inline void bewe_spawn_capture(FFTViewer& v, std::thread& cap){
 // ── USB 소프트 리셋 (sudo 불필요, udev rule 권한 사용) ────────────────────
 // USBDEVFS_RESET ioctl: 물리적으로 뽑았다 꽂는 것과 동일한 효과
 bool usb_reset_vidpid(uint16_t vid, uint16_t pid, const char* label);
-bool bladerf_usb_reset();
 
 // SDR 종류 → USB VID/PID. /chassis 1 reset · /powercycle · stall watchdog 이
 // 공유한다 (한 곳에서 빠지면 그 SDR 만 복구가 안 되는 사고가 난다).

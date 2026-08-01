@@ -761,20 +761,6 @@ void EmitterDb::list_sightings(const std::string& filter,
     for(uint16_t i = off; i < end; i++) out.push_back(*cands[i]);
 }
 
-bool EmitterDb::find_emitter(const std::string& uid, Emitter& out) const {
-    std::lock_guard<std::mutex> lk(mtx_);
-    auto it = emitters_.find(uid);
-    if(it == emitters_.end()) return false;
-    out = it->second;
-    return true;
-}
-bool EmitterDb::find_sighting(const std::string& sid, Sighting& out) const {
-    std::lock_guard<std::mutex> lk(mtx_);
-    auto it = sightings_.find(sid);
-    if(it == sightings_.end()) return false;
-    out = it->second;
-    return true;
-}
 
 size_t EmitterDb::emitter_count() const {
     std::lock_guard<std::mutex> lk(mtx_);

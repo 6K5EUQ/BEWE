@@ -105,19 +105,7 @@ uint64_t g_scanned_rows = 0;      // 스캔한 표본 행수 (진단용)
 uint64_t g_scan_cursor  = 0;      // 다음 스캔할 행 인덱스 (서브샘플 커서)
 uint64_t g_hist[256] = {0};       // 바이트 히스토그램 (누적)
 
-// Right-panel split ratio (file list width fraction, 0..1)
-float    g_right_ratio = 0.22f;
-float    g_right_saved = 0.22f;
-bool     g_files_panel_open = true;   // S키 토글
-
-// File-list cache (HOST tab — local hist_host_dir, JOIN tab — local hist_join_dir)
-struct HistFileEntry { std::string path; std::string base; uint64_t start_utc; uint64_t size; };
-std::vector<HistFileEntry> g_host_files;
-std::vector<HistFileEntry> g_join_files;
-bool      g_host_list_dirty  = true;
-bool      g_join_list_dirty  = true;
-time_t    g_join_dir_mtime   = 0;
-// (탭 통합 — collapsing section으로 변경)
+// (우측 파일목록 패널 제거 — 도달불가 확정 후 삭제. 진입은 미션창에서 파일 선택.)
 
 // ── Measurement region overlay (Ctrl+우클릭 드래그로 생성, BW/시간 측정용) ─
 struct Meas {
@@ -156,31 +144,6 @@ void pop_zoom_hist(){
     g_tex_dirty = true;
 }
 
-// File-list selection + context state.
-// g_sel_path = primary single-selection (drives "open" on plain click). Kept for
-// legacy callers (close_open / scroll-to / open_file flow).
-// g_selected = multi-selection set used by Ctrl-click and the Delete key. The
-// primary g_sel_path is always also a member while it is non-empty.
-// section codes — 0=LIVE, 1=HOST_LOCAL, 2=HOST_REMOTE (basename-only id),
-// 3=LOCAL/JOIN downloaded.
-std::string g_sel_path;
-std::string g_ctx_path;             // file targeted by current right-click context menu
-std::unordered_map<std::string,int> g_selected;
-bool        g_info_modal_open = false;
-std::string g_info_path;            // file shown in Info modal
-
-// JOIN download progress
-struct DlState {
-    std::string filename;
-    uint64_t total=0, recv=0;
-    FILE* fp=nullptr;
-    // 렌더링용 EWMA 속도 필드 (Archive와 동일 로직 재사용)
-    int64_t last_done_bytes = 0;
-    int64_t last_steady_us  = 0;
-    double  bps_ewma        = 0.0;
-};
-DlState  g_dl;
-std::mutex g_dl_mtx;
 
 // 표시용 — 파일명에서 .bewehist/.bewewf 확장자 제거 (공간 절약)
 static std::string strip_hist_ext(const std::string& s){
@@ -217,9 +180,6 @@ static void hist_row_tooltip(const char* station_name, float station_lat, float 
 }
 
 // LWF list cached from host (JOIN side)
-PktLwfList g_remote_list{};
-bool       g_remote_list_valid = false;
-std::mutex g_remote_list_mtx;
 
 uint64_t   g_last_known_rows = 0;
 
@@ -303,51 +263,6 @@ bool open_file(const std::string& path){
     // 이후 팬/줌을 매끄럽게). LIVE 는 계속 자라므로 제외 — 종전 블록캐시로 동작.
     if(path.find("-LIVE.bewehist") == std::string::npos) preload_full_v4();
     return true;
-}
-
-// ── HIST file selection / delete helpers ──────────────────────────────────
-// section codes: 0=LIVE, 1=HOST_LOCAL, 2=HOST_REMOTE, 3=LOCAL/JOIN
-static void hist_click_select(const std::string& id, int section, bool ctrl,
-                              bool plain_opens, std::function<void()> open_fn){
-    if(ctrl){
-        // toggle membership; do not change open file
-        auto it = g_selected.find(id);
-        if(it != g_selected.end()) g_selected.erase(it);
-        else g_selected[id] = section;
-        // primary single-select tracks last-toggled-into membership
-        if(g_selected.count(id)) g_sel_path = id;
-        else if(g_sel_path == id) g_sel_path.clear();
-    } else {
-        g_selected.clear();
-        g_selected[id] = section;
-        g_sel_path = id;
-        if(plain_opens && open_fn) open_fn();
-    }
-}
-
-// Delete a single HIST item by section. Caller must pass cli (may be null in HOST mode).
-static void hist_delete_one(const std::string& id, int section, NetClient* cli){
-    switch(section){
-        case 0: // (legacy LIVE section removed in v4.6.0 — kept for backward enum compat)
-            if(g_open.path == id) close_open();
-            unlink(id.c_str());
-            break;
-        case 1: // HOST local file (full path)
-            if(g_open.path == id) close_open();
-            unlink(id.c_str());
-            g_host_list_dirty = true;
-            break;
-        case 2: // HOST remote — id is host-side basename
-            if(cli) cli->cmd_lwf_delete_req(id.c_str());
-            // host responds with new LWF_LIST → auto refresh
-            break;
-        case 3: // LOCAL / JOIN-downloaded (full path)
-            if(g_open.path == id) close_open();
-            unlink(id.c_str());
-            g_join_list_dirty = true;
-            break;
-    }
-    if(g_sel_path == id) g_sel_path.clear();
 }
 
 bool read_header_only(const std::string& path, LongWaterfall::FileHeader& h, uint64_t& size){
@@ -618,6 +533,19 @@ void rebuild_texture(float view_db_min, float view_db_max){
     int rows_per_col_max = 64;
     int rows_step = std::max(1, rows_total / (W * rows_per_col_max));
 
+    // y→bin 매핑은 x 와 무관 — 컬럼마다 재계산하지 않고 1회 계산
+    std::vector<int> y_lo(H), y_hi(H);
+    for(int y=0; y<H; y++){
+        double f_top = g_f1 - (y       / (double)H) * f_span;
+        double f_bot = g_f1 - ((y+1.0) / (double)H) * f_span;
+        int idx_lo = (int)std::floor(std::min(f_top, f_bot));
+        int idx_hi = (int)std::ceil(std::max(f_top, f_bot));
+        if(idx_lo < 0) idx_lo = 0;
+        if(idx_hi > (int)fft_sz) idx_hi = fft_sz;
+        if(idx_hi <= idx_lo) idx_hi = idx_lo + 1;
+        y_lo[y] = idx_lo; y_hi[y] = idx_hi;
+    }
+
     for(int x=0; x<W; x++){
         double t_a = g_t0 + (x      / (double)W) * t_span;
         double t_b = g_t0 + ((x+1)  / (double)W) * t_span;
@@ -642,23 +570,17 @@ void rebuild_texture(float view_db_min, float view_db_max){
             uint8_t* cm_ptr = col_max.data();
             for(int k=0; k<n_br; k++){
                 int b0 = br_lo[k], b1 = br_hi[k];
+                // 브랜치리스 max — 지배 바이트 루프 SIMD 벡터화 허용 (결과 동일)
                 for(int b=b0; b<b1; b++)
-                    if(rb_ptr[b] > cm_ptr[b]) cm_ptr[b] = rb_ptr[b];
+                    cm_ptr[b] = std::max(cm_ptr[b], rb_ptr[b]);
             }
             if(++n_sampled >= rows_per_col_max) break;
         }
         // Y axis: max-hold across all bins mapped to each pixel row (avoids
         // missing strong signals when many bins fall into one pixel).
         for(int y=0; y<H; y++){
-            double f_top = g_f1 - (y       / (double)H) * f_span;
-            double f_bot = g_f1 - ((y+1.0) / (double)H) * f_span;
-            int idx_lo = (int)std::floor(std::min(f_top, f_bot));
-            int idx_hi = (int)std::ceil(std::max(f_top, f_bot));
-            if(idx_lo < 0) idx_lo = 0;
-            if(idx_hi > (int)fft_sz) idx_hi = fft_sz;
-            if(idx_hi <= idx_lo) idx_hi = idx_lo + 1;
             uint8_t mx = 0;
-            for(int idx = idx_lo; idx < idx_hi; idx++){
+            for(int idx = y_lo[y]; idx < y_hi[y]; idx++){
                 int bin = (idx < fft_half) ? (idx + fft_half) : (idx - fft_half);
                 if(col_max[bin] > mx) mx = col_max[bin];
             }
@@ -718,11 +640,6 @@ void register_dl_callbacks_once(NetClient* cli){
     if(s_bound == cli) return;
     if(!cli) return;
     s_bound = cli;
-    cli->on_lwf_list = [](const PktLwfList& list){
-        std::lock_guard<std::mutex> lk(g_remote_list_mtx);
-        g_remote_list = list;
-        g_remote_list_valid = true;
-    };
     // 다운로드는 기존 FILE_META/FILE_DATA 메커니즘 재사용. 저장 dir만 결정.
     // 다른 file transfer (region/share)와 충돌하지 않도록 HIST 파일명만 리다이렉트.
     auto prev_get_dir = cli->on_get_save_dir;
@@ -738,37 +655,18 @@ void register_dl_callbacks_once(NetClient* cli){
     };
     auto prev_meta = cli->on_file_meta;
     cli->on_file_meta = [prev_meta](const std::string& name, uint64_t total){
-        if(is_hist_filename(name)){
-            std::lock_guard<std::mutex> lk(g_dl_mtx);
-            g_dl.filename = name;
-            g_dl.total = total;
-            g_dl.recv = 0;
-            g_dl.last_done_bytes = 0;
-            g_dl.last_steady_us  = 0;
-            g_dl.bps_ewma        = 0.0;
-            return;   // HIST 파일은 Archive 패널에 노출되지 않게 chain 차단
-        }
+        if(is_hist_filename(name)) return;   // HIST 파일은 Archive 패널에 노출되지 않게 chain 차단
         if(prev_meta) prev_meta(name, total);
     };
     auto prev_prog = cli->on_file_progress;
     cli->on_file_progress = [prev_prog](const std::string& name, uint64_t done, uint64_t total){
-        if(is_hist_filename(name)){
-            std::lock_guard<std::mutex> lk(g_dl_mtx);
-            if(g_dl.filename == name){ g_dl.recv = done; g_dl.total = total; }
-            return;
-        }
+        if(is_hist_filename(name)) return;   // chain 차단 (패널 제거 후 진행률 표시 없음)
         if(prev_prog) prev_prog(name, done, total);
     };
     // on_file_done도 가로채야 Archive에 'IQ_*.wav 다운로드 완료' 같은 게 안 뜸
     auto prev_done = cli->on_file_done;
     cli->on_file_done = [prev_done](const std::string& path, const std::string& name){
-        if(is_hist_filename(name)){
-            std::lock_guard<std::mutex> lk(g_dl_mtx);
-            if(g_dl.filename == name){ g_dl.recv = g_dl.total; }
-            // HIST file panel 자동 갱신 트리거
-            g_join_list_dirty = true;
-            return;
-        }
+        if(is_hist_filename(name)) return;   // chain 차단
         if(prev_done) prev_done(path, name);
     };
 
@@ -776,76 +674,6 @@ void register_dl_callbacks_once(NetClient* cli){
     // Central archive 가 source-of-truth — 미션창에서 수동 다운로드.
 }
 
-// ── Info modal renderer ──────────────────────────────────────────────────
-void draw_info_modal(){
-    if(!g_info_modal_open) return;
-    LongWaterfall::FileHeader h{};
-    uint64_t sz = 0;
-    bool ok = read_header_only(g_info_path, h, sz);
-
-    ImGui::SetNextWindowSize(ImVec2(520.f, 0.f));
-    ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x*0.5f - 260.f,
-                                   ImGui::GetIO().DisplaySize.y*0.30f),
-                            ImGuiCond_Appearing);
-    ImGui::SetNextWindowBgAlpha(0.97f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f,0.10f,0.16f,1.f));
-    ImGui::Begin("Long-Waterfall Info##lwf_info", &g_info_modal_open,
-        ImGuiWindowFlags_NoResize|ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoCollapse);
-
-    if(!ok){
-        ImGui::TextDisabled("Cannot read header.");
-    } else {
-        std::string base = g_info_path;
-        size_t s = base.find_last_of('/');
-        if(s != std::string::npos) base = base.substr(s+1);
-
-        int off_h = header_utc_offset(h);
-        // row_rate 를 정수로 자르면 안 된다 — Central 아카이브는 18.78Hz 같은 비정수라
-        // 18 로 잘리면 Duration/Stop 이 4.2% 부풀고, 같은 화면의 float 툴팁과 어긋난다.
-        float row_rate = std::max(1.0f, h.row_rate_hz);
-        uint64_t dur_sec = (uint64_t)(hist_rows_from_header(h, sz) / row_rate);
-        uint64_t stop_utc = h.start_utc_unix + dur_sec;
-
-        const float L = 110.f;
-        auto row = [&](const char* k, const std::string& v){
-            ImGui::Text("%s", k); ImGui::SameLine(L);
-            ImGui::TextWrapped("%s", v.c_str());
-        };
-        row("File:",       base);
-        row("Path:",       g_info_path);
-        ImGui::Separator();
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%.4f MHz", h.center_freq_hz / 1e6);
-        row("CF:",         buf);
-        snprintf(buf, sizeof(buf), "%.3f MSPS", h.sample_rate_hz / 1e6);
-        row("SR:",         buf);
-        unsigned fft_disp = h.fft_input_size > 0 ? h.fft_input_size : h.fft_size;
-        snprintf(buf, sizeof(buf), "%u", fft_disp);
-        row("FFT:",        buf);
-        snprintf(buf, sizeof(buf), "%.1f / %.1f dB", h.db_min, h.db_max);
-        row("File range:", buf);
-        if(h.station_lon != 0.0f){
-            snprintf(buf, sizeof(buf), "%.4f°", h.station_lon);
-            row("Host lon:", buf);
-        }
-        ImGui::Separator();
-        row("Start:",      fmt_local_time(h.start_utc_unix, off_h));
-        row("Stop:",       fmt_local_time(stop_utc, off_h));
-        row("Duration:",   fmt_duration_hms(dur_sec));
-        ImGui::Separator();
-        snprintf(buf, sizeof(buf), "%.2f MB", sz / 1048576.0);
-        row("Size:",       buf);
-    }
-    ImGui::Spacing();
-    if(ImGui::Button("Close", ImVec2(80, 0))
-       || ImGui::IsKeyPressed(ImGuiKey_Escape, false)){
-        g_info_modal_open = false;
-    }
-    ImGui::End();
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar();
-}
 
 } // anon
 
@@ -863,9 +691,6 @@ void draw_modal(FFTViewer& v, NetClient* cli){
     // HIST 모달 새로 열릴 때마다 file panel 기본 open + HOST 탭 활성.
     static bool s_prev_open = false;
     bool first_open = (v.lwf_modal_open && !s_prev_open);
-    if(first_open){
-        g_files_panel_open = true;
-    }
     s_prev_open = v.lwf_modal_open;
     if(!v.lwf_modal_open) return;
     // 미션 모달 위에 떠올라야 ESC가 이 창에 작용.
@@ -891,21 +716,13 @@ void draw_modal(FFTViewer& v, NetClient* cli){
     // S키 file-panel 토글 제거 (v4.0): mission 창에서 파일 선택해 진입.
     // 우측 file panel 자체도 항상 닫힌 채 — viewer는 viewer 본연만 담당.
     bool modal_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
-    g_files_panel_open = false;
     // ESC로 모달 닫기 (titlebar X 없음 보완).
     if(modal_focused && ImGui::IsKeyPressed(ImGuiKey_Escape, false)){
         v.lwf_modal_open = false;
     }
 
     ImVec2 win_sz = ImGui::GetContentRegionAvail();
-    constexpr float kSplitW = 6.f;
-    constexpr float kRightMin = 0.10f;
-    constexpr float kRightMax = 0.55f;
-    if(g_right_ratio < kRightMin) g_right_ratio = kRightMin;
-    if(g_right_ratio > kRightMax) g_right_ratio = kRightMax;
-    float right_w = g_files_panel_open ? std::max(160.f, win_sz.x * g_right_ratio) : 0.f;
-    float split_w = g_files_panel_open ? kSplitW : 0.f;
-    float view_w  = std::max(200.f, win_sz.x - right_w - split_w);
+    float view_w  = std::max(200.f, win_sz.x);
 
     // ── Left: viewer ─────────────────────────────────────────────────────
     // 정보 영역만 작은 패딩, 이미지는 child 가장자리까지 꽉 차게.
@@ -1306,347 +1123,10 @@ void draw_modal(FFTViewer& v, NetClient* cli){
     }
     ImGui::EndChild();
 
-    // ── Splitter + Right file list — file panel이 열려있을 때만 ─────────
-    if(g_files_panel_open){
-        ImGui::SameLine(0,0);
-        ImVec2 sp_pos = ImGui::GetCursorScreenPos();
-        ImGui::InvisibleButton("##lwf_split", ImVec2(kSplitW, win_sz.y));
-        bool sp_hov = ImGui::IsItemHovered();
-        bool sp_act = ImGui::IsItemActive();
-        if(sp_hov || sp_act) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-        if(sp_act){
-            float new_right = (io.DisplaySize.x - io.MousePos.x) / io.DisplaySize.x;
-            g_right_ratio = std::max(kRightMin, std::min(kRightMax, new_right));
-            g_right_saved = g_right_ratio;
-        }
-        ImGui::GetWindowDrawList()->AddRectFilled(
-            sp_pos, ImVec2(sp_pos.x + kSplitW, sp_pos.y + win_sz.y),
-            sp_act ? IM_COL32(120,140,200,255) : IM_COL32(50,55,70,255));
-
-        ImGui::SameLine(0,0);
-        ImGui::BeginChild("##lwf_files", ImVec2(right_w, win_sz.y), true);
-
-        bool is_join_mode = (cli != nullptr);
-
-        // ── 상단 HISTORY 헤더 (ARCHIVE 동일 패턴 — BeginTabBar + TabActive 색) ─
-        ImGui::PushStyleColor(ImGuiCol_Tab,        ImVec4(0.12f,0.12f,0.16f,1.f));
-        ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.20f,0.30f,0.45f,1.f));
-        ImGui::PushStyleColor(ImGuiCol_TabActive,  ImVec4(0.15f,0.40f,0.65f,1.f));
-        if(ImGui::BeginTabBar("##lwf_hist_tabs")){
-            if(ImGui::BeginTabItem("HISTORY")) ImGui::EndTabItem();
-            ImGui::EndTabBar();
-        }
-        ImGui::PopStyleColor(3);
-
-        // Archive / DB Archive와 동일 포맷 — FFTViewer::format_file_info 헬퍼 재사용
-        auto fmt_arch_info = [](uint32_t rows, float row_rate, uint64_t bytes) -> std::string {
-            if(row_rate < 0.5f) row_rate = 5.0f;
-            double sec = (double)rows / row_rate;
-            return FFTViewer::format_file_info(sec, bytes);
-        };
-
-        // LIVE section (v4.6.0 제거): JOIN은 실시간 hist 스트림을 받지 않음.
-        // 미션창의 archive 다운로드로 대체.
-
-        // ── HOST section ───────────────────────────────────────────────
-        ImGui::SetNextItemOpen(true, ImGuiCond_Once);
-        ImGui::SetNextItemAllowOverlap();   // CollapsingHeader 위에 SmallButton 얹기 위함
-        bool host_open = ImGui::CollapsingHeader("HOST##lwf_host_sec",
-            ImGuiTreeNodeFlags_DefaultOpen);
-        // Report 패턴 동일 — 헤더 우측 안쪽 SmallButton (Reload)
-        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 60.f);
-        if(ImGui::SmallButton("Reload##lwf_host_reload")){
-            if(is_join_mode) cli->cmd_lwf_list_req();
-            else             g_host_list_dirty = true;
-        }
-
-        if(host_open){
-
-            // Build HOST rows
-            struct Row {
-                std::string id; std::string base;
-                uint64_t size; uint32_t rows;
-                float row_rate; bool is_live; bool is_remote;
-                // hover tooltip 용
-                uint64_t cf_hz = 0;
-                uint64_t start_utc = 0;
-                char     station_name[32] = {0};
-                float    station_lat = 0.f;
-                float    station_lon = 0.f;
-            };
-            std::vector<Row> host_rows;
-            if(is_join_mode){
-                std::lock_guard<std::mutex> lk(g_remote_list_mtx);
-                if(g_remote_list_valid){
-                    for(uint16_t i=0;i<g_remote_list.count;i++){
-                        const auto& e = g_remote_list.entries[i];
-                        Row r; r.id = e.filename; r.base = e.filename;
-                        r.size = e.size_bytes; r.rows = e.num_rows;
-                        r.row_rate = LongWaterfall::DEFAULT_ROW_RATE_HZ;
-                        r.is_live = false; r.is_remote = true;
-                        r.cf_hz = e.center_freq_hz;
-                        r.start_utc = e.start_utc;
-                        memcpy(r.station_name, e.station_name, sizeof(r.station_name));
-                        r.station_lat = e.station_lat;
-                        r.station_lon = e.station_lon;
-                        host_rows.push_back(std::move(r));
-                    }
-                }
-            } else {
-                if(g_host_list_dirty){
-                    g_host_files.clear();
-                    // Scan hist/host + legacy long_waterfall (옛 파일 호환)
-                    auto scan_one = [&](const std::string& dir){
-                        DIR* d = opendir(dir.c_str());
-                        if(!d) return;
-                        struct dirent* de;
-                        while((de = readdir(d)) != nullptr){
-                            const char* n = de->d_name;
-                            if(!n || n[0]=='.') continue;
-                            if(!is_hist_filename(n)) continue;
-                            std::string full = dir + "/" + n;
-                            LongWaterfall::FileHeader hh{}; uint64_t fsz=0;
-                            if(!read_header_only(full, hh, fsz)) continue;
-                            HistFileEntry e; e.path=full; e.base=n;
-                            e.start_utc=hh.start_utc_unix; e.size=fsz;
-                            g_host_files.push_back(std::move(e));
-                        }
-                        closedir(d);
-                    };
-                    scan_one(BEWEPaths::hist_host_dir());
-                    scan_one(BEWEPaths::recordings_dir() + "/long_waterfall");  // legacy
-                    std::sort(g_host_files.begin(), g_host_files.end(),
-                        [](const HistFileEntry& a, const HistFileEntry& b){ return a.start_utc > b.start_utc; });
-                    g_host_list_dirty = false;
-                }
-                // Active LIVE file is shown only in the LIVE tab — skip here.
-                for(auto& e : g_host_files){
-                    if(e.path == live_path) continue;
-                    LongWaterfall::FileHeader hh{}; uint64_t fsz=0;
-                    read_header_only(e.path, hh, fsz);
-                    Row r; r.id = e.path; r.base = e.base; r.size = e.size;
-                    r.rows = (uint32_t)hist_rows_from_header(hh, fsz);
-                    r.row_rate = hh.row_rate_hz;
-                    r.is_live = false; r.is_remote = false;
-                    r.cf_hz = hh.center_freq_hz;
-                    r.start_utc = hh.start_utc_unix;
-                    memcpy(r.station_name, hh.station_name, sizeof(r.station_name));
-                    r.station_lat = hh.station_lat;
-                    r.station_lon = hh.station_lon;
-                    host_rows.push_back(std::move(r));
-                }
-            }
-
-            // HOST tab never shows files whose name contains "live" — those
-            // belong in the LIVE tab regardless of recording state or STREAM.
-            host_rows.erase(std::remove_if(host_rows.begin(), host_rows.end(),
-                [](const Row& r){
-                    const std::string& s = r.base;
-                    for(size_t i = 0; i + 4 <= s.size(); i++){
-                        char c0 = s[i],   c1 = s[i+1], c2 = s[i+2], c3 = s[i+3];
-                        auto lc = [](char c){ return (c>='A'&&c<='Z')?(char)(c+32):c; };
-                        if(lc(c0)=='l' && lc(c1)=='i' && lc(c2)=='v' && lc(c3)=='e') return true;
-                    }
-                    return false;
-                }), host_rows.end());
-
-            for(auto& r : host_rows){
-                bool sel = (g_selected.count(r.id) > 0) || (g_sel_path == r.id);
-                ImGui::PushID(r.id.c_str());
-                // ARCHIVE draw_arch_file 동일 패턴: Selectable(filename) + SameLine(fn_w+8) + TextDisabled.
-                float pw   = ImGui::GetContentRegionAvail().x;
-                float fn_w = pw * 0.66f;
-                std::string nm = strip_hist_ext(r.base);
-                if(r.is_live) nm = "[LIVE] " + nm;
-                std::string info = fmt_arch_info(r.rows, r.row_rate, r.size);
-                if(r.is_live)
-                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(80,220,80,255));
-                if(ImGui::Selectable(nm.c_str(), sel,
-                       ImGuiSelectableFlags_SpanAllColumns, ImVec2(pw, 0))){
-                    bool ctrl = ImGui::GetIO().KeyCtrl;
-                    int sec = r.is_remote ? 2 : 1;
-                    hist_click_select(r.id, sec, ctrl, /*plain_opens=*/true,
-                        [&]{ if(!r.is_remote && g_open.path != r.id) open_file(r.id); });
-                }
-                if(r.is_live) ImGui::PopStyleColor();
-                bool item_hov_h = ImGui::IsItemHovered();
-                if(item_hov_h){
-                    float rr = r.row_rate>0.5f ? r.row_rate : 5.0f;
-                    uint64_t end_utc = r.start_utc + (uint64_t)((double)r.rows/rr);
-                    hist_row_tooltip(r.station_name, r.station_lat, r.station_lon,
-                                     r.cf_hz, r.start_utc, end_utc, r.is_live);
-                }
-                {
-                    float tw = ImGui::CalcTextSize(info.c_str()).x;
-                    ImGui::SameLine(pw - tw - 4.f);
-                    ImGui::TextDisabled("%s", info.c_str());
-                }
-                if(item_hov_h && ImGui::IsMouseClicked(ImGuiMouseButton_Right)){
-                    g_ctx_path = r.id; g_sel_path = r.id;
-                    ImGui::OpenPopup("##lwf_host_ctx");
-                }
-                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 8));
-                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,  ImVec2(8, 6));
-                if(g_ctx_path == r.id && ImGui::BeginPopup("##lwf_host_ctx")){
-                    if(is_join_mode && r.is_remote){
-                        if(ImGui::MenuItem("Download")){
-                            cli->cmd_lwf_dl_req(r.id.c_str());
-                        }
-                    } else {
-                        ImGui::BeginDisabled();
-                        ImGui::MenuItem("Download");
-                        ImGui::EndDisabled();
-                    }
-                    // Delete: HOST 모드 = local 삭제, JOIN 모드 + remote = host에 삭제 요청 (LWF_DELETE_REQ)
-                    bool can_del_local  = (!is_join_mode && !r.is_live && !r.is_remote);
-                    bool can_del_remote = ( is_join_mode &&  r.is_remote);
-                    if(can_del_local || can_del_remote){
-                        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255,80,80,255));
-                        if(ImGui::MenuItem("Delete")){
-                            int sec = can_del_local ? 1 : 2;
-                            hist_delete_one(r.id, sec, cli);
-                            g_selected.erase(r.id);
-                        }
-                        ImGui::PopStyleColor();
-                    } else {
-                        ImGui::BeginDisabled();
-                        ImGui::MenuItem("Delete");
-                        ImGui::EndDisabled();
-                    }
-                    ImGui::EndPopup();
-                }
-                ImGui::PopStyleVar(2);
-                ImGui::PopID();
-            }
-        }
-
-        // ── JOIN section ───────────────────────────────────────────────
-        ImGui::SetNextItemOpen(true, ImGuiCond_Once);
-        bool join_open = ImGui::CollapsingHeader("LOCAL##lwf_local_sec",
-            ImGuiTreeNodeFlags_DefaultOpen);
-
-        if(join_open){
-            // Poll dir mtime
-            struct stat dst{};
-            time_t cur_mtime = 0;
-            if(stat(BEWEPaths::hist_join_dir().c_str(), &dst) == 0) cur_mtime = dst.st_mtime;
-            if(cur_mtime != g_join_dir_mtime || g_join_list_dirty){
-                g_join_dir_mtime = cur_mtime;
-                g_join_list_dirty = false;
-                g_join_files.clear();
-                DIR* d = opendir(BEWEPaths::hist_join_dir().c_str());
-                if(d){
-                    struct dirent* de;
-                    while((de = readdir(d)) != nullptr){
-                        const char* n = de->d_name;
-                        if(!n || n[0]=='.') continue;
-                        if(!is_hist_filename(n)) continue;
-                        std::string full = BEWEPaths::hist_join_dir() + "/" + n;
-                        LongWaterfall::FileHeader hh{}; uint64_t fsz=0;
-                        if(!read_header_only(full, hh, fsz)) continue;
-                        HistFileEntry e; e.path=full; e.base=n;
-                        e.start_utc=hh.start_utc_unix; e.size=fsz;
-                        g_join_files.push_back(std::move(e));
-                    }
-                    closedir(d);
-                }
-                std::sort(g_join_files.begin(), g_join_files.end(),
-                    [](const HistFileEntry& a, const HistFileEntry& b){ return a.start_utc > b.start_utc; });
-            }
-            // 진행 중인 다운로드 표시 (Archive와 동일 렌더링 — bytes + % + 속도)
-            {
-                std::lock_guard<std::mutex> lk(g_dl_mtx);
-                if(g_dl.total > 0 && g_dl.recv < g_dl.total){
-                    FFTViewer::FileXfer x{};
-                    x.filename    = g_dl.filename;
-                    x.total_bytes = g_dl.total;
-                    x.done_bytes  = g_dl.recv;
-                    x.dir         = FFTViewer::FileXfer::DIR_DOWNLOAD;
-                    x.last_done_bytes = g_dl.last_done_bytes;
-                    x.last_steady_us  = g_dl.last_steady_us;
-                    x.bps_ewma        = g_dl.bps_ewma;
-                    ImGui::Indent(8.f);
-                    FFTViewer::render_file_xfer_row(x);
-                    ImGui::Unindent(8.f);
-                    // EWMA 상태 다시 저장
-                    g_dl.last_done_bytes = x.last_done_bytes;
-                    g_dl.last_steady_us  = x.last_steady_us;
-                    g_dl.bps_ewma        = x.bps_ewma;
-                }
-            }
-
-            for(auto& e : g_join_files){
-                bool sel = (g_selected.count(e.path) > 0) || (g_sel_path == e.path);
-                ImGui::PushID(e.path.c_str());
-                LongWaterfall::FileHeader hh{}; uint64_t fsz=0;
-                read_header_only(e.path, hh, fsz);
-                uint32_t rows_ct = (uint32_t)hist_rows_from_header(hh, fsz);
-                // ARCHIVE 동일 패턴
-                float pw   = ImGui::GetContentRegionAvail().x;
-                float fn_w = pw * 0.66f;
-                std::string info = fmt_arch_info(rows_ct, hh.row_rate_hz, e.size);
-                std::string nm_j = strip_hist_ext(e.base);
-                if(ImGui::Selectable(nm_j.c_str(), sel,
-                       ImGuiSelectableFlags_SpanAllColumns, ImVec2(pw, 0))){
-                    bool ctrl = ImGui::GetIO().KeyCtrl;
-                    hist_click_select(e.path, 3, ctrl, /*plain_opens=*/true,
-                        [&]{ if(g_open.path != e.path) open_file(e.path); });
-                }
-                bool item_hov_j = ImGui::IsItemHovered();
-                if(item_hov_j){
-                    float rr = hh.row_rate_hz>0.5f ? hh.row_rate_hz : 5.0f;
-                    uint64_t end_utc = hh.start_utc_unix + (uint64_t)((double)rows_ct/rr);
-                    hist_row_tooltip(hh.station_name, hh.station_lat, hh.station_lon,
-                                     hh.center_freq_hz, hh.start_utc_unix, end_utc, false);
-                }
-                {
-                    float tw = ImGui::CalcTextSize(info.c_str()).x;
-                    ImGui::SameLine(pw - tw - 4.f);
-                    ImGui::TextDisabled("%s", info.c_str());
-                }
-                if(item_hov_j && ImGui::IsMouseClicked(ImGuiMouseButton_Right)){
-                    g_ctx_path = e.path; g_sel_path = e.path;
-                    ImGui::OpenPopup("##lwf_local_ctx");
-                }
-                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 8));
-                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,  ImVec2(8, 6));
-                if(g_ctx_path == e.path && ImGui::BeginPopup("##lwf_local_ctx")){
-                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255,80,80,255));
-                    if(ImGui::MenuItem("Delete")){
-                        hist_delete_one(e.path, 3, nullptr);
-                        g_selected.erase(e.path);
-                    }
-                    ImGui::PopStyleColor();
-                    ImGui::EndPopup();
-                }
-                ImGui::PopStyleVar(2);
-                ImGui::PopID();
-            }
-
-            // Multi-select Del 키 — section 별로 분기.
-            if(ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) &&
-               ImGui::IsKeyPressed(ImGuiKey_Delete, false) &&
-               !g_selected.empty()){
-                std::vector<std::pair<std::string,int>> targets;
-                for(const auto& [id, sec] : g_selected){
-                    targets.push_back({id, sec});
-                }
-                for(const auto& [id, sec] : targets){
-                    hist_delete_one(id, sec, cli);
-                }
-                g_selected.clear();
-            }
-        }
-        ImGui::EndChild();    // ##lwf_files
-
-    } // if(g_files_panel_open)
-
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();   // WindowRounding
 
-    // Info modal (rendered as separate window, on top of viewer)
-    draw_info_modal();
 }
 
 void close_modal(){

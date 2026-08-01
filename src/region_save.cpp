@@ -117,30 +117,6 @@ static void make_filename(char* out, size_t sz,
 //   4. 박스필터 + 데시메이션 → 출력 샘플레이트 ≈ bw_hz
 //   5. WAV 저장
 // ─────────────────────────────────────────────────────────────────────────────
-void FFTViewer::region_save(){
-    if(!region.active){ return; }
-    if(rec_busy_flag.load()){ return; } // 이미 저장 중
-    if(!tm_iq_file_ready||tm_iq_fd<0){
-        region.active=false; return;
-    }
-
-    // 저장에 필요한 모든 값을 캡처 (스레드 안전)
-    rec_busy_flag.store(true);
-    rec_state=REC_BUSY;
-    rec_anim_timer=0.0f;
-    region.active=false;
-
-    // 백그라운드 스레드에서 실행
-    std::thread([this](){
-        do_region_save_work();
-        if(!sa_mode){  // SA 모드면 rec_state는 do_region_save_work 내에서 처리
-            rec_state=REC_SUCCESS;
-            rec_success_timer=3.0f;
-        }
-        rec_busy_flag.store(false);
-    }).detach();
-}
-
 std::string FFTViewer::do_region_save_work(){
     uint32_t sr=header.sample_rate;          // 61440000
     int64_t  max_total=tm_iq_total_samples;
@@ -290,6 +266,13 @@ std::string FFTViewer::do_region_save_work(){
 
     double phase = 0.0;
     double phase_inc = -2.0 * M_PI * (double)offset_hz / (double)sr;
+    // 복소 회전자 mix-down — 샘플당 sincos 제거 (61.44MSPS 에서 지배 비용).
+    // double 회전자 + 4096 샘플마다 위상 기준 재정규화 → 누적오차가 청감/스펙트럼
+    // 아래(-260dB 수준)로 유지된다. (비트동일 아님 — 오프라인 저장 경로 한정)
+    double rot_c = 1.0, rot_s = 0.0, cur_c = 1.0, cur_s = 0.0;
+    sincos(phase_inc, &rot_s, &rot_c);
+    sincos(phase,     &cur_s, &cur_c);
+    int renorm_cnt = 0;
 
     int64_t actual_out = 0;
     int64_t pos = samp_start;
@@ -318,16 +301,18 @@ std::string FFTViewer::do_region_save_work(){
             float si = in_buf[i*2  ] / 32768.0f;
             float sq = in_buf[i*2+1] / 32768.0f;
 
-            // Mix-down (sincos: sin/cos 동시 계산 — 결과는 개별 호출과 동일)
-            double sp_d, cp_d;
-            sincos(phase, &sp_d, &cp_d);
-            float cp = (float)cp_d;
-            float sp = (float)sp_d;
+            // Mix-down — 회전자 곱 1회 (sincos 는 4096 샘플마다 재정규화 시에만)
+            float cp = (float)cur_c;
+            float sp = (float)cur_s;
             float mi = si*cp - sq*sp;
             float mq = si*sp + sq*cp;
             phase += phase_inc;
             if(phase >  M_PI) phase -= 2.0*M_PI;
             if(phase < -M_PI) phase += 2.0*M_PI;
+            double nc = cur_c*rot_c - cur_s*rot_s;
+            double ns = cur_c*rot_s + cur_s*rot_c;
+            cur_c = nc; cur_s = ns;
+            if(++renorm_cnt >= 4096){ renorm_cnt = 0; sincos(phase, &cur_s, &cur_c); }
 
             if(decim <= 1){
                 // 데시메이션 없음 → 그대로 출력
@@ -344,7 +329,7 @@ std::string FFTViewer::do_region_save_work(){
                 int dly_idx = fir_dly_pos * 2;
                 fir_state[dly_idx    ] = mi;
                 fir_state[dly_idx + 1] = mq;
-                fir_dly_pos = (fir_dly_pos + 1) % (fir_ntaps - 1);
+                if(++fir_dly_pos >= fir_ntaps - 1) fir_dly_pos = 0;   // 샘플당 modulo 제거 (결과 동일)
 
                 decim_cnt++;
                 if(decim_cnt >= decim){

@@ -64,6 +64,11 @@ bool FFTViewer::float_win_capturing_mouse(){
     return root && strcmp(root->Name, "##main") != 0;
 }
 
+// ── 밴드플랜/카테고리 UI 세대 카운터 ─────────────────────────────────────
+// on_band_plan/on_band_cat 수신 시 bump → band bar 렌더가 이때만 스냅샷 재복사.
+// (종전엔 매 프레임 벡터 딥카피 + 256-엔트리 색테이블 재구성)
+static std::atomic<uint32_t> g_band_ui_gen{1};
+
 // ── 파일 크기 포맷 ────────────────────────────────────────────────────────
 
 static std::string fmt_filesize(const std::string& dir, const std::string& fname){
@@ -492,8 +497,33 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
                     if(mhz >= n.freq_lo_mhz && mhz <= n.freq_hi_mhz) return true;
                 return false;
             };
+            // 노치 → bin 구간 사전계산 (행당 1회) — 전 bin × 전 노치 MHz 변환 제거.
+            // 보수적 역변환(±2 bin)으로 후보 구간을 잡고 경계는 원판정으로 확정 → 포함
+            // 집합이 per-bin 검사와 동일.
+            static thread_local std::vector<std::pair<int,int>> mh_rng;
+            mh_rng.clear();
+            if(!nlocal_mh.empty() && hf_mh > 0 && nyq_mh > 0){
+                auto add_rng = [&](int b0, int b1){
+                    while(b0 <= b1 && !bin_in_notch_mh(b0)) b0++;
+                    while(b1 >= b0 && !bin_in_notch_mh(b1)) b1--;
+                    if(b0 <= b1) mh_rng.push_back({b0, b1});
+                };
+                for(auto& n : nlocal_mh){
+                    float fdlo = n.freq_lo_mhz - cf_mhz_mh;
+                    float fdhi = n.freq_hi_mhz - cf_mhz_mh;
+                    if(fdhi >= 0.0f)
+                        add_rng(std::max(0, (int)std::floor(std::max(fdlo,0.0f)/nyq_mh*hf_mh) - 2),
+                                std::min(hf_mh-1, (int)std::ceil(std::min(fdhi,nyq_mh)/nyq_mh*hf_mh) + 2));
+                    if(fdlo < 0.0f)
+                        add_rng(std::max(hf_mh, (int)std::floor(fft_size + std::max(fdlo,-nyq_mh)/nyq_mh*hf_mh) - 2),
+                                std::min(fft_size-1, (int)std::ceil(fft_size + std::min(fdhi,0.0f)/nyq_mh*hf_mh) + 2));
+                }
+                std::sort(mh_rng.begin(), mh_rng.end());
+            }
+            size_t ri = 0;
             for(int b = 0; b < fft_size; b++){
-                if(bin_in_notch_mh(b)) continue;  // 노치 bin은 갱신 스킵
+                while(ri < mh_rng.size() && b > mh_rng[ri].second) ri++;
+                if(ri < mh_rng.size() && b >= mh_rng[ri].first) continue;  // 노치 bin은 갱신 스킵
                 float v = rp[b];
                 float p = max_hold_spectrum[b] - DECAY_PER_FRAME;
                 max_hold_spectrum[b] = (v > p) ? v : p;
@@ -567,10 +597,10 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
     float cf_mhz_loc = (float)(header.center_frequency/1e6);
     float sr_mhz_loc = sr_mhz;
     // bin > 절대 MHz (IQ FFT: 양수 주파수=[0, hf-1], 음수=[hf, fft_size-1])
+    const int   hf_sp  = fft_size/2;
+    const float nyq_sp = sr_mhz_loc/2.0f;
     auto bin_to_mhz_sp = [&](int b) -> float {
-        int hf = fft_size/2;
-        float nyq = sr_mhz_loc/2.0f;
-        float fd = (b < hf) ? (float)b/hf*nyq : (float)(b-fft_size)/hf*nyq;
+        float fd = (b < hf_sp) ? (float)b/hf_sp*nyq_sp : (float)(b-fft_size)/hf_sp*nyq_sp;
         return cf_mhz_loc + fd;
     };
     // median (정렬 없이 O(N))
@@ -582,13 +612,17 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
         return v[k];
     };
     // spread (15~85 percentile 폭의 절반, 강한 outlier 배제된 변동 폭)
+    // full sort 대신 nth_element 2회 — 반드시 q85 먼저, 그 다음 좌측 파티션에서 q15
+    // (순서 바꾸면 두 번째 호출이 첫 결과를 흐트러뜨림). 값은 정렬본과 동일.
     auto spread_of = [](std::vector<float>& v) -> float {
         if(v.size() < 4) return 2.0f;
-        std::sort(v.begin(), v.end());
         size_t q15 = v.size() * 15 / 100;
         size_t q85 = v.size() * 85 / 100;
         if(q85 <= q15) return 2.0f;
-        return std::max(0.5f, (v[q85] - v[q15]) * 0.5f);
+        std::nth_element(v.begin(), v.begin()+q85, v.end());
+        float v85 = v[q85];
+        std::nth_element(v.begin(), v.begin()+q15, v.begin()+q85);
+        return std::max(0.5f, (v85 - v[q15]) * 0.5f);
     };
     if(!nlocal.empty()){
         std::lock_guard<std::mutex> lk(data_mtx);
@@ -602,7 +636,9 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
             float lo = nlocal[ni].freq_lo_mhz;
             float hi = nlocal[ni].freq_hi_mhz;
             float nbr_mhz = std::max((hi - lo) * 2.0f, bin_width_mhz * 64.0f);
-            std::vector<float> left_bins, right_bins, left_mh, right_mh;
+            // 프레임×노치당 힙할당 방지 (같은 함수 내 다른 스크래치와 동일 패턴)
+            static thread_local std::vector<float> left_bins, right_bins, left_mh, right_mh;
+            left_bins.clear(); right_bins.clear(); left_mh.clear(); right_mh.clear();
             // fd 구간 > 보수적 bin 윈도우 매핑 (±64 bin 마진) - 윈도우만 스캔,
             // per-bin float 비교는 기존과 동일하게 유지
             auto scan_bins = [&](int b0, int b1){
@@ -732,7 +768,8 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
     bool tm_on_edge = tm_active.load();
     auto collect_median_outward = [&](int start_px, int dir) -> float {
         // start_px에서 시작해 dir(-1=왼쪽, +1=오른쪽)으로 non-notch 픽셀 EDGE_WINDOW개 수집 후 median
-        std::vector<float> samples;
+        static thread_local std::vector<float> samples;
+        samples.clear();
         int p = start_px;
         while(p >= 0 && p < np && (int)samples.size() < EDGE_WINDOW){
             if(px_notch[p] < 0 && p < (int)current_spectrum.size()){
@@ -797,6 +834,18 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
             constexpr float AMP_SCALE = 0.3f;           // 진폭 배수 (sin taper로 경계는 자동 0)
             constexpr float WAVE_BIN_PER_CYCLE = 40.0f; // 40 bin당 1 파장 (더 완만, 덜 오밀조밀)
             float bin_width_mhz = (sr_mhz_loc > 0 && fft_size > 0) ? (sr_mhz_loc / (float)fft_size) : 1e-6f;
+            // 노치별 상수(cycles/위상 3개) 사전계산 — 픽셀마다 fmod 3회 재계산 방지 (동일식·동일값)
+            struct NotchWave { float cycles, ph1, ph2, ph3; };
+            static thread_local std::vector<NotchWave> nwave;
+            nwave.resize(nlocal.size());
+            for(size_t k=0;k<nlocal.size();k++){
+                float bw = nlocal[k].freq_hi_mhz - nlocal[k].freq_lo_mhz;
+                float notch_bin_cnt = std::max(1.0f, bw / bin_width_mhz);
+                nwave[k].cycles = std::max(0.5f, notch_bin_cnt / WAVE_BIN_PER_CYCLE);
+                nwave[k].ph1 = std::fmod(nlocal[k].freq_lo_mhz * 1234.567f, TWO_PI);
+                nwave[k].ph2 = std::fmod(nlocal[k].freq_lo_mhz * 2345.678f + 1.3f, TWO_PI);
+                nwave[k].ph3 = std::fmod(nlocal[k].freq_lo_mhz * 3456.789f + 2.7f, TWO_PI);
+            }
             for(int px=0;px<np;px++){
                 int ni = px_notch[px];
                 float v;
@@ -814,16 +863,11 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
                     tt = std::max(0.0f, std::min(1.0f, tt));
                     float h = tt*tt*(3.0f - 2.0f*tt);  // smoothstep
                     float base = v_L + h * (v_R - v_L);
-                    // ─ Layer 3: sin(πt) 테이퍼 × 3-sine 합성 변동 ─
-                    float bw = nlocal[ni].freq_hi_mhz - nlocal[ni].freq_lo_mhz;
-                    float notch_bin_cnt = std::max(1.0f, bw / bin_width_mhz);
-                    float cycles = std::max(0.5f, notch_bin_cnt / WAVE_BIN_PER_CYCLE);
-                    float ph1 = std::fmod(nlocal[ni].freq_lo_mhz * 1234.567f, TWO_PI);
-                    float ph2 = std::fmod(nlocal[ni].freq_lo_mhz * 2345.678f + 1.3f, TWO_PI);
-                    float ph3 = std::fmod(nlocal[ni].freq_lo_mhz * 3456.789f + 2.7f, TWO_PI);
-                    float wave = 0.55f * std::sin(tt * cycles * TWO_PI       + ph1)
-                               + 0.30f * std::sin(tt * cycles * TWO_PI * 1.7f + ph2)
-                               + 0.15f * std::sin(tt * cycles * TWO_PI * 2.3f + ph3);
+                    // ─ Layer 3: sin(πt) 테이퍼 × 3-sine 합성 변동 (상수는 nwave 사전계산) ─
+                    float cycles = nwave[ni].cycles;
+                    float wave = 0.55f * std::sin(tt * cycles * TWO_PI       + nwave[ni].ph1)
+                               + 0.30f * std::sin(tt * cycles * TWO_PI * 1.7f + nwave[ni].ph2)
+                               + 0.15f * std::sin(tt * cycles * TWO_PI * 2.3f + nwave[ni].ph3);
                     float taper = std::sin(tt * PI_CONST);  // 0 at t=0,1; 1 at t=0.5
                     float amp = (nlocal[ni].lo_spread + (nlocal[ni].hi_spread - nlocal[ni].lo_spread) * tt) * AMP_SCALE;
                     v = base + wave * amp * taper;
@@ -957,27 +1001,30 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
     }
     // 파워 축 그리드 라인 + 레이블 (모든 값 읽기 전용 — 클릭/편집 없음)
     // 드래그는 여전히 가능 (아래 pax InvisibleButton에서 처리)
-    for(int i=0;i<=10;i++){
-        float y  = gy + (float)i/10.0f * gh;
-        float db = display_power_max - (display_power_max - display_power_min) * (float)i / 10.0f;
-        if(i > 0 && i < 10)
-            dl->AddLine(ImVec2(gx,y),ImVec2(gx+gw,y),IM_COL32(60,60,60,100),1);
-        dl->AddLine(ImVec2(gx-5,y),ImVec2(gx,y),IM_COL32(100,100,100,200),1);
-
-        // i=0: 최상단 max 값 (상단 바 겹침 방지 위해 아래로 살짝 이동)
-        if(i == 0){
-            char lb[16]; snprintf(lb, sizeof(lb), "%.0f", db);
-            ImVec2 ts = ImGui::CalcTextSize(lb);
-            float lx = gx - 10 - ts.x;
-            float ly = y + 4;  // 짤림 방지 오프셋
-            dl->AddText(ImVec2(lx, ly), IM_COL32(200,200,200,255), lb);
-            continue;
+    // 라벨 문자열/폭은 표시범위가 바뀔 때만 재계산 (프레임당 snprintf+CalcTextSize 11회 제거)
+    {
+        static thread_local char  ax_lb[11][16];
+        static thread_local float ax_tsx[11], ax_tsy = 0.0f;
+        static thread_local float ax_pmin = 1e9f, ax_pmax = 1e9f;
+        if(ax_pmin != display_power_min || ax_pmax != display_power_max){
+            ax_pmin = display_power_min; ax_pmax = display_power_max;
+            for(int i=0;i<=10;i++){
+                float db = display_power_max - (display_power_max - display_power_min) * (float)i / 10.0f;
+                snprintf(ax_lb[i], sizeof(ax_lb[i]), "%.0f", db);
+                ImVec2 ts = ImGui::CalcTextSize(ax_lb[i]);
+                ax_tsx[i] = ts.x; ax_tsy = ts.y;
+            }
         }
-        char lb[16]; snprintf(lb, sizeof(lb), "%.0f", db);
-        ImVec2 ts = ImGui::CalcTextSize(lb);
-        float lx = gx - 10 - ts.x;
-        float ly = y - ts.y * 0.5f;
-        dl->AddText(ImVec2(lx, ly), IM_COL32(200,200,200,255), lb);
+        for(int i=0;i<=10;i++){
+            float y = gy + (float)i/10.0f * gh;
+            if(i > 0 && i < 10)
+                dl->AddLine(ImVec2(gx,y),ImVec2(gx+gw,y),IM_COL32(60,60,60,100),1);
+            dl->AddLine(ImVec2(gx-5,y),ImVec2(gx,y),IM_COL32(100,100,100,200),1);
+            float lx = gx - 10 - ax_tsx[i];
+            // i=0: 최상단 max 값 (상단 바 겹침 방지 위해 아래로 살짝 이동)
+            float ly = (i == 0) ? y + 4 : y - ax_tsy * 0.5f;
+            dl->AddText(ImVec2(lx, ly), IM_COL32(200,200,200,255), ax_lb[i]);
+        }
     }
 
     draw_freq_axis(dl,gx,gw,gy,gh,false);
@@ -985,27 +1032,32 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
 
     // ── Band Plan 14px 라벨 띠 (스펙트럼 상단) ───────────────────────────
     if(band_bar_active){
-        // Snapshot category id → RGB so we don't lock per band entry.
-        ImU32 cat_col[256] = {};
-        bool  cat_have[256] = {};
-        {
-            std::lock_guard<std::mutex> lk(HostBandCategories::g_mtx);
-            for(auto& c : HostBandCategories::g_cats){
-                if(!c.valid) continue;
-                cat_col[c.id]  = IM_COL32(c.r, c.g, c.b, 110);
-                cat_have[c.id] = true;
+        // 세대 게이트: 밴드플랜/카테고리 sync 수신 시에만 스냅샷 재구성.
+        static thread_local uint32_t band_seen_gen = 0;
+        static thread_local ImU32 cat_col[256];
+        static thread_local bool  cat_have[256];
+        static thread_local std::vector<BandSegment> bands;
+        uint32_t cur_gen = g_band_ui_gen.load(std::memory_order_acquire);
+        if(band_seen_gen != cur_gen){
+            band_seen_gen = cur_gen;
+            memset(cat_col, 0, sizeof(cat_col));
+            memset(cat_have, 0, sizeof(cat_have));
+            {   // Snapshot category id → RGB so we don't lock per band entry.
+                std::lock_guard<std::mutex> lk(HostBandCategories::g_mtx);
+                for(auto& c : HostBandCategories::g_cats){
+                    if(!c.valid) continue;
+                    cat_col[c.id]  = IM_COL32(c.r, c.g, c.b, 110);
+                    cat_have[c.id] = true;
+                }
             }
+            std::lock_guard<std::mutex> lk(band_mtx);
+            bands = band_segments;
         }
         ImU32 fallback_col = IM_COL32(160,160,160,110);
         // 뒤배경 (어두운 회색)
         dl->AddRectFilled(ImVec2(gx, band_bar_y),
                           ImVec2(gx+gw, band_bar_y+BAND_BAR_H),
                           IM_COL32(25,25,30,255));
-        static thread_local std::vector<BandSegment> bands;
-        {
-            std::lock_guard<std::mutex> lk(band_mtx);
-            bands = band_segments;
-        }
         float cf_mhz_b = (float)(header.center_frequency/1e6);
         float vis_lo = cf_mhz_b + ds, vis_hi = cf_mhz_b + de;
         for(auto& b : bands){
@@ -1046,8 +1098,6 @@ void FFTViewer::draw_spectrum_area(ImDrawList* dl, float full_x, float full_y, f
             }
             // 우클릭 → 컨텍스트 메뉴 (Add/Info/Delete, 위치별 분기)
             if(ImGui::IsMouseClicked(ImGuiMouseButton_Right)){
-                static char s_band_ctx_hit;  // 세션용 — popup 열 때 hit 여부 캡처
-                s_band_ctx_hit = hit ? 1 : 0;
                 ImGui::OpenPopup("##band_ctx");
             }
         }
@@ -1726,14 +1776,6 @@ void FFTViewer::draw_waterfall_area(ImDrawList* dl, float full_x, float full_y, 
                 else if(inside_box)               ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
             }
 
-            // Ctrl+좌클릭: SA 드래그 시작
-            if(ImGui::IsMouseClicked(ImGuiMouseButton_Left)&&in_wf&&ctrl&&
-               region.edit_mode==RegionSel::EDIT_NONE&&inside_box&&
-               false){ // SA panel removed
-                sa_drag_active = true;
-                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-            }
-
             // 편집 시작: 엣지는 클릭 즉시, 내부 이동은 드래그 시작 시점에
             if(ImGui::IsMouseClicked(ImGuiMouseButton_Left)&&in_wf&&!ctrl&&
                region.edit_mode==RegionSel::EDIT_NONE){
@@ -1753,10 +1795,6 @@ void FFTViewer::draw_waterfall_area(ImDrawList* dl, float full_x, float full_y, 
                     region.edit_mode=RegionSel::EDIT_MOVE; // 드래그 없으면 released에서 취소
                 }
             }
-
-            // SA 드래그 커서 추적 (Ctrl+좌클릭, edit_mode 없이 독립)
-            if(sa_drag_active && ImGui::IsMouseDown(ImGuiMouseButton_Left))
-                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 
             // 편집 중 (마우스 드래그)
             if(region.edit_mode!=RegionSel::EDIT_NONE&&ImGui::IsMouseDown(ImGuiMouseButton_Left)){
@@ -1793,11 +1831,6 @@ void FFTViewer::draw_waterfall_area(ImDrawList* dl, float full_x, float full_y, 
                     break;
                 default: break;
                 }
-            }
-
-            // SA 드롭: Ctrl+좌클릭 release
-            if(sa_drag_active && ImGui::IsMouseReleased(ImGuiMouseButton_Left)){
-                sa_drag_active = false;
             }
 
             // 편집 종료: time_start/end 재계산
@@ -3097,27 +3130,8 @@ void run_streaming_viewer(){
             }
         };
 
-        // 예약 녹음 리스트 수신 → 로컬 sched_entries 재구성
-        cli->on_sched_sync = [&](const PktSchedSync& sync){
-            std::lock_guard<std::mutex> lk(v.sched_mtx);
-            v.sched_entries.clear();
-            for(int i=0; i<sync.count && i<MAX_SCHED_ENTRIES; i++){
-                const auto& se = sync.entries[i];
-                if(!se.valid) continue;
-                FFTViewer::SchedEntry e;
-                e.start_time   = (time_t)se.start_time;
-                e.duration_sec = se.duration_sec;
-                e.freq_mhz     = se.freq_mhz;
-                e.bw_khz       = se.bw_khz;
-                e.status       = (FFTViewer::SchedEntry::Status)se.status;
-                e.op_index     = se.op_index;
-                strncpy(e.operator_name, se.operator_name, sizeof(e.operator_name)-1);
-                strncpy(e.target, se.target, sizeof(e.target)-1);
-                e.mission_year = (int)se.mission_year;
-                memcpy(e.mission_code, se.mission_code, sizeof(e.mission_code));
-                v.sched_entries.push_back(e);
-            }
-        };
+        // (SCHED 패널 삭제와 함께 on_sched_sync 미러 제거 — HOST 쪽 예약 녹음 로직은
+        //  cli_host 소유. GUI 는 더 이상 sched_entries 를 읽지 않는다.)
 
         // Central archive 파일 목록 / 다운로드 청크 → mission_view 캐시에 반영
         cli->on_mission_file_list = [&](const PktMissionFileList& page,
@@ -3206,18 +3220,22 @@ void run_streaming_viewer(){
                 strncpy(s.description, be.description, sizeof(s.description)-1);
                 v.band_segments.push_back(s);
             }
+            g_band_ui_gen.fetch_add(1, std::memory_order_release);
         };
         // Band categories: host pushes the full list. Mirror into HostBandCategories::g_cats
         // so any code (rendering, modal) can read by id without a separate JOIN-side store.
         cli->on_band_cat = [](const PktBandCatSync& cs){
-            std::lock_guard<std::mutex> lk(HostBandCategories::g_mtx);
-            HostBandCategories::g_cats.clear();
-            int n = std::min<int>((int)cs.count, MAX_BAND_CATEGORIES);
-            for(int i=0;i<n;i++){
-                const auto& c = cs.entries[i];
-                if(!c.valid) continue;
-                HostBandCategories::g_cats.push_back(c);
+            {
+                std::lock_guard<std::mutex> lk(HostBandCategories::g_mtx);
+                HostBandCategories::g_cats.clear();
+                int n = std::min<int>((int)cs.count, MAX_BAND_CATEGORIES);
+                for(int i=0;i<n;i++){
+                    const auto& c = cs.entries[i];
+                    if(!c.valid) continue;
+                    HostBandCategories::g_cats.push_back(c);
+                }
             }
+            g_band_ui_gen.fetch_add(1, std::memory_order_release);
         };
         // 콜백 등록 전에 도착한 BAND_*_SYNC 패킷 flush
         // (connect_fd 직후 host가 cached pkt를 push하는데 콜백 등록은 그보다 늦어 race 발생)
@@ -3728,64 +3746,6 @@ void run_streaming_viewer(){
             return std::string();
         };
 
-        // 오퍼레이터 목록 팝업 - 건너뜀 (바로 메인으로 진입)
-        bool op_popup_open = false;
-        while(op_popup_open && !glfwWindowShouldClose(win)){
-            glfwPollEvents();
-            int fw,fh; glfwGetFramebufferSize(win,&fw,&fh);
-            glViewport(0,0,fw,fh);
-            glClearColor(0.03f,0.05f,0.10f,1.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
-            ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplGlfw_NewFrame(); ImGui::NewFrame();
-            toggle_fullscreen();
-
-            const float OW=320.f, OH=240.f;
-            ImGui::SetNextWindowPos(ImVec2((fw-OW)*0.5f,(fh-OH)*0.5f));
-            ImGui::SetNextWindowSize(ImVec2(OW,OH));
-            ImGui::SetNextWindowBgAlpha(0.95f);
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,8.f);
-            ImGui::PushStyleColor(ImGuiCol_WindowBg,ImVec4(0.06f,0.08f,0.15f,1.f));
-            ImGui::Begin("##op_list_popup",nullptr,
-                ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|
-                ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar);
-
-            ImGui::SetWindowFontScale(1.1f);
-            ImGui::TextColored(ImVec4(0.4f,0.7f,1.f,1.f),"Connected Operators");
-            ImGui::SetWindowFontScale(1.0f);
-            ImGui::Separator(); ImGui::Spacing();
-
-            {
-                std::lock_guard<std::mutex> lk(cli->op_mtx);
-                if(cli->op_list.count==0){
-                    ImGui::TextDisabled("(Waiting...)");
-                } else {
-                    for(int i=0;i<cli->op_list.count;i++){
-                        auto& op=cli->op_list.ops[i];
-                        char buf[80];
-                        snprintf(buf,sizeof(buf),"%d. %s  [Tier%d]",
-                                 op.index, op.name, op.tier);
-                        bool is_me=(op.index==cli->my_op_index);
-                        if(is_me)
-                            ImGui::TextColored(ImVec4(0.3f,1.f,0.5f,1.f),"▶ %s",buf);
-                        else
-                            ImGui::Text("%s",buf);
-                    }
-                }
-            }
-            ImGui::Spacing();
-            float bw2=90.f;
-            ImGui::SetCursorPosX((OW-bw2)*0.5f);
-            if(ImGui::Button("ENTER",ImVec2(bw2,26)) ||
-               cli->op_list_updated.load()){
-                op_popup_open=false;
-            }
-            ImGui::End();
-            ImGui::PopStyleColor(); ImGui::PopStyleVar();
-            ImGui::Render();
-            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-            glfwSwapBuffers(win);
-        }
-
         // ── remote mode: 버퍼/텍스처 초기화 (HW 없음) ──────────────────
         // 첫 FFT 수신 전 기본 크기로 초기화 (수신 후 재조정됨)
         v.fft_size = DEFAULT_FFT_SIZE;
@@ -3810,7 +3770,7 @@ void run_streaming_viewer(){
     auto status_last    =std::chrono::steady_clock::now();
     auto sq_sync_last   =std::chrono::steady_clock::now();
     auto heartbeat_last =std::chrono::steady_clock::now();
-    long long cpu_last_idle=0, cpu_last_total=0, io_last_ms=0;
+    long long cpu_last_idle=0, cpu_last_total=0;
 
     auto read_cpu=[&](long long& idle, long long& total){
         FILE* f=fopen("/proc/stat","r"); if(!f){idle=total=0;return;}
@@ -3829,29 +3789,8 @@ void run_streaming_viewer(){
         fclose(f);
         return (total>0)?(float)(total-avail)/total*100.0f:0.0f;
     };
-    auto read_ghz=[&]()->float{
-        double sum=0; int cnt=0;
-        for(int c=0;c<256;c++){
-            char path[128];
-            snprintf(path,sizeof(path),"/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq",c);
-            FILE* f=fopen(path,"r"); if(!f) break;
-            long long khz=0; fscanf(f,"%lld",&khz); fclose(f);
-            sum+=khz; cnt++;
-        }
-        return cnt>0?(float)(sum/cnt/1e6):0.0f;
-    };
-    auto read_io_ms=[&]()->long long{
-        FILE* f=fopen("/proc/diskstats","r"); if(!f) return 0;
-        long long sum=0; char dev[32]; unsigned int maj,min_;
-        long long f1,f2,f3,f4,f5,f6,f7,f8,f9,io_ticks;
-        while(fscanf(f,"%u %u %31s %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %*[^\n]",
-                     &maj,&min_,dev,&f1,&f2,&f3,&f4,&f5,&f6,&f7,&f8,&f9,&io_ticks)==13){
-            if(dev[0]=='s'&&dev[2]>='a'&&dev[2]<='z'&&dev[3]=='\0') sum+=io_ticks;
-            else if(dev[0]=='n'&&dev[1]=='v'&&strstr(dev,"p")==nullptr) sum+=io_ticks;
-            else if(dev[0]=='v'&&dev[1]=='d'&&dev[3]=='\0') sum+=io_ticks;
-        }
-        fclose(f); return sum;
-    };
+    // (read_ghz / read_io_ms 제거 — JOIN 화면 어디에도 표시되지 않는 값을 매초
+    //  sysfs 순회 + /proc/diskstats 파싱으로 만들고 있었다. HOST 쪽은 cli_host.cpp.)
     // sysfs 에 안 뜨는 I2C 연료게이지(Pi + X1200 UPS 등) 폴백: ups-log 데몬이 남기는
     // ~/ups_history.csv 마지막 줄. 형식 = timestamp,volt,soc,ac,status
     // 파일이 없거나 5분 이상 갱신이 없으면 UPS 가 없는 것으로 본다(255).
@@ -3899,7 +3838,6 @@ void run_streaming_viewer(){
         return read_bat_pct_csv(ac_out); // sysfs 없음 → UPS CSV 폴백
     };
     read_cpu(cpu_last_idle,cpu_last_total);
-    io_last_ms=read_io_ms();
 
     // ── 채팅/오퍼레이터 UI 상태 ──────────────────────────────────────────
     bool  chat_open        = false;
@@ -4116,13 +4054,8 @@ void run_streaming_viewer(){
                 long long d_idle=idle-cpu_last_idle, d_total=total-cpu_last_total;
                 float cpu_pct=(d_total>0)?(1.0f-(float)d_idle/d_total)*100.0f:0.0f;
                 cpu_last_idle=idle; cpu_last_total=total; cpu_last_time=now;
-                long long io_now=read_io_ms();
-                float io_pct=std::min(100.0f,(float)(io_now-io_last_ms)/10.0f);
-                io_last_ms=io_now;
                 v.sysmon_cpu=cpu_pct;
-                v.sysmon_ghz=read_ghz();
                 v.sysmon_ram=read_ram();
-                v.sysmon_io =io_pct;
                 { uint8_t bac=2; v.sysmon_bat.store(read_bat_pct(&bac)); v.sysmon_bat_ac.store(bac); }
                 // 네트워크 레이트 (1초 창) — HOST: Central 업로드 / JOIN: Central 다운로드.
                 // 누적 카운터를 read-only 로 샘플링 (기존 [HOST]/[JOIN] 통계 로거와 무간섭).
@@ -5190,7 +5123,7 @@ void run_streaming_viewer(){
 
             // 패널이 열릴 때: 마지막 활성 탭 복원 (없으면 STATUS)
             if(!prev_right_visible_outer){
-                if(!stat_open && !v.sched_panel_open)
+                if(!stat_open)
                     stat_open = true;
             }
             prev_right_visible_outer = true;
@@ -5350,8 +5283,6 @@ void run_streaming_viewer(){
                                (int)vv.sysmon_ram, "Download", rbuf, nullptr);
                 }
             };
-
-            v.sched_panel_open = false;
 
             // ── 패널 콘텐츠 영역 ─────────────────────────────────────────
             dl->AddRectFilled(ImVec2(rpx,rp_content_y),ImVec2(disp_w,content_y+content_h),IM_COL32(12,12,15,255));
@@ -5889,8 +5820,9 @@ void run_streaming_viewer(){
                                                     ? IM_COL32(150,150,150,255)
                                                     : (blink?IM_COL32(255,80,80,255):IM_COL32(200,60,60,255));
                                                 ImGui::PushStyleColor(ImGuiCol_Text, iq_col);
-                                                // 녹음 중 파일 크기: 0.5초마다만 갱신
+                                                // 녹음 중 파일 크기: 0.5초마다만 갱신 (무한증식 방지 상한)
                                                 static std::unordered_map<std::string,std::pair<float,std::string>> rec_sz_cache;
+                                                if(rec_sz_cache.size() > 512) rec_sz_cache.clear();
                                                 auto& rc=rec_sz_cache[re.filename];
                                                 if(t2-rc.first >= 0.5f){ rc.first=t2; rc.second=fmt_filesize("",re.path); }
                                                 int iq_rec_secs=0;
@@ -6072,6 +6004,7 @@ void run_streaming_viewer(){
                                                 : (blink?IM_COL32(255,80,80,255):IM_COL32(200,60,60,255));
                                             ImGui::PushStyleColor(ImGuiCol_Text, col_active);
                                             static std::unordered_map<std::string,std::pair<float,std::string>> aud_sz_cache;
+                                            if(aud_sz_cache.size() > 512) aud_sz_cache.clear();
                                             auto& ac=aud_sz_cache[re.filename];
                                             if(t2-ac.first >= 0.5f){ ac.first=t2; ac.second=fmt_filesize("",re.path); }
                                             char rec_lbl[512];
@@ -6155,294 +6088,6 @@ void run_streaming_viewer(){
             }
 
 
-            // ── SCHED 패널 ────────────────────────────────────────────────
-            if(v.sched_panel_open){
-                float px=rpx, py=rp_content_y, pw=disp_w-rpx, ph=rp_content_h;
-                ImGui::SetNextWindowPos(ImVec2(px,py));
-                ImGui::SetNextWindowSize(ImVec2(pw,ph));
-                ImGui::SetNextWindowBgAlpha(0.0f);
-                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8,8));
-                ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0,0,0,0));
-                ImGui::Begin("##sched_panel", nullptr,
-                    ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|
-                    ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar|
-                    ImGuiWindowFlags_NoDecoration);
-
-                ImGui::PushStyleColor(ImGuiCol_Tab,       ImVec4(0.12f,0.12f,0.16f,1.f));
-                ImGui::PushStyleColor(ImGuiCol_TabHovered,ImVec4(0.20f,0.30f,0.45f,1.f));
-                ImGui::PushStyleColor(ImGuiCol_TabActive, ImVec4(0.15f,0.40f,0.65f,1.f));
-                if(ImGui::BeginTabBar("##sched_tabs")){
-                    if(ImGui::BeginTabItem("SCHED")) ImGui::EndTabItem();
-                    ImGui::EndTabBar();
-                }
-                ImGui::PopStyleColor(3);
-
-                ImGui::Separator();
-
-                // ── Input form ───────────────────────────────────────────
-                // Time만 3분할 (HH:MM:SS) + 화살표 키 step. 나머지는 단일 입력.
-                static int sh=0, sm=0, ss=0;
-                static float sdur     = 60.f;     // seconds
-                static float sfreq    = 100.0f;   // MHz
-                static float sbw_mhz  = 0.025f;   // MHz (= 25 kHz)
-                static char  starget[32] = "";
-
-                // 첫 진입 시 Time을 현재 시각으로 자동 채움
-                static bool sched_time_inited = false;
-                if(!sched_time_inited){
-                    time_t now0 = time(nullptr);
-                    struct tm tm0; KST::to_tm(now0, tm0);
-                    sh = tm0.tm_hour; sm = tm0.tm_min; ss = tm0.tm_sec;
-                    sched_time_inited = true;
-                }
-
-                const float LBL_W = 88.f;
-                const float TIME_BOX_W = 36.f;
-                const float INP_W      = 140.f;
-
-                // Time 박스: 가운데 정렬 + ↑/↓ 화살표 키로 step ±1 (포커스 시)
-                auto step_int = [&](const char* id, int* val, int min_v, int max_v){
-                    char preview[16];
-                    snprintf(preview, sizeof(preview), "%d", *val);
-                    float text_w = ImGui::CalcTextSize(preview).x;
-                    float pad_x = std::max(2.f, (TIME_BOX_W - text_w) * 0.5f - 4.f);
-                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
-                                        ImVec2(pad_x, ImGui::GetStyle().FramePadding.y));
-                    ImGui::SetNextItemWidth(TIME_BOX_W);
-                    ImGui::InputInt(id, val, 0, 0);
-                    bool focused = ImGui::IsItemFocused();
-                    ImGui::PopStyleVar();
-                    if(*val < min_v) *val = min_v;
-                    if(*val > max_v) *val = max_v;
-                    if(focused){
-                        if(ImGui::IsKeyPressed(ImGuiKey_UpArrow))
-                            *val = std::min(max_v, *val + 1);
-                        if(ImGui::IsKeyPressed(ImGuiKey_DownArrow))
-                            *val = std::max(min_v, *val - 1);
-                    }
-                };
-
-                // ── Time (HH:MM:SS) ─────────────────────────────────────
-                ImGui::AlignTextToFramePadding();
-                ImGui::Text("Time"); ImGui::SameLine(LBL_W);
-                step_int("##sh", &sh, 0, 23); ImGui::SameLine(0,3);
-                ImGui::Text(":"); ImGui::SameLine(0,3);
-                step_int("##sm", &sm, 0, 59); ImGui::SameLine(0,3);
-                ImGui::Text(":"); ImGui::SameLine(0,3);
-                step_int("##ss", &ss, 0, 59);
-
-                // ── Duration (s) ────────────────────────────────────────
-                ImGui::AlignTextToFramePadding();
-                ImGui::Text("Duration"); ImGui::SameLine(LBL_W);
-                ImGui::SetNextItemWidth(INP_W);
-                ImGui::InputFloat("##dur", &sdur, 0.f, 0.f, "%.0f s");
-                if(sdur < 1.f) sdur = 1.f;
-
-                // ── Frequency (MHz) ─────────────────────────────────────
-                ImGui::AlignTextToFramePadding();
-                ImGui::Text("Frequency"); ImGui::SameLine(LBL_W);
-                ImGui::SetNextItemWidth(INP_W);
-                ImGui::InputFloat("##freq", &sfreq, 0.f, 0.f, "%.4f MHz");
-
-                // ── Bandwidth (MHz) ─────────────────────────────────────
-                ImGui::AlignTextToFramePadding();
-                ImGui::Text("Bandwidth"); ImGui::SameLine(LBL_W);
-                ImGui::SetNextItemWidth(INP_W);
-                ImGui::InputFloat("##bw", &sbw_mhz, 0.f, 0.f, "%.3f MHz");
-                if(sbw_mhz < 0.001f) sbw_mhz = 0.001f;
-
-                // ── Target ───────────────────────────────────────────────
-                ImGui::AlignTextToFramePadding();
-                ImGui::Text("Target"); ImGui::SameLine(LBL_W);
-                ImGui::SetNextItemWidth(220);
-                ImGui::InputText("##target", starget, sizeof(starget));
-
-                // wire/저장 포맷은 kHz 기준
-                float sbw = sbw_mhz * 1000.f;
-
-                // 입력 시각을 절대시간으로 환산 (overlap 검사용; UI 표시 없음)
-                // 입력 HH:MM:SS는 KST 기준 — timegm으로 UTC 해석 후 KST 오프셋 차감.
-                time_t preview_st = 0;
-                {
-                    time_t now3 = time(nullptr);
-                    struct tm t4; KST::to_tm(now3, t4);
-                    t4.tm_hour=sh; t4.tm_min=sm; t4.tm_sec=ss;
-                    preview_st = timegm(&t4) - KST::OFFSET_SEC;
-                    if(preview_st <= now3) preview_st += 86400;
-                }
-                bool preview_overlap = false;
-                {
-                    std::lock_guard<std::mutex> lk(v.sched_mtx);
-                    preview_overlap = v.sched_has_overlap(preview_st, sdur);
-                }
-
-                // LOCAL/HOST: SDR 필수 (BladeRF/RTL-SDR/Pluto), JOIN: net_cli 연결 필수
-                bool can_add = (v.net_cli && v.net_cli->is_connected());
-                bool block_add = !can_add || preview_overlap;
-                if(block_add) ImGui::BeginDisabled();
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f,0.55f,0.2f,1.f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f,0.7f,0.3f,1.f));
-                if(ImGui::Button("  ADD  ")){
-                    time_t now=time(nullptr);
-                    struct tm tm2; KST::to_tm(now, tm2);
-                    tm2.tm_hour=sh; tm2.tm_min=sm; tm2.tm_sec=ss;
-                    time_t st=timegm(&tm2) - KST::OFFSET_SEC;
-                    if(st <= now) st += 86400;
-                    if(v.remote_mode && v.net_cli){
-                        v.net_cli->cmd_add_sched((int64_t)st, sdur, sfreq, sbw, starget);
-                        bewe_log_push(0,"[SCHED] Request sent: %02d:%02d:%02d dur=%.0fs freq=%.3fMHz bw=%.0fkHz target='%s'\n",
-                                      sh,sm,ss,sdur,sfreq,sbw,starget);
-                        starget[0] = '\0';  // 입력 클리어
-                    } else {
-                        bool added = false;
-                        {
-                            std::lock_guard<std::mutex> lk(v.sched_mtx);
-                            if(v.sched_has_overlap(st, sdur)){
-                                bewe_log_push(0,"[SCHED] Denied: overlap with existing entry\n");
-                            } else {
-                                FFTViewer::SchedEntry e;
-                                e.start_time=st; e.duration_sec=sdur;
-                                e.freq_mhz=sfreq; e.bw_khz=sbw;
-                                e.op_index = 0;
-                                strncpy(e.operator_name, login_get_id(), sizeof(e.operator_name)-1);
-                                strncpy(e.target,        starget,        sizeof(e.target)-1);
-                                v.sched_entries.push_back(e);
-                                added = true;
-                                bewe_log_push(0,"[SCHED] Added: %02d:%02d:%02d dur=%.0fs freq=%.3fMHz bw=%.0fkHz target='%s'\n",
-                                              sh,sm,ss,sdur,sfreq,sbw,starget);
-                            }
-                        }
-                        if(added){
-                            starget[0] = '\0';
-                        }
-                    }
-                }
-                ImGui::PopStyleColor(2);
-                if(block_add) ImGui::EndDisabled();
-                if(v.remote_mode && !can_add){
-                    ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(1,0.5f,0.3f,1)," HOST not connected");
-                }
-
-                ImGui::Separator();
-
-                // ── Schedule list ─────────────────────────────────────────
-                ImGui::BeginChild("##sched_list",ImVec2(0,0),false);
-                {
-                    std::lock_guard<std::mutex> lk(v.sched_mtx);
-                    time_t now_t = time(nullptr);
-                    // 시작시각 오름차순 정렬용 인덱스
-                    std::vector<int> order(v.sched_entries.size());
-                    for(int i=0;i<(int)order.size();i++) order[i]=i;
-                    std::sort(order.begin(), order.end(), [&](int a, int b){
-                        return v.sched_entries[a].start_time < v.sched_entries[b].start_time;
-                    });
-
-                    const ImU32 col_border_rec = IM_COL32(220,60,60,255);
-                    const ImU32 col_bg_rec     = IM_COL32(120,20,20,120);
-                    int seq_no = 0;  // WAITING/ARMED 정렬 순서 카운터
-
-                    for(int oi=0; oi<(int)order.size(); oi++){
-                        int i = order[oi];
-                        auto& e=v.sched_entries[i];
-                        ImGui::PushID(i);
-                        // 상태별 색상/아이콘 (enum: WAITING, ARMED, RECORDING, DONE, FAILED)
-                        static const char* st_names[]={"WAIT","ARM","REC","DONE","FAIL"};
-                        static const char* st_icons[]={"[ ]","[A]","[R]","[V]","[X]"};
-                        static const ImVec4 st_cols[]={
-                            {0.7f,0.7f,0.8f,1},{1.0f,0.85f,0.2f,1},{1,0.3f,0.3f,1},
-                            {0.3f,0.9f,0.3f,1},{0.9f,0.2f,0.2f,1}};
-
-                        // RECORDING/ARMED 엔트리는 깜빡이는 배경 + 테두리
-                        if(e.status == FFTViewer::SchedEntry::RECORDING
-                        || e.status == FFTViewer::SchedEntry::ARMED){
-                            float t2=(float)ImGui::GetTime();
-                            float a = 0.5f + 0.5f*sinf(t2*4.f);
-                            ImVec2 cp = ImGui::GetCursorScreenPos();
-                            float rw = ImGui::GetContentRegionAvail().x;
-                            float rh = ImGui::GetTextLineHeight() + 6.f;
-                            ImGui::GetWindowDrawList()->AddRectFilled(
-                                ImVec2(cp.x-4, cp.y-2), ImVec2(cp.x+rw, cp.y+rh),
-                                IM_COL32(120,20,20,(int)(120*a)), 3.f);
-                            ImGui::GetWindowDrawList()->AddRect(
-                                ImVec2(cp.x-4, cp.y-2), ImVec2(cp.x+rw, cp.y+rh),
-                                col_border_rec, 3.f, 0, 1.5f);
-                        }
-
-                        // WAITING/ARMED 는 정렬 순서대로 [1] [2] [3]…, 그 외는 상태 아이콘
-                        char num_lbl[16];
-                        const char* icon;
-                        if(e.status == FFTViewer::SchedEntry::WAITING
-                        || e.status == FFTViewer::SchedEntry::ARMED){
-                            snprintf(num_lbl, sizeof(num_lbl), "[%d]", ++seq_no);
-                            icon = num_lbl;
-                        } else {
-                            icon = st_icons[e.status];
-                        }
-                        ImGui::TextColored(st_cols[e.status], "%s", icon);
-                        ImGui::SameLine();
-                        struct tm t2; KST::to_tm(e.start_time, t2);
-                        char tb[16]; strftime(tb,sizeof(tb),"%H:%M:%S",&t2);
-                        const char* opn = e.operator_name[0] ? e.operator_name : "?";
-
-                        // 상태에 따라 추가 정보
-                        char tail[64] = "";
-                        if(e.status == FFTViewer::SchedEntry::WAITING){
-                            int d = (int)(e.start_time - now_t);
-                            if(d > 0){
-                                int h = d / 3600;
-                                int m = (d % 3600) / 60;
-                                int s = d % 60;
-                                if(h > 0) snprintf(tail, sizeof(tail), "  in %dh%02dm%02ds", h, m, s);
-                                else      snprintf(tail, sizeof(tail), "  in %d:%02d", m, s);
-                            }
-                        } else if(e.status == FFTViewer::SchedEntry::ARMED){
-                            int d = (int)(e.start_time - now_t);
-                            if(d < 0) d = 0;
-                            snprintf(tail, sizeof(tail), "  ARMED in %ds", d);
-                        } else if(e.status == FFTViewer::SchedEntry::RECORDING){
-                            // unix time 기반 (HOST/JOIN 동일값 표시)
-                            int cur = (int)(now_t - e.start_time);
-                            int tot = (int)e.duration_sec;
-                            if(cur < 0) cur = 0;
-                            if(cur > tot) cur = tot;
-                            snprintf(tail, sizeof(tail), "  REC %d/%ds", cur, tot);
-                        }
-
-                        char tgt_part[64] = "";
-                        if(e.target[0])
-                            snprintf(tgt_part, sizeof(tgt_part), "  Target: %s", e.target);
-                        ImGui::Text("%s  %.3fMHz  BW=%.0fkHz%s  %.0fs  by %s%s",
-                                    tb, e.freq_mhz, e.bw_khz, tgt_part, e.duration_sec, opn, tail);
-                        ImGui::SameLine();
-
-                        // Remove 권한: 누구나 (타 계정 엔트리 포함). RECORDING/ARMED만 불가
-                        bool can_remove = (e.status != FFTViewer::SchedEntry::RECORDING
-                                        && e.status != FFTViewer::SchedEntry::ARMED);
-                        if(!can_remove) ImGui::BeginDisabled();
-                        if(ImGui::SmallButton("X")){
-                            if(v.remote_mode && v.net_cli){
-                                v.net_cli->cmd_remove_sched((int64_t)e.start_time, e.freq_mhz);
-                            } else {
-                                v.sched_entries.erase(v.sched_entries.begin()+i);
-                                ImGui::PopID();
-                                if(!can_remove) ImGui::EndDisabled();
-                                break;
-                            }
-                        }
-                        if(!can_remove) ImGui::EndDisabled();
-                        ImGui::PopID();
-                    }
-                    if(v.sched_entries.empty())
-                        ImGui::TextDisabled("  (no scheduled entries)");
-                }
-                ImGui::EndChild();
-
-                ImGui::End();
-                ImGui::PopStyleColor();
-                ImGui::PopStyleVar();
-            }
-
 
             // ── DB 우클릭 팝업: Download / Delete ─────────────────────
             if(db_ctx.open){
@@ -6485,108 +6130,57 @@ void run_streaming_viewer(){
         {
             float ty_b=bot_y+(TOPBAR_H-ImGui::GetFontSize())/2;
 
-            // ── 중앙: CPU온도  HH:MM:SS  SDR온도 ─────────────────────────
+            // ── 중앙: HH:MM:SS ───────────────────────────────────────────
             {
-                // CPU 온도 (2초마다 백그라운드 갱신)
-                // sysfs hwmon 방식: sensors 불필요
-                static char  cpu_temp_str[16]  = "";
-                static float cpu_temp_timer    = 1.f;
-                static std::atomic<bool> cpu_fetching{false};
-                static std::mutex        cpu_temp_mtx;
+                // CPU 온도 (1초마다, STATUS 패널의 sysmon_cpu_temp_c 용) —
+                // 종전 매초 detached 스레드 + sysfs 48회 재탐색을 경로 캐시 후
+                // 인라인 읽기 1회로 대체. (문자열 표시는 STATUS 와 중복이라 없음.)
+                static float  cpu_temp_timer = 1.f;
+                static char   temp_path[80]  = "";
+                static time_t rediscover_at  = 0;
                 cpu_temp_timer += io.DeltaTime;
-                if(cpu_temp_timer >= 1.0f && !cpu_fetching.load()){
+                if(cpu_temp_timer >= 1.0f){
                     cpu_temp_timer = 0.f;
-                    cpu_fetching.store(true);
-                    std::thread([&v](){
-                        char tmp[16] = "";
-                        int  tmp_deg = 0;
-                        // 1) hwmon에서 coretemp 드라이버의 temp1_input (Package id 0) 탐색
-                        bool found = false;
-                        for(int i = 0; i < 32 && !found; i++){
-                            char name_path[64];
-                            snprintf(name_path, sizeof(name_path),
-                                     "/sys/class/hwmon/hwmon%d/name", i);
-                            FILE* fn = fopen(name_path, "r");
-                            if(!fn) continue;
-                            char name[32] = {};
-                            fgets(name, sizeof(name), fn);
-                            fclose(fn);
-                            // coretemp: temp1 = Package id 0
-                            if(strncmp(name, "coretemp", 8) == 0){
-                                char tp[80];
-                                snprintf(tp, sizeof(tp),
+                    if(!temp_path[0] && time(nullptr) >= rediscover_at){
+                        // 1) hwmon coretemp → 2) thermal_zone x86_pkg_temp/TCPU → 3) zone0
+                        for(int i = 0; i < 32 && !temp_path[0]; i++){
+                            char np[64]; snprintf(np, sizeof(np), "/sys/class/hwmon/hwmon%d/name", i);
+                            FILE* fn = fopen(np, "r"); if(!fn) continue;
+                            char name[32] = {}; fgets(name, sizeof(name), fn); fclose(fn);
+                            if(strncmp(name, "coretemp", 8) == 0)
+                                snprintf(temp_path, sizeof(temp_path),
                                          "/sys/class/hwmon/hwmon%d/temp1_input", i);
-                                FILE* ft = fopen(tp, "r");
-                                if(ft){
-                                    int milli = 0;
-                                    if(fscanf(ft, "%d", &milli) == 1){
-                                        snprintf(tmp, sizeof(tmp), "%.0f\xC2\xB0""C",
-                                                 milli / 1000.f);
-                                        tmp_deg = milli / 1000;
-                                    }
-                                    fclose(ft);
-                                    found = true;
-                                }
-                            }
                         }
-                        // 2) fallback: /sys/class/thermal/thermal_zone* 에서 x86_pkg_temp
-                        if(!found){
-                            for(int i = 0; i < 16 && !found; i++){
-                                char tp[80], tt[80];
-                                snprintf(tt, sizeof(tt),
-                                         "/sys/class/thermal/thermal_zone%d/type", i);
-                                FILE* ft = fopen(tt, "r");
-                                if(!ft) continue;
-                                char zone_type[32] = {};
-                                fgets(zone_type, sizeof(zone_type), ft);
-                                fclose(ft);
-                                if(strncmp(zone_type, "x86_pkg_temp", 12) == 0 ||
-                                   strncmp(zone_type, "TCPU", 4) == 0){
-                                    snprintf(tp, sizeof(tp),
-                                             "/sys/class/thermal/thermal_zone%d/temp", i);
-                                    FILE* fv = fopen(tp, "r");
-                                    if(fv){
-                                        int milli = 0;
-                                        if(fscanf(fv, "%d", &milli) == 1){
-                                            snprintf(tmp, sizeof(tmp), "%.0f\xC2\xB0""C",
-                                                     milli / 1000.f);
-                                            tmp_deg = milli / 1000;
-                                        }
-                                        fclose(fv);
-                                        found = true;
-                                    }
-                                }
-                            }
+                        for(int i = 0; i < 16 && !temp_path[0]; i++){
+                            char tt[80]; snprintf(tt, sizeof(tt), "/sys/class/thermal/thermal_zone%d/type", i);
+                            FILE* ft = fopen(tt, "r"); if(!ft) continue;
+                            char zt[32] = {}; fgets(zt, sizeof(zt), ft); fclose(ft);
+                            if(strncmp(zt, "x86_pkg_temp", 12) == 0 || strncmp(zt, "TCPU", 4) == 0)
+                                snprintf(temp_path, sizeof(temp_path),
+                                         "/sys/class/thermal/thermal_zone%d/temp", i);
                         }
-                        // 3) fallback: acpitz (노트북 등)
-                        if(!found){
+                        if(!temp_path[0]){
                             FILE* fv = fopen("/sys/class/thermal/thermal_zone0/temp", "r");
                             if(fv){
                                 int milli = 0;
-                                if(fscanf(fv, "%d", &milli) == 1 && milli > 0){
-                                    snprintf(tmp, sizeof(tmp), "%.0f\xC2\xB0""C",
-                                             milli / 1000.f);
-                                    tmp_deg = milli / 1000;
-                                }
+                                if(fscanf(fv, "%d", &milli) == 1 && milli > 0)
+                                    snprintf(temp_path, sizeof(temp_path),
+                                             "/sys/class/thermal/thermal_zone0/temp");
                                 fclose(fv);
                             }
                         }
-                        { std::lock_guard<std::mutex> lk(cpu_temp_mtx);
-                          strncpy(cpu_temp_str, tmp, sizeof(cpu_temp_str)-1); }
-                        v.sysmon_cpu_temp_c.store(tmp_deg);
-                        cpu_fetching.store(false);
-                    }).detach();
-                }
-
-                // SDR 온도 — HOST 가 HEARTBEAT 로 실어 보낸 값을 그대로 쓴다
-                // (JOIN 에는 하드웨어가 없으므로 직접 쿼리할 대상이 없다).
-                static char  sdr_temp_str[16]  = "";
-                static std::mutex sdr_temp_mtx;
-                if(v.net_cli){
-                    uint8_t rt = v.net_cli->remote_sdr_temp_c.load();
-                    std::lock_guard<std::mutex> lk(sdr_temp_mtx);
-                    snprintf(sdr_temp_str, sizeof(sdr_temp_str),
-                             "%02d\xC2\xB0""C", (int)rt);
+                        if(!temp_path[0]) rediscover_at = time(nullptr) + 60;  // 센서 없음 → 60초 백오프
+                    }
+                    if(temp_path[0]){
+                        FILE* f = fopen(temp_path, "r");
+                        int milli = 0;
+                        if(f){
+                            if(fscanf(f, "%d", &milli) == 1 && milli > 0)
+                                v.sysmon_cpu_temp_c.store(milli / 1000);
+                            else temp_path[0] = '\0';       // 소스 사라짐 → 재탐색
+                            fclose(f);
+                        } else temp_path[0] = '\0';
+                    }
                 }
 
                 // 시계 (KST 기준) — time_t 가 바뀐 프레임에만 재포맷
@@ -7631,7 +7225,6 @@ void run_streaming_viewer(){
 
             // Spectrogram 빈 영역 우클릭 > Save File 메뉴
             static struct { bool open=false; float x=0,y=0; } eid_save_ctx;
-            static std::atomic<bool> eid_save_busy{false};
 
             // ── Ctrl+Z: Undo / Ctrl+Shift+Z: Redo ──────────────────────
             if(v.eid_data_ready.load() && !io.WantTextInput){
@@ -8116,22 +7709,25 @@ void run_streaming_viewer(){
                     // Phase 탭의 Sweep 값을 캐리어 오프셋으로 사용
                     double phase_inc=2.0*M_PI*v.eid_phase_detrend_hz/(double)sr;
 
-                    // 자동 스케일: 현재 윈도우의 IQ 최대 진폭 계산
-                    float max_amp=0.0f;
-                    for(int64_t s=w0;s<w1;s+=step){
-                        float ri=v.eid_ch_i[s], rq=v.eid_ch_q[s];
-                        float amp=ri*ri+rq*rq;
-                        if(amp>max_amp) max_amp=amp;
-                    }
-                    max_amp=sqrtf(max_amp);
-                    if(max_amp<1e-9f) max_amp=1.0f;
-
-                    float auto_scale=side*0.45f/max_amp;
+                    // 스케일: 수동줌이면 자동스케일용 전체 윈도우 스캔 자체를 생략
+                    // (auto_scale 은 자동 모드에서만 계산·사용 — 휠 전환 경로 포함)
+                    float auto_scale=0.0f;
                     float scale;
-                    if(v.eid_const_zoom>0.0f)
+                    if(v.eid_const_zoom>0.0f){
                         scale=side*0.5f*v.eid_const_zoom;
-                    else
+                    } else {
+                        // 자동 스케일: 현재 윈도우의 IQ 최대 진폭 계산
+                        float max_amp=0.0f;
+                        for(int64_t s=w0;s<w1;s+=step){
+                            float ri=v.eid_ch_i[s], rq=v.eid_ch_q[s];
+                            float amp=ri*ri+rq*rq;
+                            if(amp>max_amp) max_amp=amp;
+                        }
+                        max_amp=sqrtf(max_amp);
+                        if(max_amp<1e-9f) max_amp=1.0f;
+                        auto_scale=side*0.45f/max_amp;
                         scale=auto_scale;
+                    }
 
                     // 배경
                     fg->AddRectFilled(ImVec2(px0,py0),ImVec2(px1,py1),IM_COL32(8,8,12,255));
@@ -8549,11 +8145,13 @@ void run_streaming_viewer(){
                     static thread_local fftwf_plan pw_plan=nullptr;
                     static thread_local int pw_plan_n=-1;
                     static thread_local std::vector<float> pw_win;
+                    static thread_local uint64_t pw_calc_gen=0;   // psd_db 재계산 세대 (피크 캐시용)
                     bool pw_ok = pw_c0==pw0 && pw_c1==pw1 && pw_cfft==fft_n && pw_cM==M
                               && pw_cgen==v.eid_edit_gen && pw_ctotal==v.eid_total_samples
                               && pw_cpath==v.sa_temp_path
                               && (int)psd_db.size()==fft_n;
                     if(!pw_ok){
+                        pw_calc_gen++;
                         std::vector<float> psd(fft_n,0.f);
                         pw_n_avg=0;
                         if(pwin>=fft_n){
@@ -8604,10 +8202,16 @@ void run_streaming_viewer(){
                         pw_cpath=v.sa_temp_path;
                     }
                     int n_avg=pw_n_avg;
-                    float psd_max=-999.f;
-                    for(int i=0;i<fft_n;i++)
-                        if(psd_db[i]>psd_max) psd_max=psd_db[i];
-                    psd_max+=10.f;
+                    // 피크는 psd_db 가 갱신될 때만 변한다 — 재계산 세대에 편승
+                    static thread_local float pw_cmax=-999.f;
+                    static thread_local uint64_t pw_cmax_seen=~0ull;
+                    if(pw_cmax_seen!=pw_calc_gen){
+                        pw_cmax_seen=pw_calc_gen;
+                        pw_cmax=-999.f;
+                        for(int i=0;i<fft_n;i++)
+                            if(psd_db[i]>pw_cmax) pw_cmax=psd_db[i];
+                    }
+                    float psd_max=pw_cmax+10.f;
                     float psd_min=psd_max-80.f;
 
                     // 배경
@@ -9682,28 +9286,37 @@ void run_streaming_viewer(){
                                     fg->PushClipRect(ImVec2(ea_x0,cy),ImVec2(ea_x1,ea_y1),true);
                                     for(int row=v.eid_bits_scroll; row<total_rows && cy<ea_y1-line_h; row++){
                                         int bi = bit_off + row * BPR;
+                                        // 수평 컬링: 뷰포트 밖 그룹은 AddText 자체를 생략
+                                        // (클립렉트는 렌더만 자르고 드로우콜 비용은 그대로였다)
                                         if(v.eid_bits_view == 0){
+                                            float grp_w=8*bit_cw+grp_gap;
                                             float bx2=draw_ox;
                                             for(int gi=0;gi<BPR&&bi+gi<n_bits;gi+=8){
-                                                for(int k=0;k<8&&bi+gi+k<n_bits;k++){
-                                                    char c[2]={bits[bi+gi+k]?'1':'0',0};
-                                                    ImU32 bc=bits[bi+gi+k]?IM_COL32(100,220,255,255):IM_COL32(90,90,110,255);
-                                                    fg->AddText(bfnt,bfh,ImVec2(bx2+k*bit_cw,cy),bc,c);
+                                                if(bx2 > ea_x1) break;
+                                                if(bx2 + 8*bit_cw >= ea_x0){
+                                                    for(int k=0;k<8&&bi+gi+k<n_bits;k++){
+                                                        char c[2]={bits[bi+gi+k]?'1':'0',0};
+                                                        ImU32 bc=bits[bi+gi+k]?IM_COL32(100,220,255,255):IM_COL32(90,90,110,255);
+                                                        fg->AddText(bfnt,bfh,ImVec2(bx2+k*bit_cw,cy),bc,c);
+                                                    }
                                                 }
-                                                bx2+=8*bit_cw+grp_gap;
+                                                bx2+=grp_w;
                                             }
                                         } else {
                                             float hx=draw_ox;
                                             for(int gi=0;gi<BPR&&bi+gi<n_bits;gi+=8){
-                                                uint8_t byte_val=0;
-                                                int valid=0;
-                                                for(int k=0;k<8&&bi+gi+k<n_bits;k++){
-                                                    byte_val=(byte_val<<1)|bits[bi+gi+k];
-                                                    valid++;
-                                                }
-                                                if(valid==8){
-                                                    char hstr[4]; snprintf(hstr,sizeof(hstr),"%02X",byte_val);
-                                                    fg->AddText(bfnt,bfh,ImVec2(hx,cy),IM_COL32(120,200,255,255),hstr);
+                                                if(hx > ea_x1) break;
+                                                if(hx + hex_byte_w >= ea_x0){
+                                                    uint8_t byte_val=0;
+                                                    int valid=0;
+                                                    for(int k=0;k<8&&bi+gi+k<n_bits;k++){
+                                                        byte_val=(byte_val<<1)|bits[bi+gi+k];
+                                                        valid++;
+                                                    }
+                                                    if(valid==8){
+                                                        char hstr[4]; snprintf(hstr,sizeof(hstr),"%02X",byte_val);
+                                                        fg->AddText(bfnt,bfh,ImVec2(hx,cy),IM_COL32(120,200,255,255),hstr);
+                                                    }
                                                 }
                                                 hx+=hex_byte_w;
                                             }

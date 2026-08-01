@@ -105,9 +105,6 @@ private:
                   float bw, float bx, float by, float bz) const;
     void quat_normalize(float& w, float& x, float& y, float& z) const;
     void get_mvp(float* mvp) const;
-    void get_view_inv(float* inv) const;
-    bool screen_to_arcball(float mx, float my,
-                           float& ax, float& ay, float& az) const;
 
     // ── GL setup ─────────────────────────────────────────────────────────
     void   build_sphere(int stacks, int slices);

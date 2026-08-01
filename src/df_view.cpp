@@ -66,9 +66,15 @@ const char* link_text(int l){
     return l == 2 ? "STREAMING" : (l == 1 ? "CALIBRATING" : "DOWN");
 }
 
-void help(const char* txt){
-    ImGui::SameLine(); ImGui::TextDisabled("(?)");
-    if(ImGui::IsItemHovered()) ImGui::SetTooltip("%s", txt);
+// 엔진의 Config::validate() 와 같은 교차필드 제약. 위젯은 슬라이더 "범위"만 좁히고
+// 저장값은 그대로 두기 때문에, elements 를 내리면 signal_dim 이 범위 밖에 남는다.
+// 그 struct 는 HOST 가 거절하는데 거절 통보 경로가 없어 위젯이 유령값을 붙들고 있었다.
+void clamp_cross_fields(PktDfConfig& c){
+    if(c.elements < 3) c.elements = 3;
+    if(c.elements > 8) c.elements = 8;
+    if(c.signal_dim < 1) c.signal_dim = 1;
+    if(c.signal_dim >= c.elements) c.signal_dim = (uint8_t)(c.elements - 1);
+    if(c.max_frames < c.avg_frames) c.max_frames = c.avg_frames;
 }
 
 } // namespace
@@ -92,35 +98,49 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
 
     FFTViewer::DFLive L{};
     v.df_get_live(L);
-    PktDfConfig c{};
-    v.df_get_cfg(c);
-    const PktDfConfig before = c;
     const bool is_join = (v.net_cli != nullptr);
 
+    // HOST 정본. JOIN 은 HOST 방송본을 그대로 읽는다.
+    PktDfConfig canon{};
+    v.df_get_cfg(canon);
+
+    // 편집 버퍼. 위젯은 canon 이 아니라 이걸 만진다.
+    //
+    // 정본을 매 프레임 위젯 변수에 덮어쓰면 두 가지가 동시에 깨진다:
+    //  (1) 드래그 중 프레임마다 DF_CONFIG 가 나가 HOST 가 validate+apply+broadcast+
+    //      host_state JSON write 를 60 Hz 로 돌린다 (Pi5 에서 실측 가능한 스톨),
+    //  (2) 에코가 돌아올 때까지 손잡이가 뒤로 튄다.
+    // 그래서 위젯이 활성인 동안(그리고 송신 직후 hold 창 동안)에는 재동기를 멈춘다.
+    // hold 가 만료되면 ui = canon 으로 되돌아가므로, HOST 가 거절한 값은 자동으로
+    // 진실에 스냅백한다 — accept 와 reject 를 한 경로가 처리한다.
+    static PktDfConfig ui{};
+    static double      hold_until = 0.0;
+    const double now = ImGui::GetTime();
+    if(just_opened){ ui = canon; hold_until = 0.0; }
+    if(!(ImGui::IsAnyItemActive() || now < hold_until)) ui = canon;
+    PktDfConfig& c = ui;
+
     ImGui::TextColored(ImVec4(0.9f,0.9f,0.9f,1.f), "DIRECTION FINDING");
-    ImGui::SameLine(); ImGui::TextDisabled("(ESC or click DF to close)");
-    ImGui::SameLine(ImGui::GetWindowWidth() - 320);
-    ImGui::TextDisabled(is_join ? "settings live on the HOST - shared by every station"
-                                : "settings are shared with every JOIN station");
     ImGui::Separator();
 
     if(!is_join && v.hw.type != HWType::KRAKEN){
         ImGui::TextColored(ImVec4(1.f,0.4f,0.4f,1.f),
             "DF requires the KrakenSDR backend. Start BEWE with  --sdr kraken");
-        ImGui::TextDisabled("The heimdall DAQ chain must be running:");
-        ImGui::TextDisabled("  /home/ku/krakensdr_doa/bewe_df_start.sh");
         ImGui::End();
         return;
     }
+
+    // JOIN 이 HOST 정본을 아직 못 받았으면 설정을 못 만지게 막는다.
+    // 안 막으면 df_default_pkt() 하드코딩 기본값이 편집 버퍼에 있다가 첫 조작에서
+    // 통째로 HOST 로 나가 실제 설정을 덮어쓴다 (host_state 에 영속화까지 된다).
+    const bool cfg_ready = !is_join || v.net_cli->df_cfg_valid.load();
+    ImGui::BeginDisabled(!cfg_ready);
 
     ImGui::Columns(2, "##df_cols", true);
 
     // ══════════════════════ 왼쪽 ══════════════════════
     // ── DAQ 상태 ────────────────────────────────────────────────────────
-    if(is_join){
-        ImGui::TextColored(ImVec4(0.7f,0.7f,0.7f,1.f),
-            "DAQ status is shown on the HOST station.");
-    } else {
+    if(!is_join){
         const ImVec4 col_link = (L.link==2) ? ImVec4(0.3f,0.9f,0.3f,1.f)
                               : (L.link==1) ? ImVec4(1.f,0.8f,0.f,1.f)
                                             : ImVec4(0.9f,0.3f,0.3f,1.f);
@@ -131,9 +151,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                         L.hw_id, L.channels, L.daq_cf_mhz, L.daq_fs_msps);
             ImGui::Text("sync_state=%u/6  delay_sync=%u  iq_sync=%u  noise_src=%u",
                         L.sync_state, L.delay_sync, L.iq_sync, L.noise_src);
-            if(L.sync_state < 6)
-                ImGui::TextColored(ImVec4(1.f,0.8f,0.f,1.f),
-                    "calibrating - DF is refused until sync_state reaches 6");
             ImGui::Text("%.2f frames/s  %.1f MB/s   ok=%llu cal=%llu bad=%llu gaps=%llu reconn=%llu",
                         L.frame_rate_hz, L.recv_mbps, L.frames_ok, L.frames_cal,
                         L.frames_bad, L.gaps, L.reconnects);
@@ -152,9 +169,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "DAQ CONTROL");
     bool ctrl = (c.enable_control != 0);
     if(ImGui::Checkbox("allow BEWE to retune the DAQ", &ctrl)) c.enable_control = ctrl ? 1 : 0;
-    help("When on, changing the frequency in BEWE sends FREQ to heimdall (:5001).\n"
-         "heimdall then recalibrates from scratch - a few seconds with no DF.\n"
-         "Sample rate is owned by daq_chain_config.ini and cannot be set here.");
     // (DAQ 직접 재튠 위젯은 HOST 전용이었다. GUI 는 JOIN 뿐이라 삭제 —
     //  JOIN 은 상단 주파수 박스가 HOST 로 SET_FREQ 를 보내고 HOST 가 DAQ 를 돌린다.)
 
@@ -164,37 +178,26 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
 
     ImGui::SetNextItemWidth(160);
     ImGui::InputFloat("radius (m)", &c.radius_m, 0.005f, 0.05f, "%.4f");
-    help("Distance from the array centre to ONE antenna.\n"
-         "NOT the antenna-to-antenna spacing.\n"
-         "If you measured the spacing d:  radius = d / 1.1756  (5 elements)");
 
     int el = c.elements;
     ImGui::SetNextItemWidth(160);
     if(ImGui::SliderInt("elements", &el, 3, 8)) c.elements = (uint8_t)el;
     if(!is_join && L.channels > 0 && (unsigned)c.elements != L.channels)
-        ImGui::TextColored(ImVec4(1.f,0.5f,0.5f,1.f),
-            "  mismatch: the DAQ reports %u channels - DF will refuse", L.channels);
+        ImGui::TextColored(ImVec4(1.f,0.5f,0.5f,1.f), "  DAQ ch=%u", L.channels);
 
     int sense = c.sense;
     ImGui::SetNextItemWidth(160);
-    const char* sense_items[] = { "CW  (clockwise)", "CCW (counter-clockwise)" };
+    const char* sense_items[] = { "CW", "CCW" };
     if(ImGui::Combo("numbering", &sense, sense_items, 2)) c.sense = (uint8_t)sense;
-    help("Which way antenna numbers advance seen FROM ABOVE.\n"
-         "If every bearing comes out mirrored about the 0-180 axis,\n"
-         "this is the setting to flip.");
 
     ImGui::SetNextItemWidth(160);
     ImGui::InputFloat("heading offset (deg)", &c.heading_deg, 1.0f, 10.0f, "%.1f");
-    help("Added to the reported bearing.\n"
-         "Use it when antenna 0 does not point along the vehicle heading.\n"
-         "0 means bearings are relative to antenna 0.");
 
     if(L.lambda_m > 0.0){
         ImGui::Text("lambda %.3f m at the DAQ centre;  ambiguity ratio %.3f",
                     L.lambda_m, L.ambiguity);
         if(L.ambiguity > 1.0)
-            ImGui::TextColored(ImVec4(1.f,0.6f,0.f,1.f),
-                "  >1: grating lobes - bearings may be ambiguous at this frequency");
+            ImGui::TextColored(ImVec4(1.f,0.6f,0.f,1.f), "  grating lobes");
     }
 
     ImGui::NextColumn();
@@ -206,55 +209,37 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     ImGui::SetNextItemWidth(160);
     const char* algo_items[] = { "Bartlett", "Capon (MVDR)", "MUSIC" };
     if(ImGui::Combo("algorithm", &algo, algo_items, 3)) c.algo = (uint8_t)algo;
-    help("Bartlett : broadest peak, most robust, no eigen decomposition\n"
-         "Capon    : sharper, needs a well conditioned R\n"
-         "MUSIC    : sharpest, needs the source count below");
 
     int sd = c.signal_dim;
     ImGui::SetNextItemWidth(160);
     if(ImGui::SliderInt("sources (MUSIC)", &sd, 1, c.elements > 1 ? c.elements-1 : 1))
         c.signal_dim = (uint8_t)sd;
-    help("How many signals MUSIC should assume are inside the channel.\n"
-         "1 is right for a single emitter. Too high eats the signal subspace.");
 
     int af = c.avg_frames;
     ImGui::SetNextItemWidth(160);
     if(ImGui::SliderInt("frames to average", &af, 1, 30)) c.avg_frames = (uint8_t)af;
     ImGui::SameLine();
     ImGui::TextDisabled("~%.1f s", af * 0.437);
-    help("More frames = steadier bearing, longer wait.\n"
-         "One heimdall frame is about 437 ms.");
 
     int mf = c.max_frames;
     ImGui::SetNextItemWidth(160);
     if(ImGui::SliderInt("frame budget", &mf, c.avg_frames, 60)) c.max_frames = (uint8_t)mf;
-    help("Upper bound on frames consumed while trying to collect the average.\n"
-         "Calibration bursts (about every 5 min) are discarded and eat budget.");
 
     // ── 수락 규칙 ───────────────────────────────────────────────────────
     ImGui::Dummy(ImVec2(0,8)); ImGui::Separator();
     ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "ACCEPTANCE");
     ImGui::SetNextItemWidth(160);
     ImGui::SliderFloat("SNR threshold (dB)", &c.snr_thr_db, -10.0f, 40.0f, "%.0f");
-    help("A measurement below this SNR is reported as \"No signal\".\n"
-         "Observed here: real signals 18-23 dB, noise well below 0 dB.\n"
-         "This value lives on the HOST and is shared by every station.");
-    ImGui::TextDisabled("a statistical floor also runs underneath - see c_papr below");
 
     // ── 신호 추출 ───────────────────────────────────────────────────────
     ImGui::Dummy(ImVec2(0,8)); ImGui::Separator();
     ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "SIGNAL EXTRACTION");
     ImGui::SetNextItemWidth(160);
     ImGui::InputFloat("DC guard (Hz)", &c.dc_guard_hz, 100.f, 1000.f, "%.0f");
-    help("Bins closer than this to the DAQ centre are dropped.\n"
-         "The LO leaks a strong spike there that is not a real signal.");
 
     int tl = c.target_looks;
     ImGui::SetNextItemWidth(160);
     if(ImGui::SliderInt("target looks", &tl, 128, 16384)) c.target_looks = (uint16_t)tl;
-    help("How many independent spectral looks to gather per frame.\n"
-         "This is the compute budget: more looks = steadier R, more FFTs.\n"
-         "Cost is nearly independent of channel width.");
 
     int kfs = c.fft_size;
     ImGui::SetNextItemWidth(160);
@@ -262,23 +247,25 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     int k_idx = 3;
     for(int i = 0; i < 6; i++) if(kfs == (1024 << i)) k_idx = i;
     if(ImGui::Combo("segment FFT", &k_idx, k_items, 6)) c.fft_size = (uint16_t)(1024 << k_idx);
-    help("Starting segment size. The engine raises it on its own when the\n"
-         "channel is too narrow to hold at least 8 bins.");
 
     ImGui::Dummy(ImVec2(0,4));
     if(ImGui::TreeNode("Advanced")){
         ImGui::SetNextItemWidth(160);
         ImGui::InputFloat("c_papr", &c.c_papr, 1.0f, 10.0f, "%.1f");
-        help("Statistical floor constant. Reject threshold = c_papr / sqrt(n_eff).\n"
-             "This is what stops a random bearing being reported on pure noise.\n"
-             "Measured: noise 0/200 false accepts, -10 dB signal 200/200 detected.\n"
-             "Lower it only if you know why you are doing it.");
         ImGui::TreePop();
     }
 
-    // 변경분이 있으면 한 번에 보낸다. HOST 는 즉시 적용 + 방송,
+    ImGui::EndDisabled();
+
+    // 손을 뗀 프레임에만 한 번 보낸다. HOST 는 즉시 적용 + 방송,
     // JOIN 은 요청만 보내고 HOST 가 돌려주는 값을 정본으로 삼는다.
-    if(memcmp(&before, &c, sizeof c) != 0) v.df_set_cfg(c);
+    if(cfg_ready && !ImGui::IsAnyItemActive()){
+        clamp_cross_fields(ui);
+        if(memcmp(&canon, &ui, sizeof ui) != 0){
+            v.df_set_cfg(ui);
+            hold_until = now + 1.0;   // 에코 대기. 만료되면 정본으로 스냅백.
+        }
+    }
 
     // ── 배열 그림 + 마지막 결과 ─────────────────────────────────────────
     ImGui::Dummy(ImVec2(0,8)); ImGui::Separator();
@@ -307,9 +294,5 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     }
 
     ImGui::Columns(1);
-    ImGui::Separator();
-    ImGui::TextDisabled("Press a number key on the main page to measure that channel filter.");
-    ImGui::TextDisabled("The number is the one drawn on the filter (frequency order), not a slot id."
-                        "   0 targets filter #10.");
     ImGui::End();
 }

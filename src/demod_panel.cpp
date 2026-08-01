@@ -444,16 +444,25 @@ void demod_draw_panel(FFTViewer& v, bool just_opened){
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 7));
             ImGui::Indent(8.0f);   // 라벨 앞 여백
             ImGui::Dummy(ImVec2(0,2));
+            // [RUN] 점등 상태 — 매 프레임 전 스테이션 타깃 목록 재집계 대신 250ms 스로틀
+            static std::vector<uint8_t> run_cache;
+            static double run_last = -1.0;
+            double nowt = ImGui::GetTime();
+            if(run_last < 0.0 || nowt - run_last >= 0.25 || run_cache.size() != mods.size()){
+                run_last = nowt;
+                run_cache.assign(mods.size(), 0);
+                for(size_t i=0;i<mods.size();i++){
+                    if(mods[i].planned || (!mods[i].target_modes && !mods[i].draw_content)) continue;
+                    auto tg = bewe_mod_targets(v, mods[i].id);
+                    for(auto& t : tg) if(t.decode_on){ run_cache[i] = 1; break; }
+                }
+            }
             // 동작 모듈: 클릭=선택, 더블클릭=데이터 뷰 탭 열기
             for(size_t i=0;i<mods.size();i++){
                 if(mods[i].planned) continue;
                 if(!mods[i].target_modes && !mods[i].draw_content) continue;
                 ImGui::PushID((int)i);
-                bool running_any = false;
-                {   // 어느 스테이션에서든 동작 중이면 초록 점등
-                    auto tg = bewe_mod_targets(v, mods[i].id);
-                    for(auto& t : tg) if(t.decode_on){ running_any = true; break; }
-                }
+                bool running_any = run_cache[i] != 0;
                 if(ImGui::Selectable(mods[i].label, sel_mod==(int)i, ImGuiSelectableFlags_AllowDoubleClick)){
                     sel_mod=(int)i;
                     if(mods[i].draw_content && ImGui::IsMouseDoubleClicked(0)) open_tab((int)i);

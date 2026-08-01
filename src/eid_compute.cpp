@@ -425,33 +425,6 @@ std::string FFTViewer::eid_save_filtered_to(const std::string& out_path){
     return out_path;
 }
 
-// 원본 폴더에 기본 파일명으로 저장 + 원본 .info 있으면 복사 (하위 호환)
-std::string FFTViewer::eid_save_filtered(){
-    std::string out_path = eid_default_filtered_path();
-    if(out_path.empty()){
-        bewe_log_push(0, "[EID] Save File: no source path\n");
-        return "";
-    }
-    if(eid_save_filtered_to(out_path).empty()) return "";
-
-    // 원본 .info 복사 (legacy .wav 만 — SigMF 는 eid_save_filtered_to 가 메타 작성)
-    if(!SigMF::is_sigmf_data(out_path)){
-        std::string src_info = sa_temp_path + ".info";
-        if(eid_path_exists(src_info)){
-            std::string dst_info = out_path + ".info";
-            FILE* fi = fopen(src_info.c_str(), "rb");
-            FILE* fo = fopen(dst_info.c_str(), "wb");
-            if(fi && fo){
-                char cbuf[4096]; size_t r;
-                while((r = fread(cbuf, 1, sizeof(cbuf), fi)) > 0)
-                    fwrite(cbuf, 1, r, fo);
-            }
-            if(fi) fclose(fi);
-            if(fo) fclose(fo);
-        }
-    }
-    return out_path;
-}
 
 void FFTViewer::eid_remove_samples(double s0, double s1){
     int64_t i0 = std::max((int64_t)0, (int64_t)s0);

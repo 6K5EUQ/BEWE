@@ -74,11 +74,8 @@ if(CLI)
         src/mission_push.cpp
         src/hist_check.cpp
         src/audio.cpp
-        src/audio_playback.cpp
         src/timemachine.cpp
         src/region_save.cpp
-        src/sa_compute.cpp
-        src/eid_compute.cpp
         src/rtlsdr_io.cpp
         src/hw_detect.cpp
         src/login.cpp
@@ -97,8 +94,6 @@ if(CLI)
         src/df/df_xspec.cpp
         src/df/df_estimator.cpp
         src/df/df_engine.cpp
-        src/df/df_selftest.cpp
-        src/session_spawn.cpp
     )
 
     target_compile_definitions(BEWE PRIVATE BEWE_HEADLESS=1)

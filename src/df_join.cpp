@@ -57,7 +57,7 @@ const char* FFTViewer::df_short_reason(const char* detail){
 void FFTViewer::df_format_line(char* out, size_t n, bool detailed) const {
     const auto& r = pending_df_result;
     if(r.ok){
-        snprintf(out, n, "CH%d: %.1f° (SNR : %.1fdB)%s",
+        snprintf(out, n, "CH%d: %.1f deg (SNR : %.1f dB)%s",
                  r.dnum, r.bearing, r.snr,
                  r.overdrive ? " [OVERDRIVE]" : "");
         return;

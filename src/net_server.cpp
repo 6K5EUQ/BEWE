@@ -659,11 +659,6 @@ void NetServer::broadcast_fft(const float* data, int fft_size,
     if(cb.on_relay_broadcast){
         cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
     }
-    std::lock_guard<std::mutex> lk(clients_mtx_);
-    for(auto& c : clients_){
-        if(c->is_relay || !c->authed || !c->alive.load()) continue;
-        c->enqueue(pkt, true);
-    }
 }
 
 // ── 완성된 오디오 패킷 1개 방출 (raw/opus 공용) ───────────────────────────
@@ -688,12 +683,6 @@ void NetServer::emit_audio(uint32_t op_mask, uint8_t ch_idx, int8_t pan,
     if(cb.on_relay_broadcast && has_relay())
         cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
 
-    std::lock_guard<std::mutex> lk(clients_mtx_);
-    for(auto& c : clients_){
-        if(c->is_relay || !c->authed || !c->alive.load()) continue;
-        if(!(op_mask & (1u << c->op_index))) continue;
-        c->enqueue(pkt, false, true);
-    }
 }
 
 // ── Send audio to specific operators (legacy, mask-based) ────────────────
@@ -744,28 +733,6 @@ void NetServer::send_audio(uint32_t op_mask, uint8_t ch_idx, int8_t pan,
                n_samples * (uint32_t)sizeof(float), n_samples);
 }
 
-void NetServer::broadcast_audio_all(uint8_t ch_idx, int8_t pan,
-                                     const float* pcm, uint32_t n_samples){
-    if(!n_samples) return;
-    if(bcast_pause_.load(std::memory_order_relaxed)) return;
-
-    uint32_t payload_size = (uint32_t)(sizeof(PktAudioFrame) + n_samples*sizeof(float));
-    std::vector<uint8_t> payload(payload_size);
-    auto* ah = reinterpret_cast<PktAudioFrame*>(payload.data());
-    ah->ch_idx    = ch_idx;
-    ah->pan       = (uint8_t)(int8_t)pan;
-    ah->n_samples = n_samples;
-    memcpy(payload.data() + sizeof(PktAudioFrame), pcm, n_samples*sizeof(float));
-
-    auto pkt = make_packet(PacketType::AUDIO_FRAME, payload.data(), payload_size);
-    if(cb.on_relay_broadcast && has_relay())
-        cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
-    std::lock_guard<std::mutex> lk(clients_mtx_);
-    for(auto& c : clients_){
-        if(c->is_relay || !c->authed || !c->alive.load()) continue;
-        c->enqueue(pkt, false, true);
-    }
-}
 
 
 // ── Broadcast FFT meta (입력 크기) ────────────────────────────────────────
@@ -777,11 +744,6 @@ void NetServer::broadcast_fft_meta(int fft_size, int fft_input_size){
     auto pkt = make_packet(PacketType::FFT_META, &m, sizeof(m));
     if(cb.on_relay_broadcast && has_relay())
         cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
-    std::lock_guard<std::mutex> lk(clients_mtx_);
-    for(auto& c : clients_){
-        if(c->is_relay || !c->authed || !c->alive.load()) continue;
-        c->enqueue(pkt, false);
-    }
 }
 
 // ── Broadcast channel sync ────────────────────────────────────────────────
@@ -841,11 +803,6 @@ void NetServer::broadcast_channel_sync(const Channel* chs, int n, bool periodic)
             if(periodic) chsync_relay_last_ = now;
         }
     }
-    std::lock_guard<std::mutex> lk(clients_mtx_);
-    for(auto& c : clients_){
-        if(c->is_relay || !c->authed || !c->alive.load()) continue;
-        c->enqueue(pkt, false);
-    }
 }
 
 // ── Broadcast scheduled recording list → all clients ────────────────────
@@ -853,11 +810,6 @@ void NetServer::broadcast_sched_sync(const PktSchedSync& sync){
     auto pkt = make_packet(PacketType::SCHED_SYNC, &sync, sizeof(sync));
     if(cb.on_relay_broadcast)
         cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
-    std::lock_guard<std::mutex> lk(clients_mtx_);
-    for(auto& c : clients_){
-        if(c->is_relay || !c->authed || !c->alive.load()) continue;
-        c->enqueue(pkt, false);
-    }
 }
 
 // ── Broadcast mission snapshot → all clients (LAN + relay) ─────────────
@@ -866,11 +818,6 @@ void NetServer::broadcast_mission_sync(const PktMissionSync& sync){
     auto pkt = make_packet(PacketType::MISSION_SYNC, &sync, sizeof(sync));
     if(cb.on_relay_broadcast)
         cb.on_relay_broadcast(pkt.data(), pkt.size(), true /*no_drop*/);
-    std::lock_guard<std::mutex> lk(clients_mtx_);
-    for(auto& c : clients_){
-        if(c->is_relay || !c->authed || !c->alive.load()) continue;
-        c->enqueue(pkt, false);
-    }
 }
 
 // ── Broadcast module pipe payload (HOST → all JOINs, LAN + relay) ────────
@@ -879,11 +826,6 @@ void NetServer::broadcast_module_pipe(const void* payload, uint32_t len){
     auto pkt = make_packet(PacketType::MODULE_PIPE, payload, len);
     if(cb.on_relay_broadcast)
         cb.on_relay_broadcast(pkt.data(), pkt.size(), true /*no_drop*/);
-    std::lock_guard<std::mutex> lk(clients_mtx_);
-    for(auto& c : clients_){
-        if(c->is_relay || !c->authed || !c->alive.load()) continue;
-        c->enqueue(pkt, false);
-    }
 }
 
 // ── Broadcast band plan (HOST → all JOINs, LAN + relay) ──────────────────
@@ -894,22 +836,12 @@ void NetServer::broadcast_band_plan(const PktBandPlan& bp){
     auto pkt = make_packet(PacketType::BAND_PLAN_SYNC, &bp, sizeof(bp));
     if(cb.on_relay_broadcast && has_relay())
         cb.on_relay_broadcast(pkt.data(), pkt.size(), true /*no_drop*/);
-    std::lock_guard<std::mutex> lk(clients_mtx_);
-    for(auto& c : clients_){
-        if(c->is_relay || !c->authed || !c->alive.load()) continue;
-        c->enqueue(pkt, false);
-    }
 }
 
 void NetServer::broadcast_band_categories(const PktBandCatSync& cs){
     auto pkt = make_packet(PacketType::BAND_CAT_SYNC, &cs, sizeof(cs));
     if(cb.on_relay_broadcast && has_relay())
         cb.on_relay_broadcast(pkt.data(), pkt.size(), true /*no_drop*/);
-    std::lock_guard<std::mutex> lk(clients_mtx_);
-    for(auto& c : clients_){
-        if(c->is_relay || !c->authed || !c->alive.load()) continue;
-        c->enqueue(pkt, false);
-    }
 }
 
 // ── Broadcast chat ────────────────────────────────────────────────────────
@@ -920,11 +852,6 @@ void NetServer::broadcast_chat(const char* from, const char* msg){
     auto pkt = make_packet(PacketType::CHAT, &chat, sizeof(chat));
     if(cb.on_relay_broadcast)
         cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
-    std::lock_guard<std::mutex> lk(clients_mtx_);
-    for(auto& c : clients_){
-        if(c->is_relay || !c->authed || !c->alive.load()) continue;
-        c->enqueue(pkt, false);
-    }
 }
 
 // ── Broadcast heartbeat ───────────────────────────────────────────────────
@@ -942,11 +869,6 @@ void NetServer::broadcast_heartbeat(uint8_t host_state, uint8_t sdr_temp_c, uint
     auto pkt = make_packet(PacketType::HEARTBEAT, &hb, sizeof(hb));
     if(cb.on_relay_broadcast)
         cb.on_relay_broadcast(pkt.data(), pkt.size(), true); // no_drop=true — HB 유실은 LINK 끊김
-    std::lock_guard<std::mutex> lk(clients_mtx_);
-    for(auto& c : clients_){
-        if(c->is_relay || !c->authed || !c->alive.load()) continue;
-        c->enqueue(pkt, false);
-    }
 }
 
 // ── Broadcast disk stat ───────────────────────────────────────────────────
@@ -959,11 +881,6 @@ void NetServer::broadcast_disk_stat(uint64_t free_bytes, uint64_t total_bytes, c
     auto pkt = make_packet(PacketType::DISK_STAT, &s, sizeof(s));
     if(cb.on_relay_broadcast)
         cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
-    std::lock_guard<std::mutex> lk(clients_mtx_);
-    for(auto& c : clients_){
-        if(c->is_relay || !c->authed || !c->alive.load()) continue;
-        c->enqueue(pkt, false);
-    }
 }
 
 // ── Broadcast DF config ───────────────────────────────────────────────────
@@ -972,11 +889,6 @@ void NetServer::broadcast_df_config(const PktDfConfig& c){
     auto pkt = make_packet(PacketType::DF_CONFIG, &c, sizeof(c));
     if(cb.on_relay_broadcast)
         cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
-    std::lock_guard<std::mutex> lk(clients_mtx_);
-    for(auto& cl : clients_){
-        if(cl->is_relay || !cl->authed || !cl->alive.load()) continue;
-        cl->enqueue(pkt, false);
-    }
 }
 
 // ── Broadcast status ──────────────────────────────────────────────────────
@@ -987,11 +899,6 @@ void NetServer::broadcast_status(float cf_mhz, float gain_db,
     auto pkt = make_packet(PacketType::STATUS, &s, sizeof(s));
     if(cb.on_relay_broadcast)
         cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
-    std::lock_guard<std::mutex> lk(clients_mtx_);
-    for(auto& c : clients_){
-        if(c->is_relay || !c->authed || !c->alive.load()) continue;
-        c->enqueue(pkt, false);
-    }
 }
 
 // ── Broadcast operator list ───────────────────────────────────────────────
@@ -1017,11 +924,6 @@ void NetServer::broadcast_operator_list(){
             ++cnt;
         }
         ol.count = (uint8_t)cnt;
-        for(auto& c : clients_){
-            if(!c->authed || !c->alive.load()) continue;
-            if(c->is_relay) continue; // relay 클라이언트는 아래에서 relay broadcast로 전달
-            send_to(*c, PacketType::OPERATOR_LIST, &ol, sizeof(ol));
-        }
     }
     // relay 경유 JOIN에도 전달: on_relay_broadcast 콜백 사용
     if(cb.on_relay_broadcast){
@@ -1041,11 +943,6 @@ void NetServer::broadcast_wf_event(int32_t fft_offset, int64_t wall_time,
     auto pkt = make_packet(PacketType::WF_EVENT, &ev, sizeof(ev));
     if(cb.on_relay_broadcast)
         cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
-    std::lock_guard<std::mutex> lk(clients_mtx_);
-    for(auto& cli : clients_){
-        if(cli->is_relay || !cli->authed || !cli->alive.load()) continue;
-        cli->enqueue(pkt, false);
-    }
 }
 
 void NetServer::send_region_response(int op_index, bool allowed){
@@ -1149,57 +1046,6 @@ void NetServer::broadcast_iq_progress(const PktIqProgress& prog){
     }
 }
 
-void NetServer::send_file_via_pipe(int pipe_fd, const char* path, uint32_t req_id,
-                                    std::function<void(uint64_t,uint64_t)> progress_cb){
-    FILE* fp = fopen(path, "rb");
-    if(!fp){
-        bewe_log_push(0, "send_file_via_pipe: open failed %s\n", path);
-        close(pipe_fd);
-        return;
-    }
-    fseek(fp, 0, SEEK_END); uint64_t total = (uint64_t)ftell(fp); fseek(fp, 0, SEEK_SET);
-    const char* fn = strrchr(path, '/'); fn = fn ? fn+1 : path;
-
-    // 진행상황 브로드캐스트 헬퍼 (phase: 0=REC, 1=Transferring, 2=Done)
-    auto broadcast_progress = [&](uint64_t done, uint8_t phase){
-        PktIqProgress prog{};
-        prog.req_id   = req_id;
-        strncpy(prog.filename, fn, 127);
-        prog.done     = done;
-        prog.total    = total;
-        prog.phase    = phase;
-        auto pkt = make_packet(PacketType::IQ_PROGRESS, &prog, sizeof(prog));
-        std::lock_guard<std::mutex> lk(clients_mtx_);
-        for(auto& cli : clients_){
-            if(!cli->alive.load() || !cli->authed) continue;
-            cli->enqueue(pkt, false);
-        }
-    };
-
-    // Transferring 시작 알림
-    broadcast_progress(0, 1);
-
-    const uint32_t CHUNK = 256 * 1024;
-    std::vector<uint8_t> buf(CHUNK);
-    uint64_t offset = 0;
-
-    while(true){
-        size_t n = fread(buf.data(), 1, CHUNK, fp);
-        if(n == 0) break;
-        if(!central_send_all(pipe_fd, buf.data(), n)){
-            bewe_log_push(0, "send_file_via_pipe: pipe write failed\n");
-            break;
-        }
-        offset += n;
-        if(progress_cb) progress_cb(offset, total);
-        broadcast_progress(offset, 1);
-    }
-    fclose(fp);
-    close(pipe_fd);
-
-    broadcast_progress(total, 2);  // Done
-    if(progress_cb) progress_cb(total, total);
-}
 
 void NetServer::broadcast_db_list(const std::vector<DbFileEntry>& entries){
     uint16_t cnt = (uint16_t)std::min(entries.size(), (size_t)UINT16_MAX);

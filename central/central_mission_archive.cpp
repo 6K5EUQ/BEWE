@@ -576,27 +576,42 @@ void CentralServer::handle_mission_file_list_req(std::shared_ptr<HostRoom> room,
             strncpy(e.filename, n, sizeof(e.filename)-1);
             e.size_bytes = (uint64_t)st.st_size;
             e.mtime_unix = (int64_t)st.st_mtime;
-            // .info sidecar 의 "Operator:" 추출 — DB 탭과 동일 표시용.
-            FILE* fi = fopen(SigMF::sidecar_path(full).c_str(), "r");
-            if(fi){
-                char buf[1024]; size_t br = fread(buf, 1, sizeof(buf)-1, fi); buf[br]=0;
-                fclose(fi);
-                const char* p = buf;
-                while(p && *p){
-                    char k[64]={}, val[128]={};
-                    if(sscanf(p, "%63[^:]: %127[^\n]", k, val) >= 2){
-                        if(strcmp(k, "Operator") == 0){
-                            strncpy(e.operator_name, val, sizeof(e.operator_name)-1);
-                            break;
+            // .info sidecar 의 "Operator:" + note 추출 — DB 탭과 동일 표시용.
+            // (sidecar path, mtime) 캐시 — 5초 폴마다 전 sidecar fopen/파싱 반복 방지.
+            {
+                struct SideMeta { time_t mtime; std::string op, note; };
+                static std::map<std::string, SideMeta> s_cache;
+                static std::mutex s_cache_mtx;
+                std::string sp = SigMF::sidecar_path(full);
+                struct stat ss{};
+                if(stat(sp.c_str(), &ss) == 0){
+                    std::lock_guard<std::mutex> clk(s_cache_mtx);
+                    if(s_cache.size() > 4096) s_cache.clear();
+                    auto it = s_cache.find(sp);
+                    if(it == s_cache.end() || it->second.mtime != ss.st_mtime){
+                        SideMeta m{}; m.mtime = ss.st_mtime;
+                        FILE* fi = fopen(sp.c_str(), "r");
+                        if(fi){
+                            char buf[1024]; size_t br = fread(buf, 1, sizeof(buf)-1, fi); buf[br]=0;
+                            fclose(fi);
+                            const char* p = buf;
+                            while(p && *p){
+                                char k[64]={}, val[128]={};
+                                if(sscanf(p, "%63[^:]: %127[^\n]", k, val) >= 2){
+                                    if(strcmp(k, "Operator") == 0){ m.op = val; break; }
+                                }
+                                const char* nl = strchr(p, '\n');
+                                if(!nl) break;
+                                p = nl + 1;
+                            }
+                            // 파일별 note (IQ=bewe:notes / 그 외=Note: 라인) — 호버 툴팁용
+                            m.note = SigMF::note_from_text(std::string(buf, br));
                         }
+                        it = s_cache.insert_or_assign(sp, std::move(m)).first;
                     }
-                    const char* nl = strchr(p, '\n');
-                    if(!nl) break;
-                    p = nl + 1;
+                    strncpy(e.operator_name, it->second.op.c_str(),   sizeof(e.operator_name)-1);
+                    strncpy(e.note,          it->second.note.c_str(), sizeof(e.note)-1);
                 }
-                // 파일별 note (IQ=bewe:notes / 그 외=Note: 라인) — 호버 툴팁용
-                std::string nt = SigMF::note_from_text(std::string(buf, br));
-                strncpy(e.note, nt.c_str(), sizeof(e.note)-1);
             }
             rows.push_back(e);
         }
@@ -1135,7 +1150,9 @@ void CentralServer::archive_hist_on_fft(std::shared_ptr<HostRoom> room,
     uint32_t       body_len = bewe_len - BEWE_HDR_SIZE - (uint32_t)sizeof(PktFftFrame);
     const size_t   inner    = u6_c ? u6_packed_bytes(fft_size) : (size_t)fft_size;
 
-    std::vector<uint8_t> zbuf, row(fft_size);
+    // 프레임당 힙할당 방지 — host_mux_loop 단일 스레드 전용 스크래치
+    static thread_local std::vector<uint8_t> zbuf, row;
+    row.resize(fft_size);
     const uint8_t* packed = nullptr;
     if(zstd_c){
         zbuf.resize(inner);
@@ -1202,7 +1219,7 @@ void CentralServer::archive_hist_on_fft(std::shared_ptr<HostRoom> room,
         if(room->hist_streams.empty()) return;
     }
 
-    std::vector<uint8_t> folded;
+    static thread_local std::vector<uint8_t> folded;
     for(auto& [fname, st] : room->hist_streams){
         if(!st.fp || !st.fft_size) continue;
         const uint8_t* out     = row.data();
@@ -1221,7 +1238,10 @@ void CentralServer::archive_hist_on_fft(std::shared_ptr<HostRoom> room,
         }
         fwrite(out, 1, out_len, st.fp);
         st.rows_written++;
-        fflush(st.fp);
+        // 행마다 fflush → 1Hz 게이트. close 경로가 최종 flush 를 보장하고,
+        // 크래시 시 최대 1초분(행 수 개)만 stdio 버퍼에서 유실 — 허용 범위.
+        time_t nowf = time(nullptr);
+        if(nowf != st.last_flush){ st.last_flush = nowf; fflush(st.fp); }
     }
 }
 

@@ -201,24 +201,20 @@ void CentralClient::enqueue_central(const void* hdr, size_t hdr_len,
     if(!central_sender_running_.load()) return;
     size_t total = hdr_len + data_len;
     std::lock_guard<std::mutex> lk(central_queue_mtx_);
-    // 큐 오버플로: 드롭 가능한(no_drop=false) 항목만 제거
-    if(!no_drop){
-        while(central_queue_bytes_ + total > CENTRAL_QUEUE_MAX_BYTES && !central_send_queue_.empty()){
-            // no_drop 패킷은 건너뛰고 드롭 가능한 패킷만 제거
-            bool dropped = false;
-            for(auto it = central_send_queue_.begin(); it != central_send_queue_.end(); ++it){
-                if(!it->no_drop){
-                    central_queue_bytes_ -= it->data.size();
-                    central_send_queue_.erase(it);
-                    dropped = true;
-                    break;
-                }
-            }
-            if(!dropped) break; // 드롭 가능한 패킷 없으면 중단
-            // 버린 패킷 카운트. FFT_FRAME 은 droppable 로 보내므로 여기서 버려진 것이
-            // 곧 Central 아카이브에서 빠진 HIST 행이다. LongWaterfall 이 파일 수명 동안
-            // 이 카운터가 늘었는지 보고 "로컬본을 지워도 되는가" 를 판정한다.
-            central_drop_count_.fetch_add(1, std::memory_order_relaxed);
+    // 큐 오버플로: 드롭 가능한(no_drop=false) 항목만 제거 — 앞(오래된 것)부터 단일 패스.
+    // (구현이전엔 매 드롭마다 begin() 부터 재탐색해 O(n·m) 이었다. 순서·결과 동일.)
+    if(!no_drop && central_queue_bytes_ + total > CENTRAL_QUEUE_MAX_BYTES){
+        for(auto it = central_send_queue_.begin();
+            it != central_send_queue_.end() &&
+            central_queue_bytes_ + total > CENTRAL_QUEUE_MAX_BYTES; ){
+            if(!it->no_drop){
+                central_queue_bytes_ -= it->data.size();
+                it = central_send_queue_.erase(it);
+                // 버린 패킷 카운트. FFT_FRAME 은 droppable 로 보내므로 여기서 버려진 것이
+                // 곧 Central 아카이브에서 빠진 HIST 행이다. LongWaterfall 이 파일 수명 동안
+                // 이 카운터가 늘었는지 보고 "로컬본을 지워도 되는가" 를 판정한다.
+                central_drop_count_.fetch_add(1, std::memory_order_relaxed);
+            } else ++it;
         }
     }
     std::vector<uint8_t> pkt;

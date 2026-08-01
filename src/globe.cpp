@@ -293,14 +293,6 @@ void GlobeRenderer::render() {
     glUseProgram(0);
 }
 
-// ── Mouse interaction ─────────────────────────────────────────────────────
-
-bool GlobeRenderer::screen_to_arcball(float mx, float my,
-                                       float& ax, float& ay, float& az) const {
-    // unused — kept for signature compatibility
-    ax = mx; ay = my; az = 0.f;
-    return true;
-}
 
 void GlobeRenderer::on_drag_begin(float mx, float my) {
     drag_ax_ = mx;
@@ -653,19 +645,6 @@ void GlobeRenderer::get_mvp(float* mvp) const {
     memcpy(mvp, mvp_cache_, 64);
 }
 
-void GlobeRenderer::get_view_inv(float* inv) const {
-    // View = trans(-zoom_) * view_rot_T   where view_rot_T = transpose(rot)
-    // view_inv = rot * trans(zoom_)
-    // Camera world pos col = rot * (0,0,zoom,1)^T
-    //   col3,row0 = rot[8]*zoom, col3,row1 = rot[9]*zoom, col3,row2 = rot[10]*zoom
-    float rot[16];
-    mat4_from_quat(rot, qw_, qx_, qy_, qz_);
-    memcpy(inv, rot, 64);
-    inv[12] = rot[8]  * zoom_;
-    inv[13] = rot[9]  * zoom_;
-    inv[14] = rot[10] * zoom_;
-    inv[15] = 1.f;
-}
 
 // ── GL setup ──────────────────────────────────────────────────────────────
 

@@ -370,72 +370,6 @@ void FFTViewer::stop_rec(){
     rec_on.store(false);
 }
 
-// ── Audio 녹음 (복조 음성) ────────────────────────────────────────────────
-void FFTViewer::start_audio_rec(int ch_idx){
-    if(ch_idx<0||ch_idx>=MAX_CHANNELS) return;
-    Channel& ch=channels[ch_idx];
-    if(!ch.filter_active||!ch.dem_run.load()){
-        bewe_log("Audio REC: ch%d not running demod\n",ch_idx); return;
-    }
-    if(ch.audio_rec_on.load()) return;
-
-    // 실제 오디오 SR 계산
-    float bw_hz=fabsf(ch.e-ch.s)*1e6f;
-    uint32_t inter_sr,audio_decim,cap_decim;
-    demod_rates(header.sample_rate,bw_hz,inter_sr,audio_decim,cap_decim);
-    uint32_t asr=inter_sr/std::max(1u,audio_decim);
-    ch.audio_rec_sr=asr;
-
-    time_t t=time(nullptr); struct tm tm2; KST::to_tm(t,tm2);
-    char fn[512];
-    std::string rec_dir=active_audio_dir();
-    if(rec_dir.empty()){
-        // 노미션: 비-미션 로컬 폴더(record/audio)에 저장 → 미션창 LOCAL 탭 DEMOD 에 표시.
-        rec_dir = BEWEPaths::record_audio_dir();
-        mkdir(BEWEPaths::record_dir().c_str(), 0755);
-        mkdir(rec_dir.c_str(), 0755);
-    }
-    float cf_mhz=(ch.s+ch.e)/2.0f;
-    {
-        std::string base = build_iq_demod_filename(*this, "DE", cf_mhz, tm2);
-        snprintf(fn, sizeof(fn), "%s/%s", rec_dir.c_str(), base.c_str());
-    }
-
-    FILE* fp=fopen(fn,"wb");
-    if(!fp){ bewe_log("Audio REC: cannot open %s\n",fn); return; }
-    setvbuf(fp, nullptr, _IOFBF, 1<<16);  // 64KB stdio 버퍼 → 샘플당 write() syscall 제거
-    ch.audio_rec_frames=0;
-    ch.audio_rec_write_wav_hdr(fp,asr,0);
-    ch.audio_rec_fp=fp;
-    ch.audio_rec_path=fn;
-    ch.sqr_state = Channel::SQR_IDLE;
-    ch.sqr_tail_remain = 0;
-    ch.audio_rec_on.store(true,std::memory_order_release);
-
-    // RecEntry 추가
-    {
-        std::lock_guard<std::mutex> lk(rec_entries_mtx);
-        RecEntry e;
-        e.path=fn;
-        std::string s(fn);
-        auto pos=s.rfind('/');
-        e.filename=(pos==std::string::npos)?s:s.substr(pos+1);
-        e.finished=false; e.is_audio=true; e.is_region=false;
-        e.ch_idx=ch_idx;
-        e.t_start=std::chrono::steady_clock::now();
-        rec_entries.push_back(e);
-    }
-
-    bewe_log("Audio REC start ch%d → %s  SR=%u\n",ch_idx,fn,asr);
-
-    float bw_khz = fabsf(ch.e - ch.s) * 1000.f;
-    write_default_info_file(fn, recorder_name(),
-                            (double)cf_mhz, (double)bw_khz, 0.0,
-                            dem_mode_name(ch.mode), login_get_id(),
-                            station_name.c_str(), time(nullptr),
-                            utc_offset_hours());
-}
-
 void FFTViewer::stop_audio_rec(int ch_idx){
     if(ch_idx<0||ch_idx>=MAX_CHANNELS) return;
     Channel& ch=channels[ch_idx];
@@ -444,6 +378,7 @@ void FFTViewer::stop_audio_rec(int ch_idx){
     ch.audio_rec_on.store(false,std::memory_order_release);
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
+    ch.audio_rec_drain();   // worker 정지 확인 후 잔여 스테이징 기록
     FILE* fp=ch.audio_rec_fp;
     ch.audio_rec_fp=nullptr;
     if(fp){
@@ -638,6 +573,7 @@ void FFTViewer::start_iq_rec(int ch_idx){
     if(!fp){ bewe_log("IQ REC: cannot open %s\n",fn); return; }
     setvbuf(fp, nullptr, _IOFBF, 1<<16);  // 64KB stdio 버퍼 → 샘플당 write() syscall 제거
     ch.iq_rec_frames=0;
+    ch.iq_rec_buf.clear();
     ch.iq_rec_cf_hz=(uint64_t)(cf_mhz*1e6);
     ch.iq_rec_start_time=(int64_t)t;
     // raw IQ(.sigmf-data): 헤더 없이 데이터부터 기록. 메타는 아래 .sigmf-meta.
@@ -692,6 +628,7 @@ void FFTViewer::stop_iq_rec(int ch_idx){
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
+    ch.iq_rec_drain();   // worker 정지 확인 후 잔여 스테이징 기록
     FILE* fp=ch.iq_rec_fp;
     ch.iq_rec_fp=nullptr;
     if(fp) fclose(fp);   // raw .sigmf-data — 헤더 재작성 불필요
@@ -763,6 +700,7 @@ void FFTViewer::start_join_audio_rec(int ch_idx){
     if(!fp){ bewe_log("JOIN Audio REC: cannot open %s\n",fn); return; }
     setvbuf(fp, nullptr, _IOFBF, 1<<16);  // 64KB stdio 버퍼 → 샘플당 write() syscall 제거
     ch.audio_rec_frames=0;
+    ch.audio_rec_buf.clear();
     ch.audio_rec_write_wav_hdr(fp,asr,0);
     ch.audio_rec_fp=fp;
     ch.audio_rec_path=fn;
@@ -799,6 +737,7 @@ void FFTViewer::stop_join_audio_rec(int ch_idx){
     ch.audio_rec_on.store(false,std::memory_order_release);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
+    ch.audio_rec_drain();   // worker 정지 확인 후 잔여 스테이징 기록
     FILE* fp=ch.audio_rec_fp;
     ch.audio_rec_fp=nullptr;
     if(fp){

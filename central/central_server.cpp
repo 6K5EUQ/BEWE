@@ -225,11 +225,6 @@ bool CentralServer::start(int port){
     return true;
 }
 
-void CentralServer::run(){
-    while(running_.load())
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-}
-
 void CentralServer::stop(){
     running_.store(false);
     if(listen_fd_ >= 0){ shutdown(listen_fd_, SHUT_RDWR); close(listen_fd_); listen_fd_=-1; }
@@ -463,12 +458,17 @@ void CentralServer::host_mux_loop(std::shared_ptr<HostRoom> room){
     // HOST 접속 시 DB 목록 초기 전송 (Signal Library는 클라가 Refresh 시점에 요청)
     broadcast_db_list(room);
 
-    // flush 전용 스레드: recv 블로킹과 분리하여 JOIN→HOST 패킷 지연 제거
+    // flush 전용 스레드: recv 블로킹과 분리하여 JOIN→HOST 패킷 지연 제거.
+    // cv 통지형 — enqueue_host_send 가 깨운다. 200ms 타임아웃은 alive=false 탈출용.
     std::thread flush_thr([room](){
         std::shared_ptr<HostRoom> r = room;
         while(r->alive.load()){
+            {
+                std::unique_lock<std::mutex> lk(r->host_send_mtx);
+                r->host_send_cv.wait_for(lk, std::chrono::milliseconds(200),
+                    [&]{ return !r->host_send_queue.empty() || !r->alive.load(); });
+            }
             flush_host_send_queue(r);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     });
 
@@ -783,8 +783,8 @@ void CentralServer::dispatch_to_joins(std::shared_ptr<HostRoom> room,
                 printf("[Central] sent %d cached packets to conn_id=%u\n", cache_count, conn_id);
                 // OPERATOR_LIST 갱신 (새 유저 반영)
                 build_and_broadcast_op_list(room);
-                // DB 목록 전송 (Signal Library는 클라가 Refresh 시점에 요청)
-                broadcast_db_list(room);
+                // DB 목록 전송 — 이 JOIN 에만 (타 JOIN/HOST 는 동일본 이미 보유)
+                broadcast_db_list(room, target.get());
                 return;
             }
         }
@@ -955,11 +955,13 @@ void CentralServer::dispatch_to_joins(std::shared_ptr<HostRoom> room,
         if(ch_idx >= MAX_CHANNELS_RELAY) return;
 
         std::lock_guard<std::mutex> jlk(room->joins_mtx);
+        JoinEntry::PktBuf ap;   // 첫 타깃에서 1회 생성, 이후 공유
         for(auto& je : room->joins){
             if(!je->alive.load() || je->fd < 0 || !je->authed) continue;
             if(conn_id != 0xFFFF && conn_id != je->conn_id) continue;
             if(!je->recv_audio[ch_idx]) continue;
-            je->enqueue_audio(bewe_pkt, bewe_len);
+            if(!ap) ap = JoinEntry::make_pkt(bewe_pkt, bewe_len);
+            je->enqueue_audio(ap);
         }
         return;
     }
@@ -1186,6 +1188,9 @@ void CentralServer::dispatch_to_joins(std::shared_ptr<HostRoom> room,
                          bewe_pkt[BEWE_HDR_SIZE + 1] == 1);
     bool is_file_meta = (bewe_type == 0x0E);
 
+    // 페이로드 1회 생성 — 전 타깃 큐가 같은 버퍼 공유 (JOIN 수만큼 딥카피 제거)
+    JoinEntry::PktBuf shared_pkt;
+    if(!targets.empty()) shared_pkt = JoinEntry::make_pkt(bewe_pkt, bewe_len);
     for(auto& je : targets){
         // 다운로드 중 JOIN에는 FFT 보내지 않음 (HB는 ctrl_queue로 계속 감 → LINK 유지)
         if(is_fft && je->active_file_transfers.load(std::memory_order_relaxed) > 0)
@@ -1197,16 +1202,16 @@ void CentralServer::dispatch_to_joins(std::shared_ptr<HostRoom> room,
         if(is_file){
             if(is_file_meta)
                 je->active_file_transfers.fetch_add(1, std::memory_order_relaxed);
-            je->enqueue_file(bewe_pkt, bewe_len);   // 한도 초과 시 BLOCK → HOST까지 backpressure
+            je->enqueue_file(shared_pkt);   // 한도 초과 시 BLOCK → HOST까지 backpressure
             if(is_file_last){
                 int prev = je->active_file_transfers.fetch_sub(1, std::memory_order_relaxed);
                 if(prev <= 0) je->active_file_transfers.store(0, std::memory_order_relaxed); // saturate
             }
         }
         else if(is_ctrl)
-            je->enqueue_ctrl(bewe_pkt, bewe_len);
+            je->enqueue_ctrl(shared_pkt);
         else
-            je->enqueue_data(bewe_pkt, bewe_len);
+            je->enqueue_data(shared_pkt);
     }
     targets.clear();   // shared_ptr 즉시 해제 (수명 유지하면 JoinEntry 파괴 지연)
 }
@@ -1247,9 +1252,9 @@ bool CentralServer::intercept_join_cmd(std::shared_ptr<JoinEntry> je,
         return true;
     }
 
-    // ── DB_LIST_REQ: 즉시 재전송 ─────────────────────────────────
+    // ── DB_LIST_REQ: 요청한 JOIN 에만 즉시 재전송 ─────────────────
     if(bewe_type == BEWE_TYPE_DB_LIST_REQ){
-        broadcast_db_list(room);
+        broadcast_db_list(room, je.get());
         return true;
     }
 
@@ -1874,11 +1879,13 @@ void CentralServer::handle_db_save_from_archive(std::shared_ptr<HostRoom> room,
     broadcast_db_list(room);
 }
 
-void CentralServer::broadcast_db_list(std::shared_ptr<HostRoom> room){
-    // ~/BEWE/DataBase/{iq,audio,hist}/ 모두 스캔
+void CentralServer::broadcast_db_list(std::shared_ptr<HostRoom> room, JoinEntry* only){
+    // ~/BEWE/DataBase/{iq,audio,hist}/ 모두 스캔.
+    // 1단계: (mtime, path) 만 수집 — sidecar 파싱은 목록에 실릴 상위 500개만 한다.
     std::string db_base = db_base_dir();
 
-    std::vector<std::pair<time_t, DbFileEntry>> with_mtime;
+    struct Cand { time_t mtime; uint64_t size; std::string fp, fn; };
+    std::vector<Cand> cands;
     auto scan_dir = [&](const std::string& dir, const char* allow_ext1, const char* allow_ext2){
         DIR* top = opendir(dir.c_str());
         if(!top) return;
@@ -1897,52 +1904,23 @@ void CentralServer::broadcast_db_list(std::shared_ptr<HostRoom> room){
             std::string fp = dir + "/" + fn;
             struct stat st{};
             if(stat(fp.c_str(),&st)!=0 || !S_ISREG(st.st_mode)) continue;
-            DbFileEntry e{};
-            strncpy(e.filename, fn.c_str(), 127);
-            e.size_bytes = (uint64_t)st.st_size;
-            FILE* fi = fopen(SigMF::sidecar_path(fp).c_str(), "r");
-            if(fi){
-                size_t n = fread(e.info_data, 1, sizeof(e.info_data)-1, fi);
-                e.info_data[n] = '\0';
-                fclose(fi);
-                // .sigmf-meta (JSON): "bewe:operator": "<val>"  — IQ
-                const char* jp = strstr(e.info_data, "\"bewe:operator\"");
-                if(jp){
-                    const char* c = strchr(jp + 15, ':');           // 키 뒤 콜론
-                    const char* q1 = c ? strchr(c, '"') : nullptr;  // 값 여는 따옴표
-                    const char* q2 = q1 ? strchr(q1 + 1, '"') : nullptr;
-                    if(q2 && q2 > q1 + 1){
-                        size_t len = (size_t)(q2 - q1 - 1);
-                        if(len > 31) len = 31;
-                        strncpy(e.operator_name, q1 + 1, len);
-                    }
-                }
-                // .info (plain): "Operator: <val>"  — DEMOD/legacy
-                if(!e.operator_name[0]){
-                    const char* p = e.info_data;
-                    while(p && *p){
-                        char k[64]={},val[128]={};
-                        if(sscanf(p,"%63[^:]: %127[^\n]",k,val)>=2){
-                            if(strcmp(k,"Operator")==0){ strncpy(e.operator_name,val,31); break; }
-                        }
-                        const char* nl = strchr(p,'\n');
-                        if(!nl) break;
-                        p = nl + 1;
-                    }
-                }
-            }
-            with_mtime.emplace_back(st.st_mtime, e);
+            cands.push_back({st.st_mtime, (uint64_t)st.st_size, std::move(fp), std::move(fn)});
         }
         closedir(top);
     };
     scan_dir(db_base + "/iq",    ".wav",      ".sigmf-data");
     scan_dir(db_base + "/audio", ".wav",      nullptr);
     scan_dir(db_base + "/hist",  ".bewehist", ".wav");
-    // mtime 내림차순 정렬 (최신이 위)
-    std::sort(with_mtime.begin(), with_mtime.end(),
-              [](const auto& a, const auto& b){ return a.first > b.first; });
-    // BEWE 패킷 빌드 — 중간 버퍼 없이 bewe 에 직접
-    uint16_t cnt = (uint16_t)std::min(with_mtime.size(), (size_t)500);
+    // mtime 내림차순 상위 500 — 나머지는 정렬조차 불필요
+    uint16_t cnt = (uint16_t)std::min(cands.size(), (size_t)500);
+    auto newer = [](const Cand& a, const Cand& b){ return a.mtime > b.mtime; };
+    if(cands.size() > cnt){
+        std::partial_sort(cands.begin(), cands.begin()+cnt, cands.end(), newer);
+        cands.resize(cnt);
+    } else {
+        std::sort(cands.begin(), cands.end(), newer);
+    }
+    // BEWE 패킷 빌드 — 중간 버퍼 없이 bewe 에 직접, sidecar 는 여기서만 읽는다
     size_t payload_sz = sizeof(PktDbList) + cnt * sizeof(DbFileEntry);
     std::vector<uint8_t> bewe(9 + payload_sz, 0);
     memcpy(bewe.data(), "BEWE", 4);
@@ -1952,17 +1930,62 @@ void CentralServer::broadcast_db_list(std::shared_ptr<HostRoom> room){
     auto* hdr = reinterpret_cast<PktDbList*>(bewe.data() + 9);
     hdr->count = cnt;
     auto* dst = reinterpret_cast<DbFileEntry*>(bewe.data() + 9 + sizeof(PktDbList));
-    for(uint16_t i = 0; i < cnt; i++)
-        memcpy(&dst[i], &with_mtime[i].second, sizeof(DbFileEntry));
+    for(uint16_t i = 0; i < cnt; i++){
+        DbFileEntry& e = dst[i];
+        strncpy(e.filename, cands[i].fn.c_str(), 127);
+        e.size_bytes = cands[i].size;
+        FILE* fi = fopen(SigMF::sidecar_path(cands[i].fp).c_str(), "r");
+        if(fi){
+            size_t n = fread(e.info_data, 1, sizeof(e.info_data)-1, fi);
+            e.info_data[n] = '\0';
+            fclose(fi);
+            // .sigmf-meta (JSON): "bewe:operator": "<val>"  — IQ
+            const char* jp = strstr(e.info_data, "\"bewe:operator\"");
+            if(jp){
+                const char* c = strchr(jp + 15, ':');           // 키 뒤 콜론
+                const char* q1 = c ? strchr(c, '"') : nullptr;  // 값 여는 따옴표
+                const char* q2 = q1 ? strchr(q1 + 1, '"') : nullptr;
+                if(q2 && q2 > q1 + 1){
+                    size_t len = (size_t)(q2 - q1 - 1);
+                    if(len > 31) len = 31;
+                    strncpy(e.operator_name, q1 + 1, len);
+                }
+            }
+            // .info (plain): "Operator: <val>"  — DEMOD/legacy
+            if(!e.operator_name[0]){
+                const char* p = e.info_data;
+                while(p && *p){
+                    char k[64]={},val[128]={};
+                    if(sscanf(p,"%63[^:]: %127[^\n]",k,val)>=2){
+                        if(strcmp(k,"Operator")==0){ strncpy(e.operator_name,val,31); break; }
+                    }
+                    const char* nl = strchr(p,'\n');
+                    if(!nl) break;
+                    p = nl + 1;
+                }
+            }
+        }
+    }
+
+    // only 지정 (신규 JOIN auth): 그 JOIN 에만 전송 — HOST/타 JOIN 은 동일 목록을
+    // 이미 보유하므로 596KB 재전송이 낭비다 (각 수신자가 갖는 최종 내용은 동일).
+    if(only){
+        only->enqueue_ctrl(bewe.data(), bewe.size());
+        printf("[Central] DB_LIST to conn_id=%u: %u files\n", only->conn_id, cnt);
+        return;
+    }
 
     // HOST에 전송
     enqueue_host_send(room, 0xFFFF, CentralMuxType::DATA, bewe.data(), (uint32_t)bewe.size());
 
-    // 모든 JOIN에 전송
-    std::lock_guard<std::mutex> jlk(room->joins_mtx);
-    for(auto& je : room->joins){
-        if(!je->alive.load() || je->fd < 0 || !je->authed) continue;
-        je->enqueue_ctrl(bewe.data(), bewe.size());
+    // 모든 JOIN에 전송 (버퍼 1회 생성 공유)
+    {
+        auto bp = JoinEntry::make_pkt(bewe.data(), bewe.size());
+        std::lock_guard<std::mutex> jlk(room->joins_mtx);
+        for(auto& je : room->joins){
+            if(!je->alive.load() || je->fd < 0 || !je->authed) continue;
+            je->enqueue_ctrl(bp);
+        }
     }
 
     printf("[Central] DB_LIST broadcast: %u files\n", cnt);
@@ -1999,7 +2022,9 @@ static std::string module_archive_dir(const char* mod, const char* date8){
 // "YYYYMMDD" 검증 (JOIN/HOST 공급 문자열 — 경로 주입 방지)
 static bool valid_date8(const char* d){
     for(int i=0;i<8;i++) if(d[i]<'0'||d[i]>'9') return false;
-    return d[8]==0 || true;
+    // 정확히 8자 종료 강제 — `|| true` 로 무력화돼 있던 검사 복원 (8자 뒤 임의
+    // 문자열이 경로에 그대로 붙는 주입 창구였다)
+    return d[8]==0;
 }
 // station_id ("DGS-2_DGS-2") → 표시명 ("DGS-2"). 경로주입 방어: 파일명이 되므로
 // 영숫자/'-'/'_' 만 허용 ('/'·'.'·기타 → '_' 치환). '_' 는 station_id 구분자라 첫 토큰만 취함.
@@ -2458,7 +2483,9 @@ void CentralServer::rebuild_and_broadcast_ch_sync(std::shared_ptr<HostRoom> room
     if(base_sync.size() < BEWE_HDR_SIZE + CH_SYNC_ENTRY_SIZE * MAX_CHANNELS_RELAY) return;
 
     uint8_t* payload = base_sync.data() + BEWE_HDR_SIZE;
-    std::vector<uint8_t> out;   // JOIN/HOST 로 보낼 압축본 (joins_mtx 안에서 채움)
+    // mask 재작성 + JOIN 스냅샷만 joins_mtx 안에서 — zstd 압축은 락 밖에서 돈다
+    static thread_local std::vector<std::shared_ptr<JoinEntry>> snap;
+    snap.clear();
     {
         std::lock_guard<std::mutex> jlk(room->joins_mtx);
         for(int ch = 0; ch < MAX_CHANNELS_RELAY; ch++){
@@ -2474,14 +2501,19 @@ void CentralServer::rebuild_and_broadcast_ch_sync(std::shared_ptr<HostRoom> room
             }
             memcpy(entry + CH_SYNC_MASK_OFFSET, &new_mask, sizeof(new_mask));
         }
-
-        // JOIN/HOST 로는 zstd 압축본 전송 (v13). 캐시는 raw(base_sync) 유지 — CH_LIST 위치파싱용.
-        out = compress_chsync(base_sync);
         for(auto& je : room->joins){
             if(!je->alive.load() || je->fd < 0) continue;
-            je->enqueue_ctrl(out.data(), out.size());
+            snap.push_back(je);
         }
-    }  // joins_mtx 해제 후 cache/host 작업
+    }
+
+    // JOIN/HOST 로는 zstd 압축본 전송 (v13). 캐시는 raw(base_sync) 유지 — CH_LIST 위치파싱용.
+    std::vector<uint8_t> out = compress_chsync(base_sync);
+    {
+        auto op = JoinEntry::make_pkt(out.data(), out.size());   // 1회 생성 공유
+        for(auto& je : snap) je->enqueue_ctrl(op);
+    }
+    snap.clear();
 
     {
         std::lock_guard<std::mutex> clk(room->cache_mtx);
@@ -2493,24 +2525,38 @@ void CentralServer::rebuild_and_broadcast_ch_sync(std::shared_ptr<HostRoom> room
         enqueue_host_send(room, 0xFFFF, CentralMuxType::DATA, out.data(), (uint32_t)out.size());
 }
 
-// 자신의 LAN IPv4 주소 목록 수집 (루프백·링크로컬 제외)
+// 자신의 LAN IPv4 주소 목록 수집 (루프백·링크로컬 제외).
+// 60초 캐시 — LIST_REQ 폴링(클라이언트당 1Hz)마다 getifaddrs 를 돌리지 않는다.
 static void collect_lan_ips(CentralListResp& resp){
-    resp.lan_ip_count = 0;
-    memset(resp.lan_ips, 0, sizeof(resp.lan_ips));
-    ifaddrs* ifa = nullptr;
-    if(getifaddrs(&ifa) != 0) return;
-    for(ifaddrs* p = ifa; p; p = p->ifa_next){
-        if(!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
-        auto* sin = reinterpret_cast<sockaddr_in*>(p->ifa_addr);
-        uint32_t ip = ntohl(sin->sin_addr.s_addr);
-        if((ip >> 24) == 127) continue;
-        if((ip >> 16) == 0xA9FE) continue;
-        if(resp.lan_ip_count >= CENTRAL_MAX_LAN_IPS) break;
-        const char* s = inet_ntoa(sin->sin_addr);
-        strncpy(resp.lan_ips[resp.lan_ip_count], s, 15);
-        resp.lan_ip_count++;
+    static std::mutex m;
+    static time_t  t0 = 0;
+    static uint8_t c_cnt = 0;
+    static char    c_ips[CENTRAL_MAX_LAN_IPS][16] = {};
+    std::lock_guard<std::mutex> lk(m);
+    time_t now = time(nullptr);
+    if(t0 == 0 || now - t0 >= 60){
+        t0 = now;
+        c_cnt = 0;
+        memset(c_ips, 0, sizeof(c_ips));
+        ifaddrs* ifa = nullptr;
+        if(getifaddrs(&ifa) == 0){
+            for(ifaddrs* p = ifa; p; p = p->ifa_next){
+                if(!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+                auto* sin = reinterpret_cast<sockaddr_in*>(p->ifa_addr);
+                uint32_t ip = ntohl(sin->sin_addr.s_addr);
+                if((ip >> 24) == 127) continue;
+                if((ip >> 16) == 0xA9FE) continue;
+                if(c_cnt >= CENTRAL_MAX_LAN_IPS) break;
+                const char* s = inet_ntoa(sin->sin_addr);
+                strncpy(c_ips[c_cnt], s, 15);
+                c_cnt++;
+            }
+            freeifaddrs(ifa);
+        }
     }
-    freeifaddrs(ifa);
+    resp.lan_ip_count = c_cnt;
+    memset(resp.lan_ips, 0, sizeof(resp.lan_ips));
+    for(uint8_t i = 0; i < c_cnt; i++) memcpy(resp.lan_ips[i], c_ips[i], 16);
 }
 
 void CentralServer::handle_list_req(int fd){
@@ -2720,13 +2766,14 @@ void CentralServer::watchdog_loop(){
                 memcpy(payload + 16, &total_b, 8);
                 // payload[24..87] station[64] = 0 (Central)
                 auto bewe = make_bewe_packet(BEWE_TYPE_DISK_STAT, payload, sizeof(payload));
+                auto bp = JoinEntry::make_pkt(bewe.data(), bewe.size());   // 1회 생성 공유
                 std::lock_guard<std::mutex> rlk(rooms_mtx_);
                 for(auto& r : rooms_){
                     if(!r->alive.load()) continue;
                     std::lock_guard<std::mutex> jlk(r->joins_mtx);
                     for(auto& je : r->joins){
                         if(!je->alive.load() || je->fd < 0 || !je->authed) continue;
-                        je->enqueue_ctrl(bewe.data(), bewe.size());
+                        je->enqueue_ctrl(bp);
                     }
                 }
             }
@@ -2747,7 +2794,9 @@ void CentralServer::broadcast_room_chat(HostRoom* room, JoinEntry* skip_join,
             if(je->alive.load() && je->authed && je->fd >= 0 && je.get() != skip_join)
                 joins.push_back(je);
     }
-    for(auto& je : joins) je->enqueue_data(bewe_pkt, bewe_len);
+    JoinEntry::PktBuf cp;
+    if(!joins.empty()) cp = JoinEntry::make_pkt(bewe_pkt, bewe_len);
+    for(auto& je : joins) je->enqueue_data(cp);
 }
 
 void CentralServer::broadcast_global_chat(const uint8_t* bewe_pkt, size_t bewe_len,
@@ -2775,12 +2824,15 @@ void CentralServer::broadcast_global_chat(const uint8_t* bewe_pkt, size_t bewe_l
         }
     }
 
+    JoinEntry::PktBuf gp;
     for(auto& t : targets){
         if(t.send_to_host && t.room->fd >= 0){
             enqueue_host_send(t.room, 0xFFFF, CentralMuxType::DATA, bewe_pkt, (uint32_t)bewe_len);
         }
-        for(auto& je : t.joins)
-            je->enqueue_data(bewe_pkt, bewe_len);
+        for(auto& je : t.joins){
+            if(!gp) gp = JoinEntry::make_pkt(bewe_pkt, bewe_len);
+            je->enqueue_data(gp);
+        }
     }
 }
 

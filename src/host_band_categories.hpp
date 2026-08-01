@@ -32,7 +32,5 @@ bool        lookup(uint8_t id, PktBandCategory& out);
 std::string name_of(uint8_t id);
 
 // In-process host edits (UI menu): apply + save + rebuild.
-bool host_local_upsert(const PktBandCategory& in);
-bool host_local_delete(uint8_t id);
 
 } // namespace HostBandCategories

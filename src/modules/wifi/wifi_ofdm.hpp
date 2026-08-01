@@ -49,13 +49,16 @@ struct Viterbi {
         }
     }
     // soft bits: +1=강한0, -1=강한1 (LLR 부호). 코드길이 = 2*nbits.
+    std::vector<uint8_t> tb_;   // traceback 스크래치 (비트당 벡터 할당 방지, 재사용)
     void decode(const float* soft, int nbits, std::vector<uint8_t>& out){
         const float INF=1e9f;
         std::vector<float> pm(NS, INF), npm(NS);
-        std::vector<std::vector<uint8_t>> tb(nbits, std::vector<uint8_t>(NS));
+        if(tb_.size() < (size_t)nbits*NS) tb_.resize((size_t)nbits*NS);
+        uint8_t* tb = tb_.data();           // [t*NS + state]
         pm[0]=0;
         for(int t=0;t<nbits;t++){
             float a=soft[2*t], b=soft[2*t+1];
+            uint8_t* tbt = tb + (size_t)t*NS;
             for(int s=0;s<NS;s++) npm[s]=INF;
             for(int s=0;s<NS;s++){
                 if(pm[s]>=INF) continue;
@@ -65,7 +68,7 @@ struct Viterbi {
                     float e1 = (o1[s][in]? -b : b);
                     float m = pm[s] - e0 - e1;        // 상관 클수록 metric 감소(=좋음)
                     int n=ns[s][in];
-                    if(m<npm[n]){ npm[n]=m; tb[t][n]=(uint8_t)s; }
+                    if(m<npm[n]){ npm[n]=m; tbt[n]=(uint8_t)s; }
                 }
             }
             pm.swap(npm);
@@ -74,7 +77,7 @@ struct Viterbi {
         int s=0;
         std::vector<uint8_t> bits(nbits);
         // 디코드 비트 = 그 스텝 후 상태의 LSB (reg = (prev<<1)|in → ns&1 = in)
-        for(int t=nbits-1;t>=0;t--){ int ps=tb[t][s]; bits[t]=(uint8_t)(s&1); s=ps; }
+        for(int t=nbits-1;t>=0;t--){ int ps=tb[(size_t)t*NS+s]; bits[t]=(uint8_t)(s&1); s=ps; }
         out.assign(bits.begin(),bits.end());
     }
 };
@@ -124,19 +127,44 @@ struct FFT64 {
         fftwf_execute(p); for(int k=0;k<64;k++) f[k]=cf(o[k][0],o[k][1]); }
 };
 
-// 분수 리샘플 (windowed-sinc 32탭) → 정확히 out_sr
-inline std::vector<cf> ofdm_resample(const std::vector<cf>& in, double in_sr, double out_sr){
-    if(std::fabs(in_sr-out_sr)<1.0) return in;
-    const double PI=3.14159265358979323846; double step=in_sr/out_sr;
-    if((long)(in.size()/step)<=64) return {};
-    size_t nout=(size_t)(in.size()/step)-32; std::vector<cf> out; out.reserve(nout); const int T=16;
-    for(size_t m=0;m<nout;m++){ double tin=m*step; long c=(long)std::floor(tin); double fr=tin-c;
+// ── 공용 폴리페이즈 분수 리샘플러 (windowed-sinc 2T탭) ──────────────────────
+// fr(분수 위상)을 NPH 격자로 양자화한 사전계산 커널 사용 — 출력샘플×탭당 sin/cos
+// 3회를 테이블 조회 1회로 대체. (양자화로 원식 대비 최하위 자릿수 차이 발생 —
+// 소비자는 CRC/FCS 게이트를 통과한 프레임만 쓰므로 디코드 결과 무영향.)
+inline constexpr int RESAMP_NPH = 512;
+template<int T>
+inline const std::vector<double>& resample_kernel_tab(){
+    static const std::vector<double> tab = []{
+        const double PI=3.14159265358979323846;
+        std::vector<double> t((size_t)(RESAMP_NPH+1)*2*T);
+        for(int p=0;p<=RESAMP_NPH;p++){
+            double fr=(double)p/RESAMP_NPH;
+            for(int k=-T+1;k<=T;k++){
+                double xx=PI*(k-fr); double s=(std::fabs(xx)<1e-6)?1.0:std::sin(xx)/xx;
+                double aa=(double)(k-fr)/T; double w=0.42+0.5*std::cos(PI*aa)+0.08*std::cos(2*PI*aa);
+                t[(size_t)p*2*T+(k+T-1)]=s*w;
+            }
+        }
+        return t;
+    }();
+    return tab;
+}
+// step = in_sr/out_sr. 포인터 입력 — 호출측 버퍼 복사 불필요.
+template<int T>
+inline std::vector<cf> resample_frac(const cf* in, size_t nin, double step){
+    if((long)(nin/step)<=64) return {};
+    size_t nout=(size_t)(nin/step)-32;
+    const auto& tab = resample_kernel_tab<T>();
+    std::vector<cf> out; out.reserve(nout);
+    for(size_t m=0;m<nout;m++){
+        double tin=m*step; long c=(long)std::floor(tin); double fr=tin-c;
+        int ph=(int)(fr*RESAMP_NPH+0.5);
+        const double* h=&tab[(size_t)ph*2*T];
         cf acc(0,0); double ws=0;
-        for(int k=-T+1;k<=T;k++){ long id=c+k; if(id<0||id>=(long)in.size())continue;
-            double xx=PI*(k-fr); double s=(std::fabs(xx)<1e-6)?1.0:std::sin(xx)/xx;
-            double aa=(double)(k-fr)/T; double w=0.42+0.5*std::cos(PI*aa)+0.08*std::cos(2*PI*aa);
-            double h=s*w; acc+=in[id]*(float)h; ws+=h; }
-        out.push_back(ws>1e-9?acc/(float)ws:acc); }
+        for(int k=-T+1;k<=T;k++){ long id=c+k; if(id<0||id>=(long)nin)continue;
+            double hv=h[k+T-1]; acc+=in[id]*(float)hv; ws+=hv; }
+        out.push_back(ws>1e-9?acc/(float)ws:acc);
+    }
     return out;
 }
 
@@ -147,7 +175,7 @@ inline void decode_buffer(const cf* xin, size_t nin, double in_sr,
     const double PI=3.14159265358979323846, FS=20.0e6;
     std::vector<cf> rs; const cf* xp; size_t N;
     if(std::fabs(in_sr-FS)<1.0){ xp=xin; N=nin; }
-    else { std::vector<cf> tmp(xin,xin+nin); rs=ofdm_resample(tmp,in_sr,FS); xp=rs.data(); N=rs.size(); }
+    else { rs=resample_frac<16>(xin,nin,in_sr/FS); xp=rs.data(); N=rs.size(); }
     if(N<512) return;
     auto& x=xp;
     static thread_local FFT64 fft;  Viterbi vit;

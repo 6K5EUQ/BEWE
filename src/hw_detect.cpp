@@ -11,38 +11,6 @@
 // "bladerf" / "rtlsdr" / "pluto" 중 하나.
 std::string g_sdr_force;
 
-// UI용: 이 PC에 붙어 있는 SDR 목록 반환 ("bladerf","pluto","rtlsdr")
-std::vector<std::string> scan_available_sdrs(){
-    std::vector<std::string> out;
-    struct bladerf_devinfo* blade_list = nullptr;
-    int n_blade = bladerf_get_device_list(&blade_list);
-    if(n_blade > 0) out.push_back("bladerf");
-    if(blade_list) bladerf_free_device_list(blade_list);
-
-    // Pluto
-    {
-        struct iio_scan_context* sc = iio_create_scan_context(nullptr, 0);
-        bool found = false;
-        if(sc){
-            struct iio_context_info** info = nullptr;
-            ssize_t n = iio_scan_context_get_info_list(sc, &info);
-            for(ssize_t i = 0; i < n; i++){
-                const char* desc = iio_context_info_get_description(info[i]);
-                if(desc && (strstr(desc, "PlutoSDR") || strstr(desc, "ADALM"))){ found = true; break; }
-            }
-            if(info) iio_context_info_list_free(info);
-            iio_scan_context_destroy(sc);
-        }
-        if(!found){
-            struct iio_context* c = iio_create_context_from_uri("usb:");
-            if(c){ iio_context_destroy(c); found = true; }
-        }
-        if(found) out.push_back("pluto");
-    }
-
-    if(rtlsdr_get_device_count() > 0) out.push_back("rtlsdr");
-    return out;
-}
 
 // 상태표시 전용 저빈도 presence 체크 (/rx stop 대기 중 수초 간격 호출됨).
 // scan_available_sdrs() 의 Pluto usb: 폴백은 미검출 시 libiio 가 stderr 에 에러를 찍어
@@ -105,6 +73,28 @@ bool FFTViewer::initialize(float cf_mhz, float sr_msps){
         return initialize_kraken(cf_mhz);
     }
 
+    // 강제 선택자 처리 — 지정된 백엔드만 프로브한다 (다른 장치를 건드리지도,
+    // 감지 지연을 만들지도 않는다)
+    if(g_sdr_force == "pluto"){
+        if(!detect_pluto()){ fprintf(stderr,"SDR: Pluto 지정되었으나 감지 안 됨\n"); return false; }
+        bewe_log_push(0,"HW: ADALM-Pluto (강제 선택)\n");
+        return initialize_pluto(cf_mhz, sr_msps > 0 ? sr_msps : 3.2f);
+    }
+    if(g_sdr_force == "bladerf"){
+        struct bladerf_devinfo* bl = nullptr;
+        int nb = bladerf_get_device_list(&bl);
+        if(bl) bladerf_free_device_list(bl);
+        if(nb <= 0){ fprintf(stderr,"SDR: BladeRF 지정되었으나 감지 안 됨\n"); return false; }
+        bewe_log_push(0,"HW: BladeRF (강제 선택)\n");
+        return initialize_bladerf(cf_mhz, sr_msps > 0 ? sr_msps : 61.44f);
+    }
+    if(g_sdr_force == "rtlsdr"){
+        if(rtlsdr_get_device_count() == 0){ fprintf(stderr,"SDR: RTL-SDR 지정되었으나 감지 안 됨\n"); return false; }
+        bewe_log_push(0,"HW: RTL-SDR (강제 선택)\n");
+        return initialize_rtlsdr(cf_mhz);
+    }
+
+    // ── 자동 감지 (강제 선택 없음) ──────────────────────────────────────
     // BladeRF 감지
     struct bladerf_devinfo* blade_list = nullptr;
     int n_blade = bladerf_get_device_list(&blade_list);
@@ -117,23 +107,6 @@ bool FFTViewer::initialize(float cf_mhz, float sr_msps){
 
     // Pluto 감지
     bool has_pluto = detect_pluto();
-
-    // 강제 선택자 처리
-    if(g_sdr_force == "pluto"){
-        if(!has_pluto){ fprintf(stderr,"SDR: Pluto 지정되었으나 감지 안 됨\n"); return false; }
-        bewe_log_push(0,"HW: ADALM-Pluto (강제 선택)\n");
-        return initialize_pluto(cf_mhz, sr_msps > 0 ? sr_msps : 3.2f);
-    }
-    if(g_sdr_force == "bladerf"){
-        if(!has_blade){ fprintf(stderr,"SDR: BladeRF 지정되었으나 감지 안 됨\n"); return false; }
-        bewe_log_push(0,"HW: BladeRF (강제 선택)\n");
-        return initialize_bladerf(cf_mhz, sr_msps > 0 ? sr_msps : 61.44f);
-    }
-    if(g_sdr_force == "rtlsdr"){
-        if(!has_rtl){ fprintf(stderr,"SDR: RTL-SDR 지정되었으나 감지 안 됨\n"); return false; }
-        bewe_log_push(0,"HW: RTL-SDR (강제 선택)\n");
-        return initialize_rtlsdr(cf_mhz);
-    }
 
     if(!has_blade && !has_rtl && !has_pluto){
         fprintf(stderr,"No SDR device found (BladeRF/RTL-SDR/Pluto)\n");

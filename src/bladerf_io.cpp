@@ -142,7 +142,6 @@ bool usb_reset_vidpid(uint16_t want_vid, uint16_t want_pid, const char* label){
     return true;
 }
 
-bool bladerf_usb_reset(){ return usb_reset_vidpid(0x2cf0, 0x5250, "BladeRF"); }
 
 // ── USB 딥 파워사이클 (/powercycle) ──────────────────────────────────────
 // bladerf_usb_reset() 의 USBDEVFS_RESET 은 /dev/bus/usb 노드를 열어 ioctl 을 쏘는
@@ -553,9 +552,11 @@ void FFTViewer::capture_and_process(){
             }
             win_skip=0;
             // Fill input samples (first fft_input_size), rest stays zero (zero-padding)
+            // 역수 곱 — Pluto/Kraken 백엔드와 동일하게 샘플당 나눗셈 제거
+            const float inv_scale = 1.0f/hw.iq_scale;
             for(int i=0;i<fft_input_size;i++){
-                fft_in[i][0]=iq[i*2]/hw.iq_scale;
-                fft_in[i][1]=iq[i*2+1]/hw.iq_scale;
+                fft_in[i][0]=iq[i*2]*inv_scale;
+                fft_in[i][1]=iq[i*2+1]*inv_scale;
             }
             // Nuttall window via VOLK SIMD (complex × real element-wise)
             volk_32fc_32f_multiply_32fc((lv_32fc_t*)fft_in, (lv_32fc_t*)fft_in,
@@ -578,81 +579,7 @@ void FFTViewer::capture_and_process(){
                     rx_pos+=fft_input_size; rx_avail-=fft_input_size;
                     continue;
                 }
-                int fi=total_ffts%FFT_HISTORY_ROWS;
-                float* rowp=fft_data.data()+fi*fft_size;
-                {std::lock_guard<std::mutex> lk(data_mtx);
-                 // current_spectrum은 UI 스레드 전용(픽셀별 peak) > 캡처가 절대 쓰지 않음
-                 // (과거 bin별 avg를 여기에 덮어써 UI 파워스펙트럼에 1프레임 깨짐 유발했음)
-                 // dB 변환: 10*log10(pacc/fcnt) = 3.0103*log2(pacc) - 10*log10(fcnt).
-                 // 스칼라 log10f 루프(bin 당 1회) → VOLK SIMD log2 로 교체 (NEON/AVX).
-                 // pacc 는 항상 >=1e-10 (누적 시 +1e-10f) 이라 -inf 없음. 오차 <1e-3 dB.
-                 {
-                     volk_32f_log2_32f(rowp, pacc.data(), (unsigned int)fft_size);
-                     volk_32f_s32f_multiply_32f(rowp, rowp, 3.01029996f, (unsigned int)fft_size);
-                     const float row_off = 10.0f*log10f((float)fcnt);
-                     for(int i=0;i<fft_size;i++) rowp[i] -= row_off;
-                 }
-                 // 비-캡처 스레드 요청 처리 (set_frequency/init) — 여기서만 autoscale 상태 변경 (레이스 X)
-                 if(autoscale_req.exchange(false)){
-                     autoscale_accum.clear(); autoscale_init=false; autoscale_active=true;
-                     autoscale_wp=0; autoscale_buf_full=false;
-                     sq_recalib_req.store(true, std::memory_order_relaxed);  // 노이즈플로어 변동 → 자동 스컬치 재캘리브
-                 }
-                 if(autoscale_active){
-                     auto now_as=std::chrono::steady_clock::now();
-                     if(autoscale_start==std::chrono::steady_clock::time_point{})
-                         autoscale_start=now_as;   // 데드라인 기준 — 재트리거로 되감지 않는다
-                     if(!autoscale_init){
-                         size_t cap=(size_t)fft_size*100;
-                         if(autoscale_accum.size()!=cap) autoscale_accum.assign(cap,0.0f);
-                         autoscale_wp=0; autoscale_buf_full=false;
-                         autoscale_last=now_as;
-                         autoscale_init=true;
-                     }
-                     size_t cap=autoscale_accum.size();
-                     for(int i=1;i<fft_size;i++){
-                         autoscale_accum[autoscale_wp]=rowp[i];  // current_spectrum 대신 rowp 직접 사용
-                         if(++autoscale_wp>=cap){ autoscale_wp=0; autoscale_buf_full=true; }
-                     }
-                     float el=std::chrono::duration<float>(now_as-autoscale_last).count();
-                     float el_total=std::chrono::duration<float>(now_as-autoscale_start).count();
-                     bool  deadline=el_total>=AUTOSCALE_DEADLINE_S;   // 재트리거 폭주 시 강제 확정
-                     if((el>=1.0f||deadline)&&(autoscale_buf_full||autoscale_wp>0)){
-                         size_t n=autoscale_buf_full?cap:autoscale_wp;
-                         std::vector<float> tmp(autoscale_accum.begin(),
-                                                autoscale_accum.begin()+(ptrdiff_t)n);
-                         // 노이즈 플로어: 15% 분위수 → pmin = noise - 5dB
-                         // 피크: 99% 분위수 → pmax = peak + 20dB
-                         size_t idx_lo=(size_t)(n*0.15f);
-                         std::nth_element(tmp.begin(),tmp.begin()+(ptrdiff_t)idx_lo,tmp.end());
-                         float noise=tmp[idx_lo];
-                         float peak=*std::max_element(tmp.begin(),tmp.end());
-                         display_power_min=noise-5.0f;
-                         display_power_max=peak+20.0f;
-                         if(display_power_max-display_power_min<20.f)
-                             display_power_max=display_power_min+20.f;
-                         header.power_min=display_power_min;
-                         header.power_max=display_power_max;
-                         bewe_log_push(0,"[autoscale]%s noise=%.1f peak=%.1f → pmin=%.1f pmax=%.1f\n",
-                             deadline?" (deadline)":"", noise, peak, display_power_min, display_power_max);
-                         autoscale_active=false; autoscale_init=false;
-                         autoscale_wp=0; autoscale_buf_full=false;
-                         autoscale_start=std::chrono::steady_clock::time_point{};
-                         cached_sp_idx=-1;
-                     }
-                 }
-                 total_ffts++; current_fft_idx=total_ffts-1;
-                 header.num_ffts=std::min(total_ffts,FFT_HISTORY_ROWS);
-                 row_write_pos[current_fft_idx%MAX_FFTS_MEMORY]=tm_iq_write_sample;
-                 row_wall_ms[current_fft_idx%MAX_FFTS_MEMORY]=(int64_t)(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
-                 if(tm_iq_on.load(std::memory_order_relaxed))
-                     tm_mark_rows(current_fft_idx%MAX_FFTS_MEMORY);
-                 else
-                     iq_row_avail[current_fft_idx%MAX_FFTS_MEMORY]=false;
-                 tm_add_time_tag(current_fft_idx);
-                 net_bcast_seq.fetch_add(1, std::memory_order_release);
-                 net_bcast_cv.notify_one();
-                }
+                commit_fft_row(pacc, fcnt);   // 공용 커밋 (bladerf_io.cpp — 4백엔드 단일 정본)
                 std::fill(pacc.begin(),pacc.end(),0.0f); fcnt=0;
             }
         } // end !spectrum_pause
@@ -663,5 +590,83 @@ void FFTViewer::capture_and_process(){
         bladerf_enable_module(dev_blade, BLADERF_CHANNEL_RX(0), false);
         bladerf_close(dev_blade);
         dev_blade = nullptr;
+    }
+}
+// ── 캡처 공용: 누적 파워(pacc,fcnt) → dB 행 커밋 ─────────────────────────
+// 4개 SDR 백엔드(rtlsdr/bladerf/pluto/kraken)에 바이트동일하게 복붙돼 있던 블록의
+// 단일 정본. dB 변환(VOLK) + autoscale + 행 북키핑 + 방송 신호까지.
+// data_mtx 는 이 안에서 잡는다 — 기존 각 백엔드와 동일한 락 범위.
+void FFTViewer::commit_fft_row(const std::vector<float>& pacc, int fcnt){
+    int fi=total_ffts%FFT_HISTORY_ROWS;
+    float* rowp=fft_data.data()+fi*fft_size;
+    {std::lock_guard<std::mutex> lk(data_mtx);
+     // current_spectrum은 UI 스레드 전용 > 캡처 쓰기 금지 (race 유발)
+     // dB 변환: 10*log10(pacc/fcnt) = 3.0103*log2(pacc) - 10*log10(fcnt).
+     // 스칼라 log10f 루프(bin 당 1회) → VOLK SIMD log2 로 교체 (NEON/AVX).
+     // pacc 는 항상 >=1e-10 (누적 시 +1e-10f) 이라 -inf 없음. 오차 <1e-3 dB.
+     {
+         volk_32f_log2_32f(rowp, pacc.data(), (unsigned int)fft_size);
+         volk_32f_s32f_multiply_32f(rowp, rowp, 3.01029996f, (unsigned int)fft_size);
+         const float row_off = 10.0f*log10f((float)fcnt);
+         for(int i=0;i<fft_size;i++) rowp[i] -= row_off;
+     }
+     // 비-캡처 스레드 요청 처리 (set_frequency/init) — 여기서만 autoscale 상태 변경 (레이스 X)
+     if(autoscale_req.exchange(false)){
+         autoscale_accum.clear(); autoscale_init=false; autoscale_active=true;
+         autoscale_wp=0; autoscale_buf_full=false;
+         sq_recalib_req.store(true, std::memory_order_relaxed);  // 노이즈플로어 변동 → 자동 스컬치 재캘리브
+     }
+     if(autoscale_active){
+         auto now_as=std::chrono::steady_clock::now();
+         if(autoscale_start==std::chrono::steady_clock::time_point{})
+             autoscale_start=now_as;   // 데드라인 기준 — 재트리거로 되감지 않는다
+         if(!autoscale_init){
+             size_t cap=(size_t)fft_size*100;
+             if(autoscale_accum.size()!=cap) autoscale_accum.assign(cap,0.0f);
+             autoscale_wp=0; autoscale_buf_full=false;
+             autoscale_last=now_as;
+             autoscale_init=true;
+         }
+         size_t cap=autoscale_accum.size();
+         for(int i=1;i<fft_size;i++){
+             autoscale_accum[autoscale_wp]=rowp[i];
+             if(++autoscale_wp>=cap){ autoscale_wp=0; autoscale_buf_full=true; }
+         }
+         float el=std::chrono::duration<float>(now_as-autoscale_last).count();
+         float el_total=std::chrono::duration<float>(now_as-autoscale_start).count();
+         bool  deadline=el_total>=AUTOSCALE_DEADLINE_S;   // 재트리거 폭주 시 강제 확정
+         if((el>=1.0f||deadline)&&(autoscale_buf_full||autoscale_wp>0)){
+             size_t n=autoscale_buf_full?cap:autoscale_wp;
+             std::vector<float> tmp(autoscale_accum.begin(),
+                                    autoscale_accum.begin()+(ptrdiff_t)n);
+             size_t idx_lo=(size_t)(n*0.15f);
+             std::nth_element(tmp.begin(),tmp.begin()+(ptrdiff_t)idx_lo,tmp.end());
+             float noise=tmp[idx_lo];
+             float peak=*std::max_element(tmp.begin(),tmp.end());
+             display_power_min=noise-5.0f;
+             display_power_max=peak+20.0f;
+             if(display_power_max-display_power_min<20.f)
+                 display_power_max=display_power_min+20.f;
+             header.power_min=display_power_min;
+             header.power_max=display_power_max;
+             bewe_log_push(0,"[autoscale]%s noise=%.1f peak=%.1f → pmin=%.1f pmax=%.1f\n",
+                 deadline?" (deadline)":"", noise, peak, display_power_min, display_power_max);
+             autoscale_active=false; autoscale_init=false;
+             autoscale_wp=0; autoscale_buf_full=false;
+             autoscale_start=std::chrono::steady_clock::time_point{};
+             cached_sp_idx=-1;
+         }
+     }
+     total_ffts++; current_fft_idx=total_ffts-1;
+     header.num_ffts=std::min(total_ffts,FFT_HISTORY_ROWS);
+     row_write_pos[current_fft_idx%MAX_FFTS_MEMORY]=tm_iq_write_sample;
+     row_wall_ms[current_fft_idx%MAX_FFTS_MEMORY]=(int64_t)(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+     if(tm_iq_on.load(std::memory_order_relaxed))
+         tm_mark_rows(current_fft_idx%MAX_FFTS_MEMORY);
+     else
+         iq_row_avail[current_fft_idx%MAX_FFTS_MEMORY]=false;
+     tm_add_time_tag(current_fft_idx);
+     net_bcast_seq.fetch_add(1, std::memory_order_release);
+     net_bcast_cv.notify_one();
     }
 }

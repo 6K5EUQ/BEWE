@@ -49,8 +49,6 @@ void bewe_log(const char* fmt, ...){
     bewe_log_push(0, "%s", buf);
 }
 
-// ── bladerf_usb_reset 선언 (hw_detect.cpp) ───────────────────────────────
-bool bladerf_usb_reset();
 
 // ── 채널 스컬치 (ui.cpp에서 추출 - GUI 의존성 없음) ──────────────────────
 void FFTViewer::update_channel_squelch(){
@@ -71,20 +69,14 @@ void FFTViewer::update_channel_squelch(){
         }
     }
 
-    // 호출 간격 기반 실 delta 시간 (시간 카운터용)
-    static auto sq_last_tick = std::chrono::steady_clock::now();
-    auto sq_now = std::chrono::steady_clock::now();
-    float real_dt = std::chrono::duration<float>(sq_now - sq_last_tick).count();
-    if(real_dt > 0.5f) real_dt = 0.02f; // 첫 호출/정지 이후 복귀 보정
-    sq_last_tick = sq_now;
-
     // Detect 모드 채널의 s/e 변경 요청 (락 밖에서 적용 — start/stop_dem 은 스레드 join)
     struct DetApply { int ch; float s, e; bool lock; };
     std::vector<DetApply> det_pending;
 
     // 노치 구간 스냅샷 — detect 는 이 안의 bin 을 신호로 치지 않는다 (스퍼/간섭 배제).
     // data_mtx 를 잡기 전에 떠서 락 순서를 고정한다 (notches_mtx → data_mtx 로 잡는 곳 없음).
-    std::vector<std::pair<float,float>> notch_bands;   // (lo_mhz, hi_mhz)
+    static thread_local std::vector<std::pair<float,float>> notch_bands;   // (lo_mhz, hi_mhz)
+    notch_bands.clear();
     {
         std::lock_guard<std::mutex> nlk(notches_mtx);
         notch_bands.reserve(notches.size());
@@ -92,6 +84,7 @@ void FFTViewer::update_channel_squelch(){
             notch_bands.emplace_back(std::min(n.freq_lo_mhz, n.freq_hi_mhz),
                                      std::max(n.freq_lo_mhz, n.freq_hi_mhz));
     }
+    auto sq_now = std::chrono::steady_clock::now();
     {
     std::lock_guard<std::mutex> lk(data_mtx);
     float cf_mhz = (float)(header.center_frequency / 1e6);
@@ -339,8 +332,7 @@ void FFTViewer::update_channel_squelch(){
         // raw 행 peak 이 thr-6dB 만 넘으면 열고 2초 hold. 캘리브레이션 전엔 항상 열림.
         // (오디오 게이트는 EMA sig >= thr — 그보다 훨씬 빨리/오래 열려 버스트 유실 방지)
         {
-            int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 sq_now.time_since_epoch()).count();
+            int64_t now_ms = now_ms_row;   // 채널 공통 — 루프 위에서 1회 계산
             // fail-open: FFT 행이 멎으면(spectrum_pause / rx stop / SDR 에러 / render off)
             // peak 가 갱신되지 않아 게이트가 영구히 닫힌 채 굳는다 → 디코더가 조용히 정지.
             // 행이 stale 하면 무조건 열어 둔다 (구동작 = 풀레이트 복조로 안전 복귀).
@@ -501,6 +493,14 @@ static float read_ghz(){
     return cnt>0?(float)(sum/cnt/1e6):0.0f;
 }
 static int read_cpu_temp_c(){
+    // 성공 경로 캐시 — 매초 hwmon 32개 + thermal_zone 16개 재탐색 방지.
+    // 소스가 사라지면(읽기 실패) 캐시 비우고 다음 호출에서 재탐색.
+    static char cached_tp[80] = {};
+    if(cached_tp[0]){
+        FILE* f=fopen(cached_tp,"r");
+        if(f){ int milli=0; if(fscanf(f,"%d",&milli)==1){ fclose(f); return milli/1000; } fclose(f); }
+        cached_tp[0]='\0';
+    }
     // 1) hwmon coretemp (Intel/AMD)
     for(int i=0;i<32;i++){
         char np[80]; snprintf(np,sizeof(np),"/sys/class/hwmon/hwmon%d/name",i);
@@ -510,7 +510,12 @@ static int read_cpu_temp_c(){
            || strncmp(name,"cpu_thermal",11)==0){
             char tp[80]; snprintf(tp,sizeof(tp),"/sys/class/hwmon/hwmon%d/temp1_input",i);
             FILE* ft=fopen(tp,"r"); if(!ft) continue;
-            int milli=0; if(fscanf(ft,"%d",&milli)==1){ fclose(ft); return milli/1000; }
+            int milli=0;
+            if(fscanf(ft,"%d",&milli)==1){
+                fclose(ft);
+                snprintf(cached_tp,sizeof(cached_tp),"%s",tp);
+                return milli/1000;
+            }
             fclose(ft);
         }
     }
@@ -523,13 +528,26 @@ static int read_cpu_temp_c(){
            || strncmp(zt,"cpu-thermal",11)==0 || strncmp(zt,"cpu_thermal",11)==0){
             char tp[80]; snprintf(tp,sizeof(tp),"/sys/class/thermal/thermal_zone%d/temp",i);
             FILE* fv=fopen(tp,"r"); if(!fv) continue;
-            int milli=0; if(fscanf(fv,"%d",&milli)==1){ fclose(fv); return milli/1000; }
+            int milli=0;
+            if(fscanf(fv,"%d",&milli)==1){
+                fclose(fv);
+                snprintf(cached_tp,sizeof(cached_tp),"%s",tp);
+                return milli/1000;
+            }
             fclose(fv);
         }
     }
-    // 3) fallback: thermal_zone0
+    // 3) fallback: thermal_zone0 (0 이하 값은 캐시하지 않음 — 기존 판정 유지)
     FILE* fv=fopen("/sys/class/thermal/thermal_zone0/temp","r");
-    if(fv){ int milli=0; if(fscanf(fv,"%d",&milli)==1 && milli>0){ fclose(fv); return milli/1000; } fclose(fv); }
+    if(fv){
+        int milli=0;
+        if(fscanf(fv,"%d",&milli)==1 && milli>0){
+            fclose(fv);
+            snprintf(cached_tp,sizeof(cached_tp),"%s","/sys/class/thermal/thermal_zone0/temp");
+            return milli/1000;
+        }
+        fclose(fv);
+    }
     return 0;
 }
 // sysfs 에 안 뜨는 I2C 연료게이지(Pi + X1200 UPS 등) 폴백: ups-log 데몬이 남기는
@@ -541,6 +559,10 @@ static uint8_t read_bat_pct_csv(uint8_t* ac_out){
     struct stat sb;
     if(stat(p,&sb)!=0) return 255;
     if(time(nullptr) - sb.st_mtime > 300) return 255;
+    // mtime 안 바뀌었으면 파일 재파싱 생략 (staleness 판정은 위에서 이미 통과)
+    static time_t csv_mtime = (time_t)-1;
+    static uint8_t csv_soc = 255, csv_ac = 2;
+    if(sb.st_mtime == csv_mtime){ *ac_out = csv_ac; return csv_soc; }
     FILE* f=fopen(p,"rb"); if(!f) return 255;
     char tail[512]; long n=(long)sizeof(tail)-1;
     fseek(f,0,SEEK_END); long sz=ftell(f);
@@ -551,31 +573,46 @@ static uint8_t read_bat_pct_csv(uint8_t* ac_out){
     char* end=tail+rd;
     while(end>tail && (end[-1]=='\n'||end[-1]=='\r')) *--end='\0';
     char* line=strrchr(tail,'\n'); line = line ? line+1 : tail;
-    const char* c1=strchr(line,',');   if(!c1) return 255;
-    const char* c2=strchr(c1+1,',');   if(!c2) return 255;
-    const char* c3=strchr(c2+1,',');   if(!c3) return 255;
-    *ac_out = (c3[1]=='1') ? 1 : (c3[1]=='0' ? 0 : 2);
-    // 여기까지 왔으면 로거가 살아 있다 = UPS 는 붙어 있다. soc 가 NA/범위밖이면
-    // 게이지(i2c 0x36)가 답을 안 하는 것이므로 "없음"이 아니라 "고장"으로 구분한다.
-    double soc=atof(c2+1);
-    if(soc<=0.0 || soc>100.0) return 254;
-    return (uint8_t)std::min(100,(int)(soc+0.5));
+    const char* c1=strchr(line,',');
+    const char* c2=c1?strchr(c1+1,','):nullptr;
+    const char* c3=c2?strchr(c2+1,','):nullptr;
+    uint8_t ac=2, soc_u=255;
+    if(c3){
+        ac = (c3[1]=='1') ? 1 : (c3[1]=='0' ? 0 : 2);
+        // 여기까지 왔으면 로거가 살아 있다 = UPS 는 붙어 있다. soc 가 NA/범위밖이면
+        // 게이지(i2c 0x36)가 답을 안 하는 것이므로 "없음"이 아니라 "고장"으로 구분한다.
+        double soc=atof(c2+1);
+        soc_u = (soc<=0.0 || soc>100.0) ? 254 : (uint8_t)std::min(100,(int)(soc+0.5));
+    }
+    csv_mtime=sb.st_mtime; csv_soc=soc_u; csv_ac=ac;
+    *ac_out=ac;
+    return soc_u;
 }
 // 배터리 % 와 AC 연결 상태를 함께 읽는다.
 //   반환   = 배터리 % (0-100) / 254 = UPS 있으나 게이지 무응답 / 255 = 배터리 없음
 //   ac_out = 0 방전 중, 1 AC 연결, 2 알 수 없음
 static uint8_t read_bat_pct(uint8_t* ac_out){
     *ac_out = 2;
-    for(int i=0; i<4; i++){
+    // BAT 인덱스 캐시 — 없는 머신(Pi)에서 매초 4회 실패 fopen 방지.
+    // -1=미탐색, -2=없음(60초 백오프 후 재탐색), 0~3=성공 인덱스
+    static int bat_idx = -1;
+    static time_t bat_rescan_at = 0;
+    if(bat_idx == -2 && time(nullptr) >= bat_rescan_at) bat_idx = -1;
+    int lo = (bat_idx >= 0) ? bat_idx : 0;
+    int hi = (bat_idx >= 0) ? bat_idx+1 : 4;
+    if(bat_idx != -2) for(int i=lo; i<hi; i++){
         char p[80]; snprintf(p,sizeof(p),"/sys/class/power_supply/BAT%d/capacity",i);
         FILE* f=fopen(p,"r"); if(!f) continue;
         int cap=0; bool ok=(fscanf(f,"%d",&cap)==1); fclose(f);
         if(!ok) continue;
+        bat_idx = i;
         snprintf(p,sizeof(p),"/sys/class/power_supply/BAT%d/status",i);
         FILE* fs=fopen(p,"r");
         if(fs){ char st[32]={}; if(fgets(st,sizeof(st),fs)) *ac_out=(strncmp(st,"Discharging",11)==0)?0:1; fclose(fs); }
         return (uint8_t)std::min(100,std::max(0,cap));
     }
+    if(bat_idx >= 0){ bat_idx = -1; }                       // 캐시된 BAT 이 사라짐 → 즉시 재탐색 대상
+    else if(bat_idx == -1){ bat_idx = -2; bat_rescan_at = time(nullptr) + 60; }
     return read_bat_pct_csv(ac_out); // sysfs 없음 → UPS CSV 폴백
 }
 static long long read_io_ms(){
@@ -859,6 +896,7 @@ void run_cli_host(){
         std::thread([&v](){
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             v.mission_broadcast_sync(); // AUTH_ACK 이후 전송 — pre-auth skip 방지
+            v.df_broadcast_cfg();       // LAN 직결 JOIN 은 Central conn_open 훅을 안 탄다
         }).detach();
         bewe_log_push(0,"[CLI] Client authenticated: idx=%d\n", idx);
         return true;
@@ -1580,7 +1618,7 @@ void run_cli_host(){
                 // Relay CHANNEL_SYNC callback
                 central_cli.set_on_central_ch_sync([&v](const uint8_t* pkt, size_t len){
                     if(len < 9) return;
-                    size_t entry_sz = sizeof(ChSyncEntry); // 88 bytes
+                    size_t entry_sz = sizeof(ChSyncEntry); // 80 bytes
                     const uint8_t* payload = pkt + 9;      // BEWE 헤더(9) 스킵
                     size_t body_len = len - 9;
                     // body_len == entry_sz*MAX_CHANNELS → raw, 아니면 zstd 압축본 (v13)
@@ -1870,6 +1908,10 @@ void run_cli_host(){
                     // 이 기지 채널이 뜨게 함. boot 시 broadcast_channel_sync(line ~1489)는 relay 연결 전이라
                     // Central 캐시에 안 들어갈 수 있음. conn_open 시점(연결 확립)에 다시 보내야 빈 기지가 안 생김.
                     if(v.net_srv) v.net_srv->broadcast_channel_sync(v.channels, MAX_CHANNELS);
+                    // DF 설정 정본 push. 이게 없으면 JOIN 은 df_cfg_valid=false 로 하드코딩
+                    // 기본값을 들고 있다가 첫 조작에서 HOST 의 실제 설정을 덮어쓴다
+                    // (host_state 에 영속화까지 되어 재시작해도 살아남는다).
+                    v.df_broadcast_cfg();
                     // LIVE_START는 JOIN이 STREAM 버튼으로 명시 요청(LWF_LIVE_REQ)할 때만 unicast.
                     // mission_sync는 on_auth 200ms 스레드에서 AUTH_ACK 이후에 전송 (pre-auth 전송 시 JOIN이 skip함)
                 });
@@ -2150,12 +2192,19 @@ void run_cli_host(){
             }
         }
 
-        // ── Persist host state on change (재시작 복원용 — 변경 즉시 저장) ──
+        // ── Persist host state on change (재시작 복원용 — 1s 주기 변경 감지) ──
+        // fingerprint 는 뮤텍스 다수 + 전 채널 순회라 50Hz 로 돌 이유가 없다. 스컬치
+        // 슬라이더 드래그 중 JSON 50회/초 재작성도 이 게이트가 막는다. graceful 종료
+        // 경로의 마지막 save 가 최종본을 보장한다.
         {
-            uint64_t fp = HostState::fingerprint(v);
-            if(fp != last_state_fp){
-                HostState::save(v, station_str);
-                last_state_fp = fp;
+            static auto fp_last = clk::now();
+            if(std::chrono::duration<float>(clk::now()-fp_last).count() >= 1.0f){
+                fp_last = clk::now();
+                uint64_t fp = HostState::fingerprint(v);
+                if(fp != last_state_fp){
+                    HostState::save(v, station_str);
+                    last_state_fp = fp;
+                }
             }
         }
 
@@ -2183,9 +2232,12 @@ void run_cli_host(){
             }
         }
 
+        // 틱 공통 접속자 수 — client_count() 는 락+전체스캔이라 틱당 1회만
+        int tick_clients = v.net_srv ? v.net_srv->client_count() : 0;
+
         // ── FFT_META (입력 크기) 1초 주기 + 신규 JOIN auth 시 즉시 ──────────
         // PktFftFrame 은 구 JOIN 호환 때문에 크기 동결 → 메타는 별도 패킷으로.
-        if(v.net_srv && (v.net_srv->client_count() > 0 || v.net_srv->has_relay())){
+        if(v.net_srv && (tick_clients > 0 || v.net_srv->has_relay())){
             static auto fm_last = clk::now() - std::chrono::seconds(2);
             bool force = v.net_srv->fftmeta_force_.exchange(false, std::memory_order_relaxed);
             if(force || clk::now() - fm_last >= std::chrono::seconds(1)){
@@ -2205,7 +2257,7 @@ void run_cli_host(){
                 v.update_channel_squelch();
             }
         }
-        if(v.net_srv && v.net_srv->client_count()>0){
+        if(v.net_srv && tick_clients>0){
             float el = std::chrono::duration<float>(clk::now()-sq_sync_last).count();
             if(el >= 0.2f){   // 5Hz (구 10Hz/0.1f) — chsync 대역 절반. 통계/스컬치 UI 5Hz로 충분
                 sq_sync_last = clk::now();
@@ -2256,7 +2308,7 @@ void run_cli_host(){
         }
 
         // ── STATUS broadcast (1s) ────────────────────────────────────────
-        if(v.net_srv && v.net_srv->client_count()>0){
+        if(v.net_srv && tick_clients>0){
             float el = std::chrono::duration<float>(clk::now()-status_last).count();
             if(el >= 1.0f){
                 status_last = clk::now();

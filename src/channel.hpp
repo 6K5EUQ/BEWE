@@ -117,11 +117,13 @@ struct Channel {
     std::atomic<bool> ext_audio{false};
 
     // ── Audio recording (demod 스레드 내에서만 접근) ──────────────────────
+    static constexpr size_t REC_BUF_FRAMES = 2048;  // 일괄 fwrite 단위 (샘플당 fwrite 방지)
     std::atomic<bool> audio_rec_on{false};
     FILE*             audio_rec_fp      = nullptr;
     uint64_t          audio_rec_frames  = 0;
     uint32_t          audio_rec_sr      = 0;
     std::string       audio_rec_path;
+    std::vector<int16_t> audio_rec_buf;  // 기록 스테이징 (worker 스레드 전용)
 
     // 스컬치 기반 녹음 상태머신 (worker 스레드 전용)
     enum SqRecState : int { SQR_IDLE=0, SQR_RECORDING=1, SQR_TAIL=2 };
@@ -171,8 +173,20 @@ struct Channel {
         }
 
         int16_t s16=(int16_t)(out<-1.f?-32767:out>1.f?32767:(int)(out*32767.f));
-        fwrite(&s16,2,1,audio_rec_fp);
+        // 샘플당 fwrite(스레드세이프 락 포함) 대신 REC_BUF_FRAMES 단위 일괄 기록
+        audio_rec_buf.push_back(s16);
         audio_rec_frames++;
+        if(audio_rec_buf.size() >= REC_BUF_FRAMES){
+            fwrite(audio_rec_buf.data(),2,audio_rec_buf.size(),audio_rec_fp);
+            audio_rec_buf.clear();
+        }
+    }
+
+    // stop 경로(작성 스레드 정지 확인 후)에서 잔여 버퍼를 파일에 밀어넣는다
+    inline void audio_rec_drain(){
+        if(audio_rec_fp && !audio_rec_buf.empty())
+            fwrite(audio_rec_buf.data(),2,audio_rec_buf.size(),audio_rec_fp);
+        audio_rec_buf.clear();
     }
 
     // ── STT 발화 캡처 (demod 스레드 전용) ─────────────────────────────────
@@ -224,6 +238,7 @@ struct Channel {
     std::atomic<bool> iq_rec_on{false};
     std::atomic<bool> iq_rec_force_all{false}; // true면 squelch와 무관하게 전 구간 녹음 (예약 녹음용)
     FILE*             iq_rec_fp      = nullptr;
+    std::vector<int16_t> iq_rec_buf;   // 기록 스테이징 (worker 스레드 전용)
     uint64_t          iq_rec_frames  = 0;
     uint32_t          iq_rec_sr      = 0;
     std::string       iq_rec_path;
@@ -278,11 +293,24 @@ struct Channel {
         auto c16=[](float v)->int16_t{ return (int16_t)(v<-1.f?-32767:v>1.f?32767:(int)(v*32767.f)); };
         int16_t si = write_silence ? 0 : c16(fi);
         int16_t sq = write_silence ? 0 : c16(fq);
-        fwrite(&si,2,1,iq_rec_fp);
-        fwrite(&sq,2,1,iq_rec_fp);
+        // 샘플당 fwrite 2회 대신 REC_BUF_FRAMES 단위 일괄 기록
+        iq_rec_buf.push_back(si);
+        iq_rec_buf.push_back(sq);
         iq_rec_frames++;
-        // 매 65536 샘플마다 flush (녹음 중 실시간 분석 가능 — raw라 헤더 갱신 불필요)
-        if((iq_rec_frames & 0xFFFF) == 0) fflush(iq_rec_fp);
+        bool flush_due = (iq_rec_frames & 0xFFFF) == 0;
+        if(iq_rec_buf.size() >= REC_BUF_FRAMES*2 || flush_due){
+            fwrite(iq_rec_buf.data(),2,iq_rec_buf.size(),iq_rec_fp);
+            iq_rec_buf.clear();
+            // 매 65536 샘플마다 flush (녹음 중 실시간 분석 가능 — raw라 헤더 갱신 불필요)
+            if(flush_due) fflush(iq_rec_fp);
+        }
+    }
+
+    // stop 경로(작성 스레드 정지 확인 후)에서 잔여 버퍼를 파일에 밀어넣는다
+    inline void iq_rec_drain(){
+        if(iq_rec_fp && !iq_rec_buf.empty())
+            fwrite(iq_rec_buf.data(),2,iq_rec_buf.size(),iq_rec_fp);
+        iq_rec_buf.clear();
     }
 
     // Squelch (UI 스레드에서 FFT 기반으로 중앙 관리)
