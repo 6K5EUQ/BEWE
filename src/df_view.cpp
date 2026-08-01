@@ -55,12 +55,16 @@ const char* link_text(int l){
 
 // ── 주파수 → LOB 색 ──────────────────────────────────────────────────────
 // 지도에 선이 여러 개 겹치면 어느 게 무엇을 잰 것인지 색으로 구분되어야 한다.
-// 채널 번호는 주파수 정렬 순위라 채널이 하나 생기고 사라질 때마다 밀리므로,
-// 같은 대상을 계속 다른 색으로 그리게 된다. 그래서 주파수 자체를 키로 쓴다 —
-// 같은 주파수는 세션이 바뀌어도, 기지가 달라도 언제나 같은 색이다.
+// 채널 번호는 주파수 정렬 순위라 채널이 생기고 사라질 때마다 밀리므로, 같은
+// 대상이 계속 다른 색이 된다. 그래서 주파수 자체를 키로 쓴다.
 //
-// 1 kHz 로 양자화한다. 측정마다 소수점 아래가 미세하게 흔들려도(같은 방송을
-// 두 번 재면 cf_mhz 가 0.0001 씩 달라진다) 같은 색으로 묶이게 하려는 것이다.
+// 배정은 **처음 본 순서**다. 첫 주파수가 노랑, 그 다음이 파랑… 처음엔 주파수를
+// 해시해 팔레트에 넣었는데, 색이 4개뿐이라 충돌이 흔했다 (실제로 98.8966 /
+// 161.9750 / 162.0253 이 모두 같은 색으로 나왔다). 순서 배정이면 팔레트를 한
+// 바퀴 돌기 전까지 절대 겹치지 않고, 첫 LOB 가 항상 노랑이라 화면이 예측 가능하다.
+//
+// 1 kHz 로 양자화해 같은 신호의 반복 측정이 한 색으로 묶이게 한다 (같은 방송을
+// 두 번 재면 cf_mhz 소수점 아래가 미세하게 흔들린다).
 struct LobColor { ImU32 core, glow; };
 LobColor lob_color_for_freq(float cf_mhz){
     // 노랑 → 파랑 → 보라 → 빨강 (운용자 지정 순서)
@@ -72,11 +76,19 @@ LobColor lob_color_for_freq(float cf_mhz){
     };
     constexpr int N = (int)(sizeof(kPalette)/sizeof(kPalette[0]));
     const uint32_t khz = (uint32_t)(cf_mhz * 1000.0f + 0.5f);
-    // 인접 주파수가 서로 다른 색이 되도록 섞는다 (단순 나머지는 1 kHz 차이가
-    // 같은 색으로 몰릴 수 있다). 값이 같으면 결과도 항상 같다.
-    uint32_t h = khz * 2654435761u;
-    h ^= h >> 16;
-    const auto& c = kPalette[h % N];
+
+    // khz → 팔레트 인덱스. 본 순서대로 채운다.
+    static std::map<uint32_t,int> seen;
+    static int next_idx = 0;
+    auto it = seen.find(khz);
+    if(it == seen.end()){
+        // 표에 남은 이력이 많아도 실제로 동시에 보이는 주파수는 몇 개뿐이다.
+        // 그래도 장시간 운용에서 무한정 자라지 않게 상한을 둔다 (초기화되면
+        // 색이 다시 노랑부터 배정된다 — 화면이 잠깐 바뀔 뿐 오동작은 아니다).
+        if(seen.size() > 256){ seen.clear(); next_idx = 0; }
+        it = seen.emplace(khz, next_idx++ % N).first;
+    }
+    const auto& c = kPalette[it->second];
     return { IM_COL32(c.r, c.g, c.b, 255),
              IM_COL32((c.r*3+255)/4, (c.g*3+255)/4, (c.b*3+255)/4, 255) };
 }
@@ -353,22 +365,18 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     // ── 영속 UI 상태 ──────────────────────────────────────────────────────
     static modview_map::MapView mv;
     static modview::Selection   sel;
+    // 주파수 잠금 (kHz, 0=없음). Freq 셀을 누르면 그 주파수의 LOB 만 지도에 남고,
+    // 이후 같은 주파수로 새 측정이 들어오면 자동으로 합류한다 — 행을 하나씩
+    // 고르는 방식으로는 새로 들어오는 것을 담을 수 없어서 잠금을 따로 둔다.
+    static uint32_t             freq_lock = 0;
     static float  split_tw   = 460.f;
     static bool   setup_open = false;
     static int    sort_col   = -1;
     static bool   sort_asc   = true;
     static bool   at_bottom  = true;
-    static char   filter[64] = {};
     static float  lob_km     = 150.f;
-    static int    meas_ch    = 0;          // 0 = 자동(선택 채널)
     static uint32_t last_seq  = 0;    // 마지막으로 본 df_hist_seq (개수 아님)
     static int      last_vis_n = 0;   // 직전 프레임 가시행 수 (tail-follow 용)
-    // 수동 LOB 입력 (다른 기지의 방위를 손으로 넣어 교차 fix 를 만든다).
-    // 기지는 이름으로 기억한다 — 목록은 unordered_map 순회로 매 프레임 다시
-    // 만들어지므로 인덱스를 붙들면 다른 기지를 가리키게 된다.
-    static bool        lob_popup = false;
-    static std::string lob_stn;
-    static float       lob_brg = 0.f;
 
     if(just_opened){ mv.big = false; }
 
@@ -376,128 +384,14 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     // df_hist_n 은 64 에서 포화하므로 링이 한 번 차면 개수 비교가 영원히 거짓이 된다.
     if(v.df_hist_seq != last_seq) last_seq = v.df_hist_seq;
 
-    // ══════════════════ 헤더 스트립 ══════════════════
+    // 헤더 스트립 제거 — 검색·수동 LOB·MEASURE 는 쓰지 않는다. 남은 조작
+    // (SETUP/CLEAR/주파수 잠금 해제)은 지도 우상단 오버레이로 옮겼다.
     const float W  = ImGui::GetContentRegionAvail().x;
     const float Hh = ImGui::GetContentRegionAvail().y;
-    const float HDR = 30.f;
-
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f,0.12f,0.16f,1.f));
-    ImGui::BeginChild("##df_hdr", ImVec2(W, HDR), false,
-                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    {
-        const float VCEN = 16.5f, GAP = 8.f;
-        // ── 이 줄의 모든 프레임 위젯은 스스로 세로중심을 다시 잡아야 한다 ──
-        // ImGui 의 SameLine 은 CursorPos.y 를 CursorPosPrevLine.y 로 되돌리는데,
-        // ItemSize 가 그 값을 **줄의 첫 아이템** 기준으로 고정해 둔다 (line_y1).
-        // 중간 아이템에 SetCursorPosY 를 걸어도 line_y1 은 안 움직인다. 즉 이 줄의
-        // 원점은 맨 앞 제목 텍스트의 Y(텍스트 중심)에 박혀 있고, 버튼·콤보·입력창
-        // (프레임 높이가 더 큼)은 그대로 두면 전부 3px 아래로 처진다.
-        // 그래서 위젯마다 이 헬퍼를 부른다. 새 위젯을 추가할 때도 빠뜨리지 말 것.
-        auto ROWY = [&]{ ImGui::SetCursorPosY(VCEN - ImGui::GetFrameHeight()*0.5f); };
-        // 텍스트는 한 겹 더 있다: TextEx 가 그릴 때 CurrLineTextBaseOffset 을 더하는데,
-        // 앞선 프레임 위젯들이 그 값을 FramePadding.y 로 올려놓는다. 그래서 목표 Y 에서
-        // 그만큼 미리 빼야 실제로 줄 중앙에 놓인다.
-        auto ROWT = [&]{
-            const float off = ImGui::GetCurrentWindow()->DC.CurrLineTextBaseOffset;
-            ImGui::SetCursorPosY(VCEN - ImGui::GetTextLineHeight()*0.5f - off);
-        };
-
-        ImGui::SetCursorPos(ImVec2(GAP, 0.f)); ROWT();
-        ImGui::TextColored(ImVec4(0.9f,0.9f,0.9f,1.f), "DIRECTION FINDING");
-
-        const bool df_ok = v.df_link_state() != 0;
-        ImGui::SameLine(0, GAP*2);
-        ROWY();
-        ImGui::BeginDisabled(!df_ok);
-        if(ImGui::Button("MEASURE")){
-            int dn = meas_ch;
-            if(dn <= 0 && v.selected_ch >= 0) dn = v.freq_sorted_display_num(v.selected_ch);
-            if(dn > 0) v.df_request_by_display_num(dn, /*from_auto=*/false);
-        }
-        ImGui::EndDisabled();
-
-        // 채널 선택 — 표시번호는 주파수 정렬 순위다 (배열 인덱스가 아님)
-        ImGui::SameLine(0, 4);
-        ROWY();
-        ImGui::SetNextItemWidth(150);
-        {
-            char cur[48];
-            if(meas_ch <= 0) snprintf(cur, sizeof cur, "CH (selected)");
-            else             snprintf(cur, sizeof cur, "CH%d", meas_ch);
-            if(ImGui::BeginCombo("##df_ch", cur)){
-                if(ImGui::Selectable("CH (selected)", meas_ch <= 0)) meas_ch = 0;
-                for(int i = 0; i < MAX_CHANNELS; i++){
-                    if(!v.channels[i].filter_active) continue;
-                    const int dn = v.freq_sorted_display_num(i);
-                    if(dn <= 0) continue;
-                    char it[64];
-                    snprintf(it, sizeof it, "CH%d  %.4f MHz", dn,
-                             (v.channels[i].s + v.channels[i].e) * 0.5);
-                    if(ImGui::Selectable(it, meas_ch == dn)) meas_ch = dn;
-                }
-                ImGui::EndCombo();
-            }
-        }
-
-        // AUTO DF 현황 — 여기서 만드는 게 아니라 채널 패널의 상태를 비추기만 한다.
-        // 다만 일괄 해제는 둔다: 자동 측정이 폭주할 때 채널 패널을 열지 않고
-        // 멈출 수 있어야 한다.
-        int auto_n = 0;
-        for(int i = 0; i < MAX_CHANNELS; i++)
-            if(v.channels[i].filter_active && v.auto_df_on[i]) auto_n++;
-        ImGui::SameLine(0, GAP);
-        ROWY();
-        if(auto_n > 0){
-            char lb[32]; snprintf(lb, sizeof lb, "AUTO %d OFF", auto_n);
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f,0.55f,0.1f,1.f));
-            if(ImGui::Button(lb))
-                for(int i = 0; i < MAX_CHANNELS; i++) v.auto_df_on[i] = false;
-            ImGui::PopStyleColor();
-        } else {
-            ImGui::BeginDisabled(true); ImGui::Button("AUTO 0"); ImGui::EndDisabled();
-        }
-
-        ImGui::SameLine(0, GAP);
-        ROWY();
-        if(ImGui::Button("+ LOB")) lob_popup = true;
-
-        ImGui::SameLine(0, GAP);
-        ROWY();
-        ImGui::SetNextItemWidth(180);
-        ImGui::InputText("##df_filter", filter, sizeof filter);
-
-        ImGui::SameLine(0, GAP);
-        char cnt[32]; snprintf(cnt, sizeof cnt, "%d fix", v.df_hist_n);
-        ROWT();
-        ImGui::TextDisabled("%s", cnt);
-
-        // 우측: CLEAR + SETUP. 창이 좁으면 왼쪽 위젯 위로 겹치므로 현재 커서
-        // 오른쪽으로만 민다 (겹치느니 잘리는 편이 낫다).
-        const float RM = 12.f;
-        const float rx = W - RM - 70.f - 4.f - 60.f;
-        ImGui::SameLine();
-        ImGui::SetCursorPosX(std::max(rx, ImGui::GetCursorPosX() + 8.f));
-        ROWY();
-        if(ImGui::Button("CLEAR", ImVec2(60,0))){
-            v.df_hist_n = 0; v.df_hist_head = 0; sel.clear();
-            v.df_last_valid = false;
-            last_seq = v.df_hist_seq; last_vis_n = 0;
-        }
-        ImGui::SameLine(0, 4);
-        ROWY();
-        // 클릭 전 상태를 스냅샷해서 push/pop 가드를 고정한다. `if(setup_open)` 을
-        // 양쪽에 쓰면 버튼이 그 조건 자체를 뒤집어 컬러 스택이 매 토글마다 깨진다.
-        const bool setup_hi = setup_open;
-        if(setup_hi) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f,0.45f,0.6f,1.f));
-        if(ImGui::Button("SETUP", ImVec2(70,0))) setup_open = !setup_open;
-        if(setup_hi) ImGui::PopStyleColor();
-    }
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
+    const float HDR = 0.f;
 
     // Kraken 이 아닌 로컬 HOST 면 여기서 끝. (원인 + 조치라 정보다)
     if(!is_join && v.hw.type != HWType::KRAKEN){
-        lob_popup = false;   // 여기서 소비 안 하면 다음에 열 때 팝업이 튀어나온다
         ImGui::TextColored(ImVec4(1.f,0.4f,0.4f,1.f),
             "DF requires the KrakenSDR backend. Start BEWE with  --sdr kraken");
         ImGui::End();
@@ -515,13 +409,22 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     vis.clear();
     for(int i = 0; i < v.df_hist_n; i++){
         const FFTViewer::DFFix& f = v.df_hist_at(i);
-        if(filter[0]){
-            char buf[160];
-            snprintf(buf, sizeof buf, "CH%u %.4f %.1f %s", (unsigned)f.dnum,
-                     f.cf_mhz, f.bearing_deg, f.note);
-            if(!modview::ci_find(buf, filter)) continue;
-        }
         vis.push_back(i);
+    }
+    // 기본 정렬(헤더를 누르지 않은 상태) = 주파수 먼저, 그 안에서 시간순.
+    // 시간만으로 죽 늘어놓으면 여러 주파수를 번갈아 재는 동안 한 대상의 이력이
+    // 다른 것들 사이에 흩어져, 같은 신호가 어떻게 움직였는지 읽을 수가 없다.
+    // 헤더를 눌러 정렬하면 그때는 그 열이 우선이다 (아래 sort_vis).
+    if(sort_col < 0 && vis.size() > 1){
+        std::stable_sort(vis.begin(), vis.end(), [&](int a, int b){
+            const FFTViewer::DFFix& x = v.df_hist_at(a);
+            const FFTViewer::DFFix& y = v.df_hist_at(b);
+            // 색과 같은 1 kHz 양자화 — 같은 색으로 보이는 것끼리 묶여야 한다.
+            const uint32_t kx = (uint32_t)(x.cf_mhz * 1000.0f + 0.5f);
+            const uint32_t ky = (uint32_t)(y.cf_mhz * 1000.0f + 0.5f);
+            if(kx != ky) return kx < ky;
+            return x.t_end_ms < y.t_end_ms;
+        });
     }
     // 0 Time 1 CH 2 Freq 3 Brg 4 SNR 5 Conf 6 Note
     modview::sort_vis(vis, sort_col, sort_asc, [&](int col, int a, int b)->int{
@@ -582,8 +485,14 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 ImGui::TableNextRow();
 
                 char ts[16]; hms(f.t_end_ms, ts, sizeof ts);
-                if(modview::row_col0((int)(f.t_end_ms & 0x7fffffff) ^ hi, sel.selected(k), ts))
+                // 주파수 잠금 중에는 그 주파수 행 전체가 선택된 것으로 보인다.
+                const bool row_hl = freq_lock
+                    ? ((uint32_t)(f.cf_mhz * 1000.0f + 0.5f) == freq_lock)
+                    : sel.selected(k);
+                if(modview::row_col0((int)(f.t_end_ms & 0x7fffffff) ^ hi, row_hl, ts)){
+                    freq_lock = 0;      // 행을 직접 고르면 잠금은 풀린다
                     sel.click(k, p, key_at_vis, (int)vis.size(), io.KeyCtrl, io.KeyShift);
+                }
 
                 char b[32];
                 ImGui::TableSetColumnIndex(1);
@@ -591,10 +500,20 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 else modview::cell("-");
                 ImGui::TableSetColumnIndex(2);
                 // 지도 LOB 과 같은 색으로 찍는다 — 표의 행과 지도의 선이 눈으로 이어진다.
+                // 이 셀을 클릭하면 **같은 주파수 전체**가 선택된다: 한 대상의 LOB 을
+                // 모아 봐야 교차와 오차타원이 의미를 갖기 때문이다. 행 클릭(Time 열)은
+                // 종전대로 그 한 줄만 고른다.
                 if(f.cf_mhz > 0.f){
                     snprintf(b, sizeof b, "%.4f", f.cf_mhz);
                     const ImU32 fc = lob_color_for_freq(f.cf_mhz).glow;
                     modview::cell(b, ImGui::ColorConvertU32ToFloat4(fc));
+                    if(ImGui::IsItemClicked(ImGuiMouseButton_Left)){
+                        const uint32_t want = (uint32_t)(f.cf_mhz * 1000.0f + 0.5f);
+                        // 같은 셀을 다시 누르면 해제. 잠금은 키가 아니라 주파수라
+                        // 이후 같은 주파수로 새 LOB 이 들어오면 자동으로 포함된다.
+                        freq_lock = (freq_lock == want) ? 0 : want;
+                        sel.clear();     // 행 단위 선택과 섞이면 무엇이 그려지는지 모호해진다
+                    }
                 }
                 else modview::cell("-");
                 ImGui::TableSetColumnIndex(3);
@@ -664,11 +583,18 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         const FFTViewer::DFFix& f = v.df_hist_at(vis[p]);
         if(f.kind != 0) continue;
         const std::string k = key_of(vis[p]);
-        if(sel.selected(k)){
+        // 주파수 잠금이 걸려 있으면 그 주파수 전부가 대상이다 (새로 들어오는
+        // 측정도 다음 프레임에 자동 합류). 잠금이 없으면 종전대로 행 선택.
+        const bool take = freq_lock
+            ? ((uint32_t)(f.cf_mhz * 1000.0f + 0.5f) == freq_lock)
+            : sel.selected(k);
+        if(take){
             selected.push_back(&f);
-            if(sel.focus == k) focus = &f;
+            if(!freq_lock && sel.focus == k) focus = &f;
         }
     }
+    // 잠금 모드에선 가장 최근 측정을 세부 판독 기준으로 삼는다.
+    if(freq_lock && !selected.empty()) focus = selected.back();
     if(!focus && !selected.empty()) focus = selected.back();
     if(!focus && v.df_hist_n > 0){
         for(int i = v.df_hist_n - 1; i >= 0; i--)
@@ -864,6 +790,45 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         }
     }
 
+    // ── 지도 우상단 조작 오버레이 (헤더바 대체) ──────────────────────────
+    // 예전 헤더 스트립을 없애면서 남은 조작만 지도 위로 옮겼다. 지도를 가리지
+    // 않게 우상단 모서리에 붙이고, 필요한 것만 둔다.
+    {
+        const float BW = 62.f, BH = 22.f, PAD = 8.f, GAPB = 4.f;
+        // 오른쪽에서 왼쪽으로: SETUP, CLEAR, (잠금 중이면) 주파수 해제 버튼
+        float bx = map_p0.x + mapw - PAD - BW;
+        const float by = map_p0.y + PAD;
+
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.f);
+        ImGui::SetCursorScreenPos(ImVec2(bx, by));
+        const bool setup_hi = setup_open;
+        if(setup_hi) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f,0.45f,0.6f,1.f));
+        if(ImGui::Button("SETUP", ImVec2(BW, BH))) setup_open = !setup_open;
+        if(setup_hi) ImGui::PopStyleColor();
+
+        bx -= BW + GAPB;
+        ImGui::SetCursorScreenPos(ImVec2(bx, by));
+        if(ImGui::Button("CLEAR", ImVec2(BW, BH))){
+            v.df_hist_n = 0; v.df_hist_head = 0; sel.clear();
+            v.df_last_valid = false; freq_lock = 0;
+            last_seq = v.df_hist_seq; last_vis_n = 0;
+        }
+
+        // 주파수 잠금 중이면 무엇만 보이는지 알리고, 누르면 푼다.
+        if(freq_lock){
+            const float LW = 108.f;
+            bx -= LW + GAPB;
+            ImGui::SetCursorScreenPos(ImVec2(bx, by));
+            const float lock_mhz = (float)freq_lock / 1000.0f;
+            char lb[48]; snprintf(lb, sizeof lb, "%.4f  X", lock_mhz);
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                ImGui::ColorConvertU32ToFloat4(lob_color_for_freq(lock_mhz).glow));
+            if(ImGui::Button(lb, ImVec2(LW, BH))) freq_lock = 0;
+            ImGui::PopStyleColor();
+        }
+        ImGui::PopStyleVar();
+    }
+
     // ══════════════════ 설정 창 (기본 닫힘) ══════════════════
     if(setup_open){
         ImGui::SameLine(0, 4);
@@ -982,47 +947,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 hold_until = now + 1.0;
             }
         }
-    }
-
-    // ── 수동 LOB 입력 팝업 ───────────────────────────────────────────────
-    // JOIN 은 Central 룸 하나에만 있어 한 기지의 DF 결과만 받는다. 다른 기지의
-    // 방위를 손으로 넣으면 와이어 변경 없이 기지간 교차 fix 를 만들 수 있다.
-    if(lob_popup){ ImGui::OpenPopup("##df_lob"); lob_popup = false; }
-    if(ImGui::BeginPopup("##df_lob")){
-        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "MANUAL LOB");
-        ImGui::SetNextItemWidth(200);
-        int lob_idx = -1;
-        for(int i = 0; i < (int)stn_names.size(); i++)
-            if(stn_names[i] == lob_stn){ lob_idx = i; break; }
-        if(lob_idx < 0 && !stn_names.empty()){ lob_idx = 0; lob_stn = stn_names[0]; }
-        {
-            const char* cur = (lob_idx >= 0) ? stn_names[lob_idx].c_str() : "(no station)";
-            if(ImGui::BeginCombo("station", cur)){
-                for(int i = 0; i < (int)stn_names.size(); i++)
-                    if(ImGui::Selectable(stn_names[i].c_str(), lob_idx == i)){
-                        lob_idx = i; lob_stn = stn_names[i];
-                    }
-                ImGui::EndCombo();
-            }
-        }
-        ImGui::SetNextItemWidth(200);
-        ImGui::InputFloat("bearing (deg)", &lob_brg, 1.f, 10.f, "%.1f");
-        ImGui::BeginDisabled(lob_idx < 0);
-        if(ImGui::Button("ADD") && lob_idx >= 0 && lob_idx < (int)stns.size()){
-            FFTViewer::DFFix f{};
-            f.t_end_ms    = now_ms_local();
-            f.bearing_deg = std::fmod(lob_brg + 360.f, 360.f);
-            f.station_lat = (float)stns[lob_idx].lat;
-            f.station_lon = (float)stns[lob_idx].lon;
-            f.kind = 0; f.manual_lob = 1;
-            snprintf(f.note, sizeof f.note, "MANUAL %s", stn_names[lob_idx].c_str());
-            v.df_push_fix(f);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        if(ImGui::Button("CANCEL")) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
     }
 
     // Ctrl+C: 선택 행을 탭 구분으로 복사
