@@ -765,6 +765,15 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             if(v.df_hist_at(i).kind == 0){ focus = &v.df_hist_at(i); break; }
     }
 
+    // 아무것도 선택 안 했으면 **가장 최근 측정**으로 타원을 그린다. 나침반과
+    // 세부카드는 이미 그렇게 폴백하는데 타원만 안 하면, 측정을 막 끝낸 운용자가
+    // 표에서 행을 골라야만 결과가 보인다 — 방금 잰 것이 기본으로 보여야 맞다.
+    // (선택이 있으면 그쪽이 이긴다. 선택은 "이것들을 합쳐 봐" 라는 뜻이므로.)
+    static std::vector<const FFTViewer::DFFix*> shown;
+    shown.clear();
+    if(!selected.empty())      shown = selected;
+    else if(focus)             shown.push_back(focus);
+
     // ── 지도 ─────────────────────────────────────────────────────────────
     static std::vector<modview_map::MapPoint>  pts;
     static std::vector<modview_map::MapStation> stns;
@@ -830,7 +839,10 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             float sla = f.station_lat, slo = f.station_lon;
             if(sla == 0.f && slo == 0.f) continue;
             norm(sla, slo);
-            const bool is_sel = sel.selected(key_of(vis[p]));
+            // 선택이 없으면 최신 측정을 선택된 것처럼 밝게 그린다 — 타원이
+            // 그걸로 그려지므로(shown), 어느 선의 결과인지 보여야 한다.
+            const bool is_sel = selected.empty() ? (focus == &f)
+                                                 : sel.selected(key_of(vis[p]));
             const float amul  = is_sel ? 1.0f : 0.35f;
             const double clat = std::cos(sla * D2R);
             const double e_lat = sla + (lob_km * std::cos(f.bearing_deg * D2R)) / KM_PER_DEG_LAT;
@@ -858,8 +870,8 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             }
         }
         // 교차 fix
-        if(!selected.empty()){
-            FixSolution fx = df_solve_fix(selected.data(), (int)selected.size(), lob_km);
+        if(!shown.empty()){
+            FixSolution fx = df_solve_fix(shown.data(), (int)shown.size(), lob_km);
             if(fx.ok){
                 const ImVec2 cp = P(fx.lat, fx.lon);
                 const double clat = std::cos(fx.lat * D2R);
