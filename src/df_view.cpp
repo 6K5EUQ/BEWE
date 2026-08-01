@@ -637,9 +637,20 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     // 선과 만나야 알 수 있다. 클릭 선택은 광선 자체를 히트테스트해 처리한다.
 
     // 이력이 비면 draw_map 은 auto-fit 을 안 한다 — 기지 중심으로 시드해 준다.
+    //
+    // 경도 폭은 위도 폭과 같게 두면 안 된다. 화면은 등거리원통 투영이라 1도 경도가
+    // 1도 위도보다 cos(위도) 배 짧게 보이므로, 등방(isotropic)이려면
+    //   lonspan = (W/H) * latspan / cos(lat)
+    // 여야 한다. 예전엔 양쪽 다 0.75 로 박아 두고 initialized 까지 세웠는데,
+    // 그러면 draw_map 의 fit/normalize 경로가 전부 건너뛰어져 첫 화면이 가로로
+    // 1.6배쯤 눌린 채 뜨고, 휠을 한 칸 돌려 normalize 가 불려야 제 비율이 됐다.
     if(just_opened && pts.empty() && !stns.empty() && !mv.initialized){
-        mv.lat0 = stns[0].lat - 0.75; mv.lat1 = stns[0].lat + 0.75;
-        mv.lon0 = stns[0].lon - 0.75; mv.lon1 = stns[0].lon + 0.75;
+        const double latsp = 1.5;                       // 기지 중심 +-0.75도
+        double cl = std::cos(stns[0].lat * D2R);
+        if(cl < 0.05) cl = 0.05;
+        const double lonsp = (double)mapw / (double)body_h * latsp / cl;
+        mv.lat0 = stns[0].lat - latsp*0.5; mv.lat1 = stns[0].lat + latsp*0.5;
+        mv.lon0 = stns[0].lon - lonsp*0.5; mv.lon1 = stns[0].lon + lonsp*0.5;
         mv.initialized = true;
     }
 
