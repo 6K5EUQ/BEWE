@@ -16,12 +16,27 @@
 struct NetAudioRing {
     static constexpr size_t SZ   = 32768;
     static constexpr size_t MASK = SZ - 1;
-    // 재생 시작 전 최소 축적량 (48kHz 기준 ~50ms)
-    static constexpr size_t JITTER_FILL = 2400;
-    // 언더런 발생 시 재축적 임계값 (JITTER_FILL의 절반)
-    static constexpr size_t JITTER_RESUME = JITTER_FILL / 2;
-    // 지연 한계: 초과 시 오래된 샘플을 버리고 최신 JITTER_FILL만 재생 (돌이표 방지, ~150ms)
-    static constexpr size_t JITTER_MAX = JITTER_FILL * 3;
+    // 재생 시작 전 최소 축적량 (48kHz 기준 ~50ms). 기본값은 종전과 동일하다.
+    //
+    // KrakenSDR HOST 는 heimdall 이 437 ms 마다 1 M 샘플을 버스트로 주므로 오디오도
+    // 그 리듬으로 나온다. 50 ms 버퍼로는 버스트 사이를 못 버텨 매 프레임 언더런이
+    // 나고, 그게 "뚝뚝 끊김"으로 들린다. 그래서 HOST 하드웨어에 따라 런타임에
+    // 늘릴 수 있게 static(전역) 으로 둔다 — 채널마다 다를 이유가 없고, HB 의
+    // remote_hw 하나로 전 채널이 같이 바뀐다.
+    static size_t JITTER_FILL;    // 기본 2400 (~50 ms)
+    static size_t JITTER_MAX;     // 기본 7200 (~150 ms)
+    // HOST 하드웨어 종류(HB remote_hw: 3=KrakenSDR)에 맞춰 버퍼 목표치를 잡는다.
+    // 값이 그대로면 아무것도 안 한다 — 재생 중 파라미터가 흔들리지 않게.
+    // JITTER_MAX 는 링 용량(SZ) 안에 있어야 한다. 넘으면 avail 이 그 값에
+    // 영영 도달하지 못해 지연 상한이 사라지고, 밀린 오디오가 계속 쌓인다.
+    static void set_profile_for_hw(uint8_t hw_type){
+        const size_t fill = (hw_type == 3) ? 24000 : 2400;   // Kraken ~500 ms, 그 외 ~50 ms
+        if(fill == JITTER_FILL) return;
+        JITTER_FILL = fill;
+        size_t mx = fill * 3;                                 // 목표 상한 (~3배)
+        if(mx > SZ - SZ/8) mx = SZ - SZ/8;                    // 링 여유 12.5% 확보
+        JITTER_MAX = mx;
+    }
 
     float                   buf[SZ]{};
     int8_t                  pan[SZ]{};

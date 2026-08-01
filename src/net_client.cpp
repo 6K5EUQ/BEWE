@@ -24,6 +24,11 @@ extern void bewe_log_push(int col, const char* fmt, ...);
 #include <fcntl.h>
 #include <poll.h>
 
+// 지터버퍼 목표치 — 기본은 종전과 같은 ~50 ms / ~150 ms.
+// STATUS 로 HOST 하드웨어가 확인되면 set_profile_for_hw 가 조정한다 (Kraken 버스트).
+size_t NetAudioRing::JITTER_FILL = 2400;
+size_t NetAudioRing::JITTER_MAX  = 7200;
+
 // ── relay 모드: 이미 연결된 fd로 AUTH만 수행 ─────────────────────────────
 bool NetClient::connect_fd(int fd, const char* id, const char* pw, uint8_t tier){
     fd_ = fd;
@@ -612,6 +617,9 @@ void NetClient::handle_packet(PacketType type,
         remote_gain_db.store(s->gain_db);
         remote_sr.store(s->sample_rate);
         remote_hw.store(s->hw_type);
+        // HOST 가 KrakenSDR 이면 오디오가 437 ms 버스트로 온다 — 지터버퍼를 그에
+        // 맞춰 키운다. 값이 그대로면 no-op 이라 매 STATUS 마다 불려도 무해하다.
+        NetAudioRing::set_profile_for_hw(s->hw_type);
         break;
     }
 

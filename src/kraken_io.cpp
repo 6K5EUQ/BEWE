@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <cctype>
 #include <cstring>
 #include <memory>
@@ -49,17 +50,31 @@ struct KrakenState {
     std::mutex  cfg_mtx;
     df::Config  cfg;
 
-    // ch0 스테이징: 엔진 스레드가 채우고 캡처 스레드가 소비하는 한 칸.
-    // 42 MB 짜리 프레임 전체가 아니라 ch0 만, 그것도 int16 로 줄여 담는다
-    // (1048576 샘플 -> 4 MB). 큐를 두지 않는 이유는 스펙트럼이 최신 프레임만
-    // 필요하기 때문 — 밀리면 오래된 걸 그리느니 버리는 게 맞다.
+    // ch0 스테이징: 엔진 스레드가 채우고 캡처 스레드가 소비한다. 42 MB 짜리
+    // 프레임 전체가 아니라 ch0 만, 그것도 int16 로 줄여 담는다 (1048576 샘플
+    // -> 4 MB).
+    //
+    // 예전엔 한 칸짜리 슬롯이었다. 스펙트럼만 보면 "밀리면 최신 것만 그린다"
+    // 가 맞지만, 이 스테이징은 ring 을 거쳐 복조·IQ 녹음·TM 으로도 흘러간다.
+    // 프레임을 버리면 오디오에 437 ms 짜리 구멍이 뚫리고(뚝뚝 끊김), 녹음
+    // 파일에도 같은 크기의 누락이 남는다. heimdall 은 437 ms 마다 1 M 샘플을
+    // 버스트로 주므로, 캡처가 행 페이싱으로 잠깐 자는 동안 도착한 프레임이
+    // 통째로 사라지는 구조였다.
+    //
+    // 유한 큐(drop-oldest)로 바꾼다. 가득 차면 **가장 오래된 것**을 버린다 —
+    // sink 는 DF 엔진 스레드에서 불리므로 절대 블로킹하면 안 된다 (기다리면
+    // DF 측정 자체가 멈춘다). 큐 길이 2 = 최대 ~0.9 초 지연, +4 MB.
+    static constexpr size_t CH0_QUEUE_MAX = 2;
+    struct Ch0Frame {
+        std::vector<int16_t> iq;        // interleaved I/Q
+        size_t   n = 0;
+        uint64_t cf_hz = 0, fs_hz = 0;
+        uint32_t overdrive = 0;
+    };
     std::mutex              mtx;
     std::condition_variable cv;
-    std::vector<int16_t>    stage;      // interleaved I/Q
-    size_t                  stage_n = 0;
-    bool                    ready   = false;
-    uint64_t                cf_hz = 0, fs_hz = 0;
-    uint32_t                overdrive = 0;
+    std::deque<Ch0Frame>    q;          // mtx 보호
+    std::deque<std::vector<int16_t>> freelist;  // 버퍼 재활용 (프레임당 4 MB 재할당 방지)
     uint64_t                dropped = 0;   // 캡처가 못 따라가 버린 프레임 수
 };
 
@@ -160,20 +175,31 @@ bool FFTViewer::initialize_kraken(float cf_mhz){
 
     // ── ch0 탭 등록 ─────────────────────────────────────────────────────
     // 엔진 스레드에서 불린다. 블로킹 금지 — 변환해서 스테이징에 넣고 즉시 반환.
+    // 블로킹 금지 — 여기서 기다리면 DF 측정 루프가 통째로 멈춘다. 락도 try_to_lock
+    // 으로만 잡고, 못 잡으면 그 프레임만 포기한다 (캡처가 큐를 만지는 그 짧은 순간).
     K.engine->set_ch0_sink([](const std::complex<float>* ch0, size_t n,
                               uint64_t cf, uint64_t fs, uint32_t od, int64_t){
         auto& S = kst();
         std::unique_lock<std::mutex> lk(S.mtx, std::try_to_lock);
-        if(!lk.owns_lock()){ S.dropped++; return; }   // 캡처가 붙잡고 있으면 이번 프레임은 버린다
-        if(S.ready){ S.dropped++; }                   // 아직 안 가져갔으면 최신 것으로 덮는다
-        if(S.stage.size() < n*2) S.stage.resize(n*2);
+        if(!lk.owns_lock()){ S.dropped++; return; }
+        // 재활용 버퍼가 있으면 꺼내 쓴다 (프레임당 4 MB 재할당 방지).
+        KrakenState::Ch0Frame fr;
+        if(!S.freelist.empty()){ fr.iq = std::move(S.freelist.back()); S.freelist.pop_back(); }
+        if(fr.iq.size() < n*2) fr.iq.resize(n*2);
         // std::complex<float> 는 interleaved float 연속 배열 — VOLK 커널이 kr_f2i 와
         // 동일한 스케일·포화·nearest-even 라운딩으로 한 번에 변환 (스칼라 루프 대체)
-        volk_32f_s32f_convert_16i(S.stage.data(),
+        volk_32f_s32f_convert_16i(fr.iq.data(),
                                   reinterpret_cast<const float*>(ch0),
                                   2048.0f, (unsigned)(n*2));
-        S.stage_n = n; S.cf_hz = cf; S.fs_hz = fs; S.overdrive = od;
-        S.ready = true;
+        fr.n = n; fr.cf_hz = cf; fr.fs_hz = fs; fr.overdrive = od;
+        // drop-oldest: 캡처가 계속 못 따라오면 가장 오래된 것부터 버린다.
+        while(S.q.size() >= KrakenState::CH0_QUEUE_MAX){
+            if(S.freelist.size() < KrakenState::CH0_QUEUE_MAX + 1)
+                S.freelist.push_back(std::move(S.q.front().iq));
+            S.q.pop_front();
+            S.dropped++;
+        }
+        S.q.push_back(std::move(fr));
         lk.unlock();
         S.cv.notify_one();
     });
@@ -212,11 +238,32 @@ void FFTViewer::capture_and_process_kraken(){
     auto now_ms = []{ return (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::steady_clock::now().time_since_epoch()).count(); };
 
+    // ch0 프레임 유실 진단 (1분 주기). 이 카운터가 오르면 그만큼 오디오/녹음에
+    // 구멍이 난 것이다 — 예전엔 증가만 하고 아무 데서도 안 읽혀 증상만 보였다.
+    int64_t  drop_log_ms = now_ms();
+    uint64_t drop_seen   = 0;
+
     while(is_running && !sdr_stream_error.load(std::memory_order_relaxed)){
         if(capture_pause.load(std::memory_order_relaxed)){
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             rx_pos=0; rx_avail=0;
             continue;
+        }
+
+        {   // 유실 보고 — 늘었을 때만 찍는다 (정상 운용 로그를 더럽히지 않게).
+            const int64_t t = now_ms();
+            if(t - drop_log_ms >= 60000){
+                uint64_t d;
+                { std::lock_guard<std::mutex> lk(K.mtx); d = K.dropped; }
+                if(d != drop_seen){
+                    bewe_log_push(2,"[Kraken] ch0 frames dropped: %llu (+%llu in last min) "
+                                    "- audio/recording gaps\n",
+                                  (unsigned long long)d,
+                                  (unsigned long long)(d - drop_seen));
+                    drop_seen = d;
+                }
+                drop_log_ms = t;
+            }
         }
 
         // ── 샘플레이트 변경 요청은 거부한다 ─────────────────────────────
@@ -264,15 +311,20 @@ void FFTViewer::capture_and_process_kraken(){
             {
                 std::unique_lock<std::mutex> lk(K.mtx);
                 if(!K.cv.wait_for(lk, std::chrono::milliseconds(1500),
-                                  [&]{ return K.ready || !is_running; }))
+                                  [&]{ return !K.q.empty() || !is_running; }))
                     continue;                      // 타임아웃 — 루프 조건 다시 검사
-                if(!K.ready) continue;
-                n = K.stage_n;
-                // 4MB memcpy 대신 버퍼 소유권 교환 — sink 쪽은 resize-on-demand 라
-                // 다음 프레임에서 필요 크기로 알아서 키운다.
-                iq16.swap(K.stage);
+                if(K.q.empty()) continue;
+                // 큐 맨 앞(가장 오래된 것)부터 순서대로 — 버려야 할 때는 sink 가
+                // 이미 버렸다. 여기서 최신만 집으면 그 사이 프레임이 또 사라진다.
+                n = K.q.front().n;
+                // 4MB memcpy 대신 버퍼 소유권 교환. 직전에 쓰던 버퍼는 sink 가
+                // 다시 쓸 수 있게 freelist 로 돌려준다.
+                std::vector<int16_t> prev = std::move(iq16);
+                iq16 = std::move(K.q.front().iq);
+                K.q.pop_front();
+                if(K.freelist.size() < KrakenState::CH0_QUEUE_MAX + 1)
+                    K.freelist.push_back(std::move(prev));
                 if(iq16.size() < n*2) iq16.resize(n*2);
-                K.ready = false;
             }
             if(n == 0) continue;
 
@@ -348,7 +400,14 @@ void FFTViewer::capture_and_process_kraken(){
                                        / (double)hw.sample_rate;
                     row_due += std::chrono::microseconds((long long)(row_s * 1e6));
                     const auto now_r = std::chrono::steady_clock::now();
-                    if(row_due > now_r){
+                    // 다음 프레임이 이미 큐에 쌓여 있으면 자지 않는다. 자는 동안
+                    // 큐가 더 밀리면 sink 가 drop-oldest 로 버리기 시작하고, 그건
+                    // 곧 오디오·녹음의 구멍이다. 화면 부드러움보다 IQ 연속성이
+                    // 우선이다 — 밀린 상태에선 몰아서 내고 페이싱은 다음 프레임에
+                    // 다시 잡는다.
+                    bool backlog;
+                    { std::lock_guard<std::mutex> lk(K.mtx); backlog = !K.q.empty(); }
+                    if(row_due > now_r && !backlog){
                         // 프레임 주기보다 오래 자면 다음 프레임을 놓친다. 상한을 둔다.
                         auto wait = row_due - now_r;
                         const auto cap = std::chrono::milliseconds(200);

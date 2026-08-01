@@ -53,9 +53,6 @@ const char* link_text(int l){
     return l == 2 ? "STREAMING" : (l == 1 ? "CALIBRATING" : "DOWN");
 }
 
-const char* algo_name(int a){
-    return a == 0 ? "Bartlett" : (a == 1 ? "Capon" : "MUSIC");
-}
 
 // 엔진의 Config::validate() 와 같은 교차필드 제약. 위젯은 슬라이더 "범위"만 좁히고
 // 저장값은 그대로 두기 때문에, elements 를 내리면 signal_dim 이 범위 밖에 남는다.
@@ -68,118 +65,6 @@ void clamp_cross_fields(PktDfConfig& c){
     if(c.max_frames < c.avg_frames) c.max_frames = c.avg_frames;
 }
 
-// ── 나침반 ────────────────────────────────────────────────────────────────
-// 예전 draw_array_diagram + draw_polar_spectrum 을 하나로 합쳤다. 예전 플롯에는
-// "0" 눈금 하나뿐이라 방위를 눈으로 읽을 수가 없었고, dB 바닥이 -40 에 박혀 있어
-// MUSIC 의 뾰족한 봉우리가 바늘로만 보였다.
-//
-// spec_q: dB_below_peak = -0.5 * q (와이어 양자화 그대로). null 이면 곡선 생략.
-// hover_az: 마우스가 원 안에 있으면 그 방위(도)를 돌려준다 (없으면 <0).
-void draw_compass(ImDrawList* dl, ImVec2 c, float R,
-                  const uint8_t* spec_q, bool have,
-                  double bearing_deg, const double* alt_deg, int alt_n,
-                  int elements, int sense, float floor_db, float* hover_az){
-    const ImU32 col_ring  = IM_COL32(90,90,90,255);
-    const ImU32 col_tick  = IM_COL32(120,120,120,255);
-    const ImU32 col_txt   = IM_COL32(150,150,150,255);
-    const ImU32 col_curve = IM_COL32(80,180,255,200);
-    const ImU32 col_brg   = IM_COL32(80,220,80,255);
-
-    auto pt = [&](double deg, float r){
-        const float a = (float)(deg * D2R);
-        return ImVec2(c.x + r * std::sin(a), c.y - r * std::cos(a));
-    };
-
-    // dB 링 3개 (바닥 / 절반 / 0)
-    for(int i = 1; i <= 3; i++){
-        const float rr = R * (float)i / 3.f;
-        dl->AddCircle(c, rr, i == 3 ? col_ring : IM_COL32(60,60,60,255), 64, i == 3 ? 1.5f : 1.0f);
-    }
-    {
-        char lb[16];
-        for(int i = 1; i <= 3; i++){
-            snprintf(lb, sizeof lb, "%.0f", floor_db * (float)(3 - i) / 3.f);
-            dl->AddText(ImVec2(c.x + 3, c.y - R * (float)i / 3.f - 2), IM_COL32(95,95,95,255), lb);
-        }
-    }
-
-    // 30도 눈금 + 사방위 + 도 라벨
-    static const char* card[12] = { "N","30","60","E","120","150","S","210","240","W","300","330" };
-    for(int i = 0; i < 12; i++){
-        const double d = i * 30.0;
-        const bool major = (i % 3) == 0;
-        dl->AddLine(pt(d, R), pt(d, R - (major ? 10.f : 5.f)), col_tick, major ? 1.6f : 1.0f);
-        const ImVec2 tp = pt(d, R + 13.f);
-        const ImVec2 ts = ImGui::CalcTextSize(card[i]);
-        dl->AddText(ImVec2(tp.x - ts.x * 0.5f, tp.y - ts.y * 0.5f),
-                    major ? IM_COL32(190,190,190,255) : col_txt, card[i]);
-    }
-
-    // 의사스펙트럼 곡선
-    if(have && spec_q && floor_db < -1.f){
-        ImVec2 prev;
-        for(int i = 0; i <= 360; i++){
-            const int k = i % 360;
-            const float db = -0.5f * (float)spec_q[k];
-            // db=0 -> 반지름 1, db=floor -> 0. floor 는 음수다.
-            float r = 1.0f - (db / floor_db);
-            if(r < 0.f) r = 0.f; else if(r > 1.f) r = 1.f;
-            const ImVec2 p = pt((double)k, R * r);
-            if(i > 0) dl->AddLine(prev, p, col_curve, 1.2f);
-            prev = p;
-        }
-    }
-
-    // 배열 다이어그램 (중앙) — 배선 sense 실수가 보이는 유일한 곳이라 존치
-    {
-        const float ar = R * 0.30f;
-        dl->AddCircle(c, ar, IM_COL32(70,70,70,255), 32, 1.0f);
-        const float dir = (sense == 0) ? 1.0f : -1.0f;
-        const int m = (elements < 1) ? 1 : elements;
-        for(int i = 0; i < m; i++){
-            const float phi = dir * 2.0f * PI_F * (float)i / (float)m;
-            const ImVec2 p(c.x + ar * std::sin(phi), c.y - ar * std::cos(phi));
-            dl->AddCircleFilled(p, 3.5f, i == 0 ? IM_COL32(255,200,0,255) : IM_COL32(150,150,150,255));
-        }
-    }
-
-    // 대안 방위 (모호집합) — 주 방위보다 흐리게
-    for(int i = 0; i < alt_n && i < 2; i++){
-        dl->AddLine(c, pt(alt_deg[i], R), IM_COL32(255,170,60,120), 1.4f);
-        dl->AddCircleFilled(pt(alt_deg[i], R), 3.0f, IM_COL32(255,170,60,160));
-    }
-
-    // 주 방위
-    if(have){
-        const ImVec2 tip = pt(bearing_deg, R + 8.f);
-        dl->AddLine(c, tip, col_brg, 2.5f);
-        dl->AddCircleFilled(tip, 4.0f, col_brg);
-        char lb[24]; snprintf(lb, sizeof lb, "%.1f", bearing_deg);
-        const ImVec2 lp = pt(bearing_deg, R + 30.f);
-        const ImVec2 ls = ImGui::CalcTextSize(lb);
-        dl->AddText(ImVec2(lp.x - ls.x * 0.5f, lp.y - ls.y * 0.5f), col_brg, lb);
-    }
-
-    // 호버 판독 — 값이지 설명이 아니므로 허용
-    *hover_az = -1.f;
-    const ImVec2 mp = ImGui::GetIO().MousePos;
-    const float dx = mp.x - c.x, dy = mp.y - c.y;
-    const float rr = std::sqrt(dx*dx + dy*dy);
-    if(rr <= R + 6.f){
-        float az = std::atan2(dx, -dy) * 180.f / PI_F;
-        if(az < 0.f) az += 360.f;
-        *hover_az = az;
-        dl->AddLine(c, pt(az, R), IM_COL32(200,200,200,90), 1.0f);
-        char lb[48];
-        if(have && spec_q){
-            const int k = ((int)(az + 0.5f)) % 360;
-            snprintf(lb, sizeof lb, "%.0f deg   %.1f dB", az, -0.5f * (float)spec_q[k]);
-        } else {
-            snprintf(lb, sizeof lb, "%.0f deg", az);
-        }
-        dl->AddText(ImVec2(c.x - R, c.y + R + 18.f), IM_COL32(210,210,210,220), lb);
-    }
-}
 
 // ── LOB 교차 fix ──────────────────────────────────────────────────────────
 // 선택된 방위선들의 최소자승 교점 + 1σ 오차타원.
@@ -447,7 +332,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     static bool   at_bottom  = true;
     static char   filter[64] = {};
     static float  lob_km     = 150.f;
-    static float  polar_floor_db = -40.f;
     static int    meas_ch    = 0;          // 0 = 자동(선택 채널)
     static uint32_t last_seq  = 0;    // 마지막으로 본 df_hist_seq (개수 아님)
     static int      last_vis_n = 0;   // 직전 프레임 가시행 수 (tail-follow 용)
@@ -611,7 +495,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         }
         vis.push_back(i);
     }
-    // 0 Time 1 CH 2 Freq 3 Brg 4 SNR 5 Conf 6 Frm 7 Note
+    // 0 Time 1 CH 2 Freq 3 Brg 4 SNR 5 Conf 6 Note
     modview::sort_vis(vis, sort_col, sort_asc, [&](int col, int a, int b)->int{
         const FFTViewer::DFFix& x = v.df_hist_at(a);
         const FFTViewer::DFFix& y = v.df_hist_at(b);
@@ -623,7 +507,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             case 3: return cf(x.bearing_deg, y.bearing_deg);
             case 4: return cf(x.snr_db, y.snr_db);
             case 5: return cf(x.conf_db, y.conf_db);
-            case 6: return cf(x.frames_used, y.frames_used);
             default: return strcmp(x.note, y.note);
         }
     });
@@ -653,7 +536,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     if(!mv.big){
         ImGuiTableFlags tf = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
                              ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable;
-        if(ImGui::BeginTable("##df_tbl", 8, tf, ImVec2(tw, body_h))){
+        if(ImGui::BeginTable("##df_tbl", 7, tf, ImVec2(tw, body_h))){
             ImGui::TableSetupScrollFreeze(2, 1);
             ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 74);
             ImGui::TableSetupColumn("CH",   ImGuiTableColumnFlags_WidthFixed, 36);
@@ -661,9 +544,8 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             ImGui::TableSetupColumn("Brg",  ImGuiTableColumnFlags_WidthFixed, 54);
             ImGui::TableSetupColumn("SNR",  ImGuiTableColumnFlags_WidthFixed, 50);
             ImGui::TableSetupColumn("Conf", ImGuiTableColumnFlags_WidthFixed, 50);
-            ImGui::TableSetupColumn("Frm",  ImGuiTableColumnFlags_WidthFixed, 52);
             ImGui::TableSetupColumn("Note", ImGuiTableColumnFlags_WidthStretch);
-            modview::sortable_headers(8, sort_col, sort_asc, /*text_col=*/7);
+            modview::sortable_headers(7, sort_col, sort_asc, /*text_col=*/6);
 
             for(int p = 0; p < (int)vis.size(); p++){
                 const int hi = vis[p];
@@ -698,11 +580,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 if(measured){ snprintf(b, sizeof b, "%.2f", f.conf_db); modview::cell(b); }
                 else modview::cell("-");
                 ImGui::TableSetColumnIndex(6);
-                if(measured){
-                    snprintf(b, sizeof b, "%u/%u", (unsigned)f.frames_used,
-                             (unsigned)f.frames_discarded); modview::cell(b);
-                } else modview::cell("-");
-                ImGui::TableSetColumnIndex(7);
                 {
                     const bool bad = (f.kind != 0) || f.imbalance || f.overdrive_mask;
                     ImVec4 nc = bad ? ImVec4(1.f,0.6f,0.35f,1.f) : ImVec4(0.65f,0.65f,0.65f,1.f);
@@ -932,19 +809,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                     dl->AddLine(ImVec2(cp.x-7,cp.y), ImVec2(cp.x+7,cp.y), IM_COL32(255,240,160,230), 1.6f);
                     dl->AddLine(ImVec2(cp.x,cp.y-7), ImVec2(cp.x,cp.y+7), IM_COL32(255,240,160,230), 1.6f);
                 }
-                char lb[96];
-                // 라벨은 언제나 실제 95% 크기를 적는다 (화면에서 키웠든 아니든).
-                // 교차가 없으면 "FIX" 라고 쓰면 안 된다 — 위치가 정해진 게 아니라
-                // 선을 따라 어디인지만 모르는 상태다. 종방향 크기는 LOB 길이에서
-                // 온 가정값이므로 그렇게 읽히게 라벨을 나눈다.
-                if(fx.crossing)
-                    snprintf(lb, sizeof lb, "FIX %.4fN %.4fE  95%% %.2f x %.2f km  (%.1f deg)%s",
-                             fx.lat, fx.lon, maj_km, min_km, fx.sig_deg_used,
-                             tiny ? "  [<]" : "");
-                else
-                    snprintf(lb, sizeof lb, "LOB only  cross-track 95%% %.2f km  (%.1f deg)",
-                             min_km, fx.sig_deg_used);
-                dl->AddText(ImVec2(cp.x + 10, cp.y - 16), IM_COL32(255,240,160,240), lb);
             }
         }
         dl->PopClipRect();
@@ -963,55 +827,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                           (int)vis.size(), io.KeyCtrl, io.KeyShift);
             }
         }
-    }
-
-    // ── 나침반 오버레이 (지도 좌하단 — 우하단은 축척바, 좌상단은 토글열) ──
-    {
-        // 좌하단이되 map_view 의 커서 lat/lon 판독(맨 아래 줄)은 피해 올려둔다.
-        const float CR = 92.f;
-        const ImVec2 cc(map_p0.x + CR + 34.f, map_p0.y + body_h - CR - 58.f);
-        if(mapw > 2*CR + 80.f && body_h > 2*CR + 80.f){
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            dl->PushClipRect(map_p0, ImVec2(map_p0.x + mapw, map_p0.y + body_h), true);
-            dl->AddCircleFilled(cc, CR + 34.f, IM_COL32(12,14,18,190), 48);
-            float hover_az = -1.f;
-            const bool have = (focus != nullptr);
-            double altd[2] = {0,0};
-            int altn = 0;
-            if(have){ altd[0]=focus->alt_deg[0]; altd[1]=focus->alt_deg[1]; altn=focus->alt_n; }
-            draw_compass(dl, cc, CR,
-                         have && focus->has_spec ? focus->spec_q : nullptr,
-                         have, have ? focus->bearing_deg : 0.0, altd, altn,
-                         c.elements, c.sense, polar_floor_db, &hover_az);
-            dl->PopClipRect();
-        }
-    }
-
-    // ── 세부 판독 (지도 우상단) ─────────────────────────────────────────
-    if(focus){
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        char l1[128], l2[128], l3[128], l4[128];
-        char ts[16]; hms(focus->t_end_ms, ts, sizeof ts);
-        snprintf(l1, sizeof l1, "CH%u  %.4f MHz  BW %.1f kHz  %s",
-                 (unsigned)focus->dnum, focus->cf_mhz, focus->bw_khz, ts);
-        snprintf(l2, sizeof l2, "bearing %.1f deg   (ant0 %.1f)",
-                 focus->bearing_deg, focus->bearing_rel_deg);
-        snprintf(l3, sizeof l3, "SNR %.1f dB   conf %.2f dB   pwr %.1f dBFS   %s",
-                 focus->snr_db, focus->conf_db, focus->power_dbfs, algo_name(focus->algo));
-        if(focus->alt_n > 0)
-            snprintf(l4, sizeof l4, "alt %.0f deg %.0f dB", focus->alt_deg[0], focus->alt_db[0]);
-        else l4[0] = 0;
-        const float bw = 380.f;
-        const ImVec2 p0(map_p0.x + mapw - bw - 10.f, map_p0.y + 10.f);
-        const float bh = l4[0] ? 78.f : 62.f;
-        dl->PushClipRect(map_p0, ImVec2(map_p0.x + mapw, map_p0.y + body_h), true);
-        dl->AddRectFilled(p0, ImVec2(p0.x + bw, p0.y + bh), IM_COL32(12,14,18,205), 4.f);
-        dl->AddRect(p0, ImVec2(p0.x + bw, p0.y + bh), IM_COL32(70,80,95,220), 4.f);
-        dl->AddText(ImVec2(p0.x+8, p0.y+6),  IM_COL32(200,200,200,255), l1);
-        dl->AddText(ImVec2(p0.x+8, p0.y+22), IM_COL32(90,230,90,255),   l2);
-        dl->AddText(ImVec2(p0.x+8, p0.y+38), IM_COL32(180,180,180,255), l3);
-        if(l4[0]) dl->AddText(ImVec2(p0.x+8, p0.y+54), IM_COL32(255,180,80,255), l4);
-        dl->PopClipRect();
     }
 
     // ══════════════════ 설정 창 (기본 닫힘) ══════════════════
@@ -1118,7 +933,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
         ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "DISPLAY");
         ImGui::SetNextItemWidth(150);
-        ImGui::SliderFloat("polar floor (dB)", &polar_floor_db, -80.f, -10.f, "%.0f");
         ImGui::SetNextItemWidth(150);
         ImGui::SliderFloat("LOB length (km)", &lob_km, 10.f, 500.f, "%.0f");
 

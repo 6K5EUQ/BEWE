@@ -4415,6 +4415,25 @@ void run_streaming_viewer(){
                     if(ImGui::IsKeyPressed((ImGuiKey)(ImGuiKey_0+k), false)){ want = (k==0)?10:k; break; }
                 if(want > 0) v.df_request_by_display_num(want);
             }
+            // ── F: DF 창 토글 ────────────────────────────────────────────
+            // F 는 선택 채널의 FM 복조 토글이기도 하다 (아래 A/F 블록). 채널이
+            // 선택돼 있으면 그쪽이 우선이고, 선택이 없을 때만 DF 창을 여닫는다.
+            // 패널이 열린 상태에서도 F 로 닫혀야 하므로 main_kbd_active 게이트
+            // 바깥에 둔다 (그 플래그는 오버레이가 열리면 false 다).
+            if(!io.WantTextInput && !ImGui::IsAnyItemActive()
+               && !(sci >= 0 && v.channels[sci].filter_active)
+               && ImGui::IsKeyPressed(ImGuiKey_F, false)){
+                if(v.df_panel_open){
+                    v.df_panel_open = false;
+                } else {
+                    // 하단바 토글과 같은 상호배제 규칙 — 다른 전체영역 오버레이가
+                    // 열려 있으면 열지 않는다 (bar_other_open(7) 과 동일 조건).
+                    bool other = v.eid_panel_open || v.log_panel_open || v.lwf_modal_open
+                              || v.sig_lib_panel_open || v.mission_modal_open
+                              || v.demod_panel_open;
+                    if(!other) v.df_panel_open = true;
+                }
+            }
             // (T 키 매핑 제거 — 사용자 요청. IQ rolling 은 항상 HOST 측에서 자동 관리)
             // 스페이스바: TM 토글 (진입/해제)
             // EID Audio 탭(mode 8) 활성 시에는 audio play/pause 전용 — TM 토글 비활성
@@ -4675,9 +4694,9 @@ void run_streaming_viewer(){
             static const char* rtl_lbls[]   = {"0.25M","0.96M","1.44M","2.048M","2.56M","3.2M"};
             static const float pluto_srs[]  = {0.52f,1.0f,2.0f,2.56f,3.2f,10.0f,20.0f,40.0f,61.44f};
             static const char* pluto_lbls[] = {"0.52M","1M","2M","2.56M","3.2M","10M","20M","40M","61.44M"};
-            // 0=blade, 1=rtl, 2=pluto
+            // 0=blade, 1=rtl, 2=pluto, 3=kraken
             uint8_t rh = v.net_cli ? v.net_cli->remote_hw.load() : 1;
-            int hw_mode = (rh == 0) ? 0 : (rh == 2) ? 2 : 1;
+            int hw_mode = (rh == 0) ? 0 : (rh == 2) ? 2 : (rh == 3) ? 3 : 1;
             const float* sr_list;  const char** sr_lbls;  int sr_count;
             switch(hw_mode){
                 case 0: sr_list = blade_srs; sr_lbls = blade_lbls; sr_count = 7; break;
@@ -4685,44 +4704,62 @@ void run_streaming_viewer(){
                 default: sr_list = rtl_srs;  sr_lbls = rtl_lbls;   sr_count = 6; break;
             }
 
-            // 현재 SR에 맞는 인덱스 선택
-            static int sr_si = -1;
             float cur_sr_msps = v.remote_mode
                 ? (v.net_cli ? v.net_cli->remote_sr.load() / 1e6f : 0.f)
                 : v.hw.sample_rate_mhz;
-            {
-                float best_diff = 1e9f;
-                for(int i=0;i<sr_count;i++){
-                    float d = fabsf(sr_list[i] - cur_sr_msps);
-                    if(d < best_diff){ best_diff=d; sr_si=i; }
-                }
-            }
 
-            const char* cur_lbl = (sr_si>=0 && sr_si<sr_count) ? sr_lbls[sr_si] : "?";
-            float tw_sr  = ImGui::CalcTextSize(cur_lbl).x;
-            float box_sr = 76.0f;
-            float px_sr  = std::max(2.0f,(box_sr-tw_sr)*0.5f-12.0f);
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(px_sr, ImGui::GetStyle().FramePadding.y));
-            ImGui::SetNextItemWidth(box_sr);
-            if(ImGui::BeginCombo("##srcombo", cur_lbl, ImGuiComboFlags_HeightSmall)){
-                for(int i=0;i<sr_count;i++){
-                    bool sel = (sr_si==i);
-                    if(ImGui::Selectable(sr_lbls[i], sel)){
-                        if(i != sr_si){
-                            sr_si = i;
-                            if(v.remote_mode && v.net_cli){
-                                v.net_cli->cmd_set_sr(sr_list[i]);
-                            } else {
-                            v.pending_sr_msps = sr_list[i];
-                            v.sr_change_req   = true;
-                            } // end local/host branch
-                        }
+            // KrakenSDR: 샘플레이트는 heimdall 의 daq_chain_config.ini 소유라 BEWE 가
+            // 바꿀 수 없다. 목록에서 근사값을 고르면(구현 이전엔 RTL 표로 떨어져
+            // 2.4MSPS 가 "2.56M" 으로 보였다) 실제와 다른 값을 표시하게 되므로
+            // 읽기 전용으로 실값만 찍는다.
+            if(hw_mode == 3){
+                char kbuf[24];
+                snprintf(kbuf, sizeof(kbuf), "%.3fM", cur_sr_msps);
+                float tw_k  = ImGui::CalcTextSize(kbuf).x;
+                float box_k = 76.0f;
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                                    ImVec2(std::max(2.0f,(box_k-tw_k)*0.5f), ImGui::GetStyle().FramePadding.y));
+                ImGui::BeginDisabled();
+                ImGui::Button(kbuf, ImVec2(box_k, 0));
+                ImGui::EndDisabled();
+                ImGui::PopStyleVar();
+            } else {
+                // 현재 SR에 맞는 인덱스 선택
+                static int sr_si = -1;
+                {
+                    float best_diff = 1e9f;
+                    for(int i=0;i<sr_count;i++){
+                        float d = fabsf(sr_list[i] - cur_sr_msps);
+                        if(d < best_diff){ best_diff=d; sr_si=i; }
                     }
-                    if(sel) ImGui::SetItemDefaultFocus();
                 }
-                ImGui::EndCombo();
+
+                const char* cur_lbl = (sr_si>=0 && sr_si<sr_count) ? sr_lbls[sr_si] : "?";
+                float tw_sr  = ImGui::CalcTextSize(cur_lbl).x;
+                float box_sr = 76.0f;
+                float px_sr  = std::max(2.0f,(box_sr-tw_sr)*0.5f-12.0f);
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(px_sr, ImGui::GetStyle().FramePadding.y));
+                ImGui::SetNextItemWidth(box_sr);
+                if(ImGui::BeginCombo("##srcombo", cur_lbl, ImGuiComboFlags_HeightSmall)){
+                    for(int i=0;i<sr_count;i++){
+                        bool sel = (sr_si==i);
+                        if(ImGui::Selectable(sr_lbls[i], sel)){
+                            if(i != sr_si){
+                                sr_si = i;
+                                if(v.remote_mode && v.net_cli){
+                                    v.net_cli->cmd_set_sr(sr_list[i]);
+                                } else {
+                                    v.pending_sr_msps = sr_list[i];
+                                    v.sr_change_req   = true;
+                                }
+                            }
+                        }
+                        if(sel) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopStyleVar();
             }
-            ImGui::PopStyleVar();
             ImGui::SameLine();
         }
 
