@@ -988,10 +988,24 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     //
     // 기준은 창 오른쪽 끝이다 — 운용자에게 SETUP 은 언제나 화면 우상단 같은
     // 자리에 있어야 하고, 패널을 열었다고 버튼이 옮겨 다니면 안 된다.
+    //
+    // 버튼을 부모 창에 그냥 놓으면 설정 패널이 열렸을 때 안 눌린다: 패널은
+    // BeginChild 로 만든 **자식 창**이라 그 사각형 안의 입력을 자식이 가져가고,
+    // 나중에 그린다고 뒤집히지 않는다 (SetNextItemAllowOverlap 은 아이템 간
+    // 규칙이지 창 간 규칙이 아니다). 그래서 버튼도 자식 창에 담아 패널보다 뒤에
+    // 등록한다 — 창 순서는 등록 순서를 따르므로 이쪽이 이긴다.
     {
         const float BW = 62.f, BH = 22.f, PAD = 8.f, GAPB = 4.f;
         // 오른쪽에서 왼쪽으로: SETUP, (잠금 중이면) 주파수 해제 버튼
         const float right_edge = map_p0.x + mapw + (setup_w > 0 ? setup_w + 4.f : 0.f);
+        // 잠금 해제 버튼까지 들어갈 만큼만 잡는다. 넓게 잡으면 그 투명한 띠가
+        // 지도 팬/클릭을 통째로 먹는다.
+        const float ov_w = BW + PAD*2 + (freq_lock ? 108.f + GAPB : 0.f);
+        const float ov_h = BH + PAD*2;
+        ImGui::SetCursorScreenPos(ImVec2(right_edge - ov_w, map_p0.y));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
+        ImGui::BeginChild("##df_ovl", ImVec2(ov_w, ov_h), false,
+                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         float bx = right_edge - PAD - BW;
         const float by = map_p0.y + PAD;
 
@@ -1016,6 +1030,8 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             ImGui::PopStyleColor();
         }
         ImGui::PopStyleVar();
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
     }
 
     // Del: 선택한 LOB 을 이력에서 지운다. 선택 규약은 표와 같다 —
