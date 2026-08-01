@@ -578,7 +578,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     // 지도에 그려지지 않은 선이 fix 를 움직이는 셈이라 설명이 불가능해진다.
     static std::vector<const FFTViewer::DFFix*> selected;
     selected.clear();
-    const FFTViewer::DFFix* focus = nullptr;
     for(int p = 0; p < (int)vis.size(); p++){
         const FFTViewer::DFFix& f = v.df_hist_at(vis[p]);
         if(f.kind != 0) continue;
@@ -590,25 +589,21 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             : sel.selected(k);
         if(take){
             selected.push_back(&f);
-            if(!freq_lock && sel.focus == k) focus = &f;
         }
     }
-    // 잠금 모드에선 가장 최근 측정을 세부 판독 기준으로 삼는다.
-    if(freq_lock && !selected.empty()) focus = selected.back();
-    if(!focus && !selected.empty()) focus = selected.back();
-    if(!focus && v.df_hist_n > 0){
-        for(int i = v.df_hist_n - 1; i >= 0; i--)
-            if(v.df_hist_at(i).kind == 0){ focus = &v.df_hist_at(i); break; }
-    }
-
-    // 아무것도 선택 안 했으면 **가장 최근 측정**으로 타원을 그린다. 나침반과
-    // 세부카드는 이미 그렇게 폴백하는데 타원만 안 하면, 측정을 막 끝낸 운용자가
-    // 표에서 행을 골라야만 결과가 보인다 — 방금 잰 것이 기본으로 보여야 맞다.
+    // 아무것도 선택 안 했으면 **가시 측정 전부**를 대상으로 삼는다. 여기서 하나만
+    // 고르면 (예전엔 최신 1개였다) 방금 잰 것 말고는 타원이 안 나와서, 여러 주파수를
+    // 돌아가며 재는 실제 운용에서 화면이 계속 한 표적만 보여준다.
     // (선택이 있으면 그쪽이 이긴다. 선택은 "이것들을 합쳐 봐" 라는 뜻이므로.)
     static std::vector<const FFTViewer::DFFix*> shown;
     shown.clear();
-    if(!selected.empty())      shown = selected;
-    else if(focus)             shown.push_back(focus);
+    if(!selected.empty()) shown = selected;
+    else {
+        for(int p = 0; p < (int)vis.size(); p++){
+            const FFTViewer::DFFix& f = v.df_hist_at(vis[p]);
+            if(f.kind == 0) shown.push_back(&f);
+        }
+    }
 
     // ── 지도 ─────────────────────────────────────────────────────────────
     static std::vector<modview_map::MapPoint>  pts;
@@ -691,9 +686,8 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             float sla = f.station_lat, slo = f.station_lon;
             if(sla == 0.f && slo == 0.f) continue;
             norm(sla, slo);
-            // 선택이 없으면 최신 측정을 선택된 것처럼 밝게 그린다 — 타원이
-            // 그걸로 그려지므로(shown), 어느 선의 결과인지 보여야 한다.
-            const bool is_sel = selected.empty() ? (focus == &f)
+            // 선택이 없으면 전부가 타원 계산에 들어가므로(shown) 전부 밝게 그린다.
+            const bool is_sel = selected.empty() ? true
                                                  : sel.selected(key_of(vis[p]));
             const float amul  = is_sel ? 1.0f : 0.35f;
             const double clat = std::cos(sla * D2R);
@@ -723,14 +717,28 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 prev = cur;
             }
         }
-        // 교차 fix
-        if(!shown.empty()){
-            FixSolution fx = df_solve_fix(shown.data(), (int)shown.size(), lob_km);
+        // 교차 fix — **주파수별로 묶어 그룹당 타원 하나**.
+        //
+        // 서로 다른 주파수의 방위선을 한 뭉치로 풀면 서로 다른 표적의 선들이
+        // 억지로 한 점에서 만나야 해서, 아무 데도 아닌 곳에 타원이 생긴다.
+        // 같은 주파수 = 같은 표적이라는 전제가 이 화면의 근거이므로 (색도 그
+        // 기준으로 칠한다) 교차 계산도 같은 단위로 한다.
+        static std::vector<uint32_t> grp_khz;
+        static std::vector<const FFTViewer::DFFix*> grp;
+        grp_khz.clear();
+        for(const FFTViewer::DFFix* f : shown){
+            const uint32_t khz = (uint32_t)(f->cf_mhz * 1000.0f + 0.5f);
+            if(std::find(grp_khz.begin(), grp_khz.end(), khz) == grp_khz.end())
+                grp_khz.push_back(khz);
+        }
+        for(uint32_t khz : grp_khz){
+            grp.clear();
+            for(const FFTViewer::DFFix* f : shown)
+                if((uint32_t)(f->cf_mhz * 1000.0f + 0.5f) == khz) grp.push_back(f);
+            FixSolution fx = df_solve_fix(grp.data(), (int)grp.size(), lob_km);
             if(fx.ok){
                 // 타원은 이 LOB 뭉치의 산물이므로 그 선들과 같은 색으로 그린다.
-                // 주파수 잠금이면 전부 같은 주파수고, 행 선택이면 대표(첫) 값을
-                // 쓴다 — 섞인 선택은 어차피 한 색으로 칠할 수밖에 없다.
-                const LobColor ec = lob_color_for_freq(shown[0]->cf_mhz);
+                const LobColor ec = lob_color_for_freq(grp[0]->cf_mhz);
                 const ImU32 ec_fill = (ec.core & 0x00FFFFFF) | ((ImU32)30  << 24);
                 const ImU32 ec_line = (ec.glow & 0x00FFFFFF) | ((ImU32)150 << 24);
                 const ImU32 ec_dash = (ec.glow & 0x00FFFFFF) | ((ImU32)130 << 24);
