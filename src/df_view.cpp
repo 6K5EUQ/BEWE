@@ -830,18 +830,54 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 const ImVec2 cp = P(fx.lat, fx.lon);
                 const double clat = std::cos(fx.lat * D2R);
                 const double kmlon = KM_PER_DEG_LAT * (clat > 0.05 ? clat : 0.05);
+                // 95% 신뢰타원. 1σ 를 그대로 그리면 2D 정규분포에서 39% 밖에
+                // 안 담고, 무엇보다 실제 축척에서 안 보인다 — 두 기지가 다 들어오는
+                // 줌(0.7~7 px/km)에서 깨끗한 fix 의 1σ 는 지름 0.2~2 px 다.
+                // r = sqrt(-2 ln(1-p)) 이므로 95% 는 2.4477σ.
+                const double kConf = 2.4477;
+                const double maj_km = fx.maj_km * kConf, min_km = fx.min_km * kConf;
+
                 ImVec2 poly[48];
                 const double th = fx.orient_deg * D2R;
                 for(int i = 0; i < 48; i++){
                     const double a = 2.0*3.14159265358979*i/48.0;
-                    const double ex = fx.maj_km*std::cos(a), ey = fx.min_km*std::sin(a);
+                    const double ex = maj_km*std::cos(a), ey = min_km*std::sin(a);
                     const double rx = ex*std::cos(th) - ey*std::sin(th);
                     const double ry = ex*std::sin(th) + ey*std::cos(th);
                     poly[i] = P(fx.lat + ry/KM_PER_DEG_LAT, fx.lon + rx/kmlon);
                 }
-                dl->AddConvexPolyFilled(poly, 48, IM_COL32(255,205,70,30));
-                for(int i = 0; i < 48; i++)
-                    dl->AddLine(poly[i], poly[(i+1)%48], IM_COL32(255,232,130,150), 1.2f);
+
+                // 화면에서 얼마나 큰지 재서, 너무 작으면 최소 크기를 보장한다.
+                // 다만 그때는 **점선**으로 그려 "이건 실제 크기가 아니라 하한을
+                // 그린 것" 임을 구분한다 — 실선으로 키우면 오차를 과장해 보고하는
+                // 셈이고, 그건 지운 글로우와 같은 잘못이다.
+                float mnx = poly[0].x, mxx = poly[0].x, mny = poly[0].y, mxy = poly[0].y;
+                for(int i = 1; i < 48; i++){
+                    mnx = std::min(mnx, poly[i].x); mxx = std::max(mxx, poly[i].x);
+                    mny = std::min(mny, poly[i].y); mxy = std::max(mxy, poly[i].y);
+                }
+                const float span_px = std::max(mxx-mnx, mxy-mny);
+                // 14px = 눈에 형태가 잡히는 하한. 더 키우면 실제로는 보이는 크기인
+                // 타원까지 점선으로 밀려난다 (전국 축척의 weak fix 가 21px 다).
+                const float kMinPx  = 14.f;
+                const bool  tiny    = (span_px < kMinPx);
+                if(tiny){
+                    const float k = kMinPx / std::max(span_px, 0.01f);
+                    for(int i = 0; i < 48; i++){
+                        poly[i].x = cp.x + (poly[i].x - cp.x) * k;
+                        poly[i].y = cp.y + (poly[i].y - cp.y) * k;
+                    }
+                }
+
+                if(!tiny){
+                    dl->AddConvexPolyFilled(poly, 48, IM_COL32(255,205,70,30));
+                    for(int i = 0; i < 48; i++)
+                        dl->AddLine(poly[i], poly[(i+1)%48], IM_COL32(255,232,130,150), 1.2f);
+                } else {
+                    // 점선 = 실제 타원이 이 원보다 작다는 뜻
+                    for(int i = 0; i < 48; i += 2)
+                        dl->AddLine(poly[i], poly[(i+1)%48], IM_COL32(255,232,130,130), 1.2f);
+                }
                 // 중심은 십자만. 지구본 데모처럼 반지름 6px 글로우를 얹으면,
                 // 기본 줌에서 타원 자체가 1px 미만이라 **그 글로우가 곧 "동그라미"로
                 // 보인다** — 실제 오차 크기와 무관한 고정 크기 원이 오차타원 행세를
@@ -849,8 +885,10 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 dl->AddLine(ImVec2(cp.x-7,cp.y), ImVec2(cp.x+7,cp.y), IM_COL32(255,240,160,230), 1.6f);
                 dl->AddLine(ImVec2(cp.x,cp.y-7), ImVec2(cp.x,cp.y+7), IM_COL32(255,240,160,230), 1.6f);
                 char lb[96];
-                snprintf(lb, sizeof lb, "FIX %.4fN %.4fE  %.1f x %.1f km  (%.1f deg)",
-                         fx.lat, fx.lon, fx.maj_km, fx.min_km, fx.sig_deg_used);
+                // 라벨은 언제나 실제 95% 크기를 적는다 (화면에서 키웠든 아니든).
+                snprintf(lb, sizeof lb, "FIX %.4fN %.4fE  95%% %.2f x %.2f km  (%.1f deg)%s",
+                         fx.lat, fx.lon, maj_km, min_km, fx.sig_deg_used,
+                         tiny ? "  [<]" : "");
                 dl->AddText(ImVec2(cp.x + 10, cp.y - 16), IM_COL32(255,240,160,240), lb);
             }
         }
