@@ -655,6 +655,49 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     }
 
     const ImVec2 map_p0 = ImGui::GetCursorScreenPos();
+
+    // ── 지도 우상단 조작 오버레이 (헤더바 대체) ──────────────────────────
+    // draw_map 보다 **먼저** 등록한다. 지도는 캔버스 전체를 덮는 InvisibleButton
+    // 이라, 나중에 그리면 그 버튼이 클릭을 먼저 먹어 여기 버튼이 눌리지 않는다.
+    // 예전 헤더 스트립을 없애면서 남은 조작만 지도 위로 옮겼다. 지도를 가리지
+    // 않게 우상단 모서리에 붙이고, 필요한 것만 둔다.
+    {
+        const float BW = 62.f, BH = 22.f, PAD = 8.f, GAPB = 4.f;
+        // 오른쪽에서 왼쪽으로: SETUP, CLEAR, (잠금 중이면) 주파수 해제 버튼
+        float bx = map_p0.x + mapw - PAD - BW;
+        const float by = map_p0.y + PAD;
+
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.f);
+        ImGui::SetCursorScreenPos(ImVec2(bx, by));
+        const bool setup_hi = setup_open;
+        if(setup_hi) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f,0.45f,0.6f,1.f));
+        if(ImGui::Button("SETUP", ImVec2(BW, BH))) setup_open = !setup_open;
+        if(setup_hi) ImGui::PopStyleColor();
+
+        bx -= BW + GAPB;
+        ImGui::SetCursorScreenPos(ImVec2(bx, by));
+        if(ImGui::Button("CLEAR", ImVec2(BW, BH))){
+            v.df_hist_n = 0; v.df_hist_head = 0; sel.clear();
+            v.df_last_valid = false; freq_lock = 0;
+            last_seq = v.df_hist_seq; last_vis_n = 0;
+        }
+
+        // 주파수 잠금 중이면 무엇만 보이는지 알리고, 누르면 푼다.
+        if(freq_lock){
+            const float LW = 108.f;
+            bx -= LW + GAPB;
+            ImGui::SetCursorScreenPos(ImVec2(bx, by));
+            const float lock_mhz = (float)freq_lock / 1000.0f;
+            char lb[48]; snprintf(lb, sizeof lb, "%.4f  X", lock_mhz);
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                ImGui::ColorConvertU32ToFloat4(lob_color_for_freq(lock_mhz).glow));
+            if(ImGui::Button(lb, ImVec2(LW, BH))) freq_lock = 0;
+            ImGui::PopStyleColor();
+        }
+        ImGui::PopStyleVar();
+    }
+
+    ImGui::SetCursorScreenPos(map_p0);
     (void)modview_map::draw_map("##df_map", mv, pts, ImVec2(mapw, body_h),
                               just_opened, &stns, nullptr);
 
@@ -800,45 +843,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                           (int)vis.size(), io.KeyCtrl, io.KeyShift);
             }
         }
-    }
-
-    // ── 지도 우상단 조작 오버레이 (헤더바 대체) ──────────────────────────
-    // 예전 헤더 스트립을 없애면서 남은 조작만 지도 위로 옮겼다. 지도를 가리지
-    // 않게 우상단 모서리에 붙이고, 필요한 것만 둔다.
-    {
-        const float BW = 62.f, BH = 22.f, PAD = 8.f, GAPB = 4.f;
-        // 오른쪽에서 왼쪽으로: SETUP, CLEAR, (잠금 중이면) 주파수 해제 버튼
-        float bx = map_p0.x + mapw - PAD - BW;
-        const float by = map_p0.y + PAD;
-
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.f);
-        ImGui::SetCursorScreenPos(ImVec2(bx, by));
-        const bool setup_hi = setup_open;
-        if(setup_hi) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f,0.45f,0.6f,1.f));
-        if(ImGui::Button("SETUP", ImVec2(BW, BH))) setup_open = !setup_open;
-        if(setup_hi) ImGui::PopStyleColor();
-
-        bx -= BW + GAPB;
-        ImGui::SetCursorScreenPos(ImVec2(bx, by));
-        if(ImGui::Button("CLEAR", ImVec2(BW, BH))){
-            v.df_hist_n = 0; v.df_hist_head = 0; sel.clear();
-            v.df_last_valid = false; freq_lock = 0;
-            last_seq = v.df_hist_seq; last_vis_n = 0;
-        }
-
-        // 주파수 잠금 중이면 무엇만 보이는지 알리고, 누르면 푼다.
-        if(freq_lock){
-            const float LW = 108.f;
-            bx -= LW + GAPB;
-            ImGui::SetCursorScreenPos(ImVec2(bx, by));
-            const float lock_mhz = (float)freq_lock / 1000.0f;
-            char lb[48]; snprintf(lb, sizeof lb, "%.4f  X", lock_mhz);
-            ImGui::PushStyleColor(ImGuiCol_Text,
-                ImGui::ColorConvertU32ToFloat4(lob_color_for_freq(lock_mhz).glow));
-            if(ImGui::Button(lb, ImVec2(LW, BH))) freq_lock = 0;
-            ImGui::PopStyleColor();
-        }
-        ImGui::PopStyleVar();
     }
 
     // ══════════════════ 설정 창 (기본 닫힘) ══════════════════
