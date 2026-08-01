@@ -192,7 +192,38 @@ struct FixSolution {
     bool   ok = false;
     double lat = 0, lon = 0;      // lon: 동경 양수
     double maj_km = 0, min_km = 0, orient_deg = 0;
+    double sig_deg_used = 0;      // 이 fix 에 실제로 쓴 평균 방위 불확도 (표시용)
 };
+
+// ── 측정 하나의 방위 불확도 (도) ──────────────────────────────────────────
+// 예전엔 전 LOB 에 1도를 고정으로 썼다. 그러면 오차타원이 측정 품질과 무관해져
+// SNR 38 dB 로 깨끗하게 잡은 방위와 임계에 겨우 걸친 방위가 같은 크기로 그려진다.
+//
+// 하한은 UCA CRB 다 (df/df_manifold.hpp 유도와 같은 식):
+//   var(beta) = 1 / (N * SNR_el * (kr)^2 * M)      [rad^2]
+// 다만 CRB 만 쓰면 안 된다. 실측(DGS-1, 700 MHz, SNR 38 dB, n_eff 6290)에서 CRB 는
+// 0.0016도인데 같은 신호를 3회 잰 산포는 0.1도였다 — 실제 오차는 통계가 아니라
+// 미보정 소자 위상오차(0.246 deg/deg)와 멀티패스가 지배한다. 그래서 CRB 를 계산하되
+// 시스템 바닥으로 잘라, 신호가 아무리 좋아도 그 아래로는 안 내려가게 한다.
+double df_bearing_sigma_deg(const FFTViewer::DFFix& f){
+    const double kFloorDeg = 0.15;   // 아무리 좋아도 이 아래로는 안 믿는다
+    const double kMaxDeg   = 8.0;    // 이보다 나쁘면 교점이 사실상 무의미
+    if(f.manual_lob) return 2.0;     // 사람이 불러준 값 — 측정 통계가 없다
+    if(f.cf_mhz <= 0.0f || f.elements < 3) return 1.0;
+
+    // CRB 형태(1/(N*SNR*(kr)^2*M))를 쓰되 N 은 실측으로 앵커한다. 이론 n_eff(~6000)
+    // 를 그대로 넣으면 700 MHz/SNR 38 dB 에서 0.0016도가 나오는데, 같은 신호를 3회
+    // 잰 실제 산포는 0.1도였다 — 실오차는 통계가 아니라 미보정 소자 위상오차
+    // (0.246 deg/deg)와 멀티패스가 지배한다. 그 지점이 0.1도가 되도록 N=1.58 로
+    // 잡으면 SNR·주파수 의존성(kr 이 클수록, 신호가 셀수록 정확)은 CRB 대로 살면서
+    // 절대값은 현실에 맞는다. 배열을 캘리브레이션하면 이 상수를 올려야 한다.
+    const double kAnchorN = 1.58;
+    const double kr  = 2.0 * 3.14159265358979 * ((double)f.cf_mhz * 1e6) / 299792458.0 * 0.175;
+    const double snr = std::pow(10.0, (double)f.snr_db / 10.0);
+    const double var = 1.0 / std::max(kAnchorN * snr * kr * kr * (double)f.elements, 1e-12);
+    const double sig = std::sqrt(var) / D2R;
+    return std::min(std::max(sig, kFloorDeg), kMaxDeg);
+}
 
 FixSolution df_solve_fix(const FFTViewer::DFFix* const* sel, int n){
     FixSolution out;
@@ -203,13 +234,16 @@ FixSolution df_solve_fix(const FFTViewer::DFFix* const* sel, int n){
     // 건너뛰므로, 여기만 (0,0) 을 남기면 적도-그리니치의 유령 기지가 해에
     // 끼어들어 보이지도 않는 선으로 교점을 끌어당긴다.
     double slat[FFTViewer::DF_HIST_MAX], slon[FFTViewer::DF_HIST_MAX], sbrg[FFTViewer::DF_HIST_MAX];
+    double ssig[FFTViewer::DF_HIST_MAX];   // 측정별 방위 불확도 (rad)
     int m = 0;
     for(int i = 0; i < n; i++){
         float la = sel[i]->station_lat, lo = sel[i]->station_lon;
         if(la == 0.f && lo == 0.f) continue;
         if(lo < 0.f) lo = -lo;      // 지도 경로와 같은 정규화 (서경 저장 방어)
         if(la < 0.f) la = -la;
-        slat[m] = la; slon[m] = lo; sbrg[m] = sel[i]->bearing_deg; m++;
+        slat[m] = la; slon[m] = lo; sbrg[m] = sel[i]->bearing_deg;
+        ssig[m] = df_bearing_sigma_deg(*sel[i]) * D2R;
+        m++;
     }
     if(m < 2) return out;
 
@@ -255,10 +289,12 @@ FixSolution df_solve_fix(const FFTViewer::DFFix* const* sel, int n){
         for(int i = 0; i < n; i++){
             double w = 1.0;
             if(pass > 0){
-                // 먼 LOB 일수록 각도 오차가 큰 횡오차로 번진다: sigma_perp = R * sigma_ang
+                // 먼 LOB 일수록 각도 오차가 큰 횡오차로 번진다: sigma_perp = R * sigma_ang.
+                // sigma_ang 은 측정마다 다르다 (df_bearing_sigma_deg) — 깨끗하게 잡은
+                // 방위가 임계에 걸친 방위보다 교점을 더 강하게 끌어야 한다.
                 const double dxk = ex - sx[i], dyk = ey - sy[i];
                 const double R = std::sqrt(dxk*dxk + dyk*dyk);
-                const double sperp = std::max(R * (1.0 * D2R), 0.05);   // 1도 가정, 하한 50 m
+                const double sperp = std::max(R * ssig[i], 0.05);   // 하한 50 m
                 w = 1.0 / (sperp * sperp);
             }
             const double c = px[i]*sx[i] + py[i]*sy[i];
@@ -290,7 +326,14 @@ FixSolution df_solve_fix(const FFTViewer::DFFix* const* sel, int n){
     const double l2 = std::max(tr*0.5 - std::sqrt(disc), 0.0);
     out.maj_km = std::sqrt(std::max(l1, 0.0));
     out.min_km = std::sqrt(l2);
+    // 장축 방향. atan2(2*c12, c11-c22)/2 를 쓴다 — 지구본 데모(ui.cpp draw_err_ellipse
+    // 호출부)의 atan2(c12, l1-c22) 는 c12==0 이고 c11<c22 인 축정렬 공분산에서
+    // atan2(0, 음수)=pi 가 되어 장단축이 90도 뒤바뀐다. 수치로 확인한 차이다.
     out.orient_deg = 0.5 * std::atan2(2.0*c12, c11 - c22) / D2R;
+
+    double sg = 0.0;
+    for(int i = 0; i < n; i++) sg += ssig[i];
+    out.sig_deg_used = (sg / n) / D2R;
 
     out.lat = lat0 + ey / KM_PER_DEG_LAT;
     out.lon = lon0 + ex / kmlon;
@@ -823,11 +866,15 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 dl->AddConvexPolyFilled(poly, 48, IM_COL32(255,205,70,30));
                 for(int i = 0; i < 48; i++)
                     dl->AddLine(poly[i], poly[(i+1)%48], IM_COL32(255,232,130,150), 1.2f);
+                // 중심 마커 — 지구본 데모와 같은 글로우+코어. 십자만 두면 채운
+                // 타원 안에서 묻힌다.
+                dl->AddCircleFilled(cp, 6.0f, IM_COL32(255,210,80,45));
+                dl->AddCircleFilled(cp, 2.4f, IM_COL32(255,244,180,225));
                 dl->AddLine(ImVec2(cp.x-7,cp.y), ImVec2(cp.x+7,cp.y), IM_COL32(255,240,160,230), 1.6f);
                 dl->AddLine(ImVec2(cp.x,cp.y-7), ImVec2(cp.x,cp.y+7), IM_COL32(255,240,160,230), 1.6f);
                 char lb[96];
-                snprintf(lb, sizeof lb, "FIX %.4fN %.4fE  +/- %.1f km",
-                         fx.lat, fx.lon, fx.maj_km);
+                snprintf(lb, sizeof lb, "FIX %.4fN %.4fE  %.1f x %.1f km  (%.1f deg)",
+                         fx.lat, fx.lon, fx.maj_km, fx.min_km, fx.sig_deg_used);
                 dl->AddText(ImVec2(cp.x + 10, cp.y - 16), IM_COL32(255,240,160,240), lb);
             }
         }
