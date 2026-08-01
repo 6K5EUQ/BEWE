@@ -524,8 +524,12 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                     // 없었다. 여기 쓰는 sigma 는 지도의 95% 타원과 같은 근거라
                     // (df_bearing_sigma_deg) 표와 지도가 같은 말을 한다.
                     if(measured){
-                        const double sg = df_bearing_sigma_deg(f);
-                        snprintf(b, sizeof b, "%.1f (%.1f)", f.bearing_deg, sg);
+                        // 95% 구간. 각도는 1차원이라 1.96 sigma 다 (지도 타원은
+                        // 2차원이라 2.4477 sigma — 같은 95% 라도 배수가 다르다).
+                        // 1 sigma 를 그대로 적으면 그 안에 있을 확률이 68% 뿐인데
+                        // 숫자가 작아 더 정확해 보이는 착시를 준다.
+                        const double sg95 = df_bearing_sigma_deg(f) * 1.96;
+                        snprintf(b, sizeof b, "%.1f (+-%.1f)", f.bearing_deg, sg95);
                     } else {
                         snprintf(b, sizeof b, "%.1f", f.bearing_deg);
                     }
