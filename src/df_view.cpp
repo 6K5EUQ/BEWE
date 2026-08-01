@@ -660,10 +660,15 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         mv.initialized = true;
     }
 
-    const ImVec2 map_p0 = ImGui::GetCursorScreenPos();
+    const ImVec2 map_p0    = ImGui::GetCursorScreenPos();
+    const ImVec2 map_curpos = ImGui::GetCursorPos();   // 같은 지점의 창 로컬 좌표
 
     (void)modview_map::draw_map("##df_map", mv, pts, ImVec2(mapw, body_h),
                               just_opened, &stns, nullptr);
+    // 오버레이가 커서를 지도 안으로 옮기므로, 그 전 위치를 들고 있다가 되돌린다.
+    // 안 그러면 뒤따르는 SetupPanel 의 SameLine 이 지도 안쪽을 기준으로 잡아
+    // 패널이 지도 위에 겹쳐 그려진다 (표까지 밀려 사라진다).
+    const ImVec2 after_map_cursor = ImGui::GetCursorPos();
 
     // ── 지도 우상단 조작 오버레이 (헤더바 대체) ──────────────────────────
     // draw_map **뒤에** 등록한다: 나중에 그려야 지도 위에 보이고, 지도 캔버스
@@ -704,6 +709,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             ImGui::PopStyleColor();
         }
         ImGui::PopStyleVar();
+        ImGui::SetCursorPos(after_map_cursor);   // 지도 다음 위치로 복원
     }
 
 
@@ -854,7 +860,9 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
 
     // ══════════════════ 설정 창 (기본 닫힘) ══════════════════
     if(setup_shown){
-        ImGui::SameLine(0, 4);
+        // SameLine 을 쓰면 "직전 아이템" 기준이라 지도 위 오버레이 버튼 옆에
+        // 붙어 패널이 지도를 덮는다. 지도 오른쪽 끝에 명시적으로 놓는다.
+        ImGui::SetCursorPos(ImVec2(map_curpos.x + mapw + 4.f, map_curpos.y));
         // JOIN 이 HOST 정본을 아직 못 받았으면 못 만지게 막는다. 안 막으면
         // df_default_pkt 하드코딩 기본값이 첫 조작에서 통째로 HOST 를 덮어쓴다
         // (host_state 에 영속화까지 된다).
