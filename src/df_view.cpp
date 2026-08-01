@@ -591,14 +591,29 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             selected.push_back(&f);
         }
     }
-    // 아무것도 선택 안 했으면 **가시 측정 전부**를 대상으로 삼는다. 여기서 하나만
-    // 고르면 (예전엔 최신 1개였다) 방금 잰 것 말고는 타원이 안 나와서, 여러 주파수를
-    // 돌아가며 재는 실제 운용에서 화면이 계속 한 표적만 보여준다.
-    // (선택이 있으면 그쪽이 이긴다. 선택은 "이것들을 합쳐 봐" 라는 뜻이므로.)
+    // 타원 계산에 넣을 LOB. **선택한 행 그 자체가 아니라, 그 행의 주파수에 속한
+    // 가시 LOB 전부**다. 같은 주파수면 같은 방사체이므로 한 선만 떼어내 푸는 건
+    // 의미가 없다 (교차가 없어 위치가 안 나온다) — 표에서 한 줄을 짚는 뜻은
+    // "이 표적을 보겠다" 이지 "이 한 번의 측정만" 이 아니다.
+    // 아무것도 안 골랐으면 가시 측정 전부가 대상이다.
     static std::vector<const FFTViewer::DFFix*> shown;
     shown.clear();
-    if(!selected.empty()) shown = selected;
-    else {
+    if(!selected.empty()){
+        static std::vector<uint32_t> want_khz;
+        want_khz.clear();
+        for(const FFTViewer::DFFix* f : selected){
+            const uint32_t khz = (uint32_t)(f->cf_mhz * 1000.0f + 0.5f);
+            if(std::find(want_khz.begin(), want_khz.end(), khz) == want_khz.end())
+                want_khz.push_back(khz);
+        }
+        for(int p = 0; p < (int)vis.size(); p++){
+            const FFTViewer::DFFix& f = v.df_hist_at(vis[p]);
+            if(f.kind != 0) continue;
+            const uint32_t khz = (uint32_t)(f.cf_mhz * 1000.0f + 0.5f);
+            if(std::find(want_khz.begin(), want_khz.end(), khz) != want_khz.end())
+                shown.push_back(&f);
+        }
+    } else {
         for(int p = 0; p < (int)vis.size(); p++){
             const FFTViewer::DFFix& f = v.df_hist_at(vis[p]);
             if(f.kind == 0) shown.push_back(&f);
@@ -686,9 +701,10 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             float sla = f.station_lat, slo = f.station_lon;
             if(sla == 0.f && slo == 0.f) continue;
             norm(sla, slo);
-            // 선택이 없으면 전부가 타원 계산에 들어가므로(shown) 전부 밝게 그린다.
-            const bool is_sel = selected.empty() ? true
-                                                 : sel.selected(key_of(vis[p]));
+            // 밝게 그리는 기준은 **타원 계산에 들어갔는가**(shown) 다. 선택한 행만
+            // 밝히면, 합산에 참여하는 같은 주파수의 나머지 선들이 흐릿하게 남아
+            // 타원이 어디서 나온 건지 화면에서 읽히지 않는다.
+            const bool is_sel = std::find(shown.begin(), shown.end(), &f) != shown.end();
             const float amul  = is_sel ? 1.0f : 0.35f;
             const double clat = std::cos(sla * D2R);
             const double e_lat = sla + (lob_km * std::cos(f.bearing_deg * D2R)) / KM_PER_DEG_LAT;
@@ -816,21 +832,12 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             const bool dragged = (dg.x*dg.x + dg.y*dg.y) > 16.f;
             if(inside) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             if(inside && !dragged && ImGui::IsMouseReleased(ImGuiMouseButton_Left)){
-                // 선 하나를 집으면 **그 주파수 전부**를 고른다 (표의 주파수 셀과
-                // 같은 동작). 한 선만 골라 봐야 방위선 하나로는 교차가 없어
-                // 표적 위치가 안 나온다 — 운용자가 선을 짚는 뜻은 "이 표적을
-                // 보겠다" 이지 "이 한 번의 측정만 보겠다" 가 아니다.
-                // Ctrl/Shift 는 종전대로 행 단위 선택으로 남긴다.
-                if(io.KeyCtrl || io.KeyShift){
-                    freq_lock = 0;
-                    sel.click(key_of(vis[lob_hit_p]), lob_hit_p, key_at_vis,
-                              (int)vis.size(), io.KeyCtrl, io.KeyShift);
-                } else {
-                    const FFTViewer::DFFix& hf = v.df_hist_at(vis[lob_hit_p]);
-                    const uint32_t want = (uint32_t)(hf.cf_mhz * 1000.0f + 0.5f);
-                    sel.clear();     // 행 선택과 섞이면 무엇이 그려지는지 모호해진다
-                    freq_lock = (freq_lock == want) ? 0 : want;
-                }
+                // 클릭한 **그 선 한 줄만** 표에서 고른다 (표를 클릭한 것과 같다).
+                // 타원은 그래도 그 주파수 전체의 합산 하나다 — shown 이 선택된
+                // 행의 주파수로 넓히기 때문이라, 선택과 계산 대상이 따로 논다.
+                freq_lock = 0;
+                sel.click(key_of(vis[lob_hit_p]), lob_hit_p, key_at_vis,
+                          (int)vis.size(), io.KeyCtrl, io.KeyShift);
             }
         }
     }
