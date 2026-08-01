@@ -180,6 +180,10 @@ MapResult draw_map(const char* id, MapView& v, const std::vector<MapPoint>& pts,
     float W = size.x>0 ? size.x : avail.x;
     float H = size.y>0 ? size.y : avail.y;
     if(W<16) W=16; if(H<16) H=16;
+    // 이 버튼은 캔버스 전체를 덮는다. 호출자가 지도 위에 얹는 오버레이 위젯이
+    // 클릭을 받으려면 그 위젯이 **나중에** 등록되면서 이 버튼을 덮어써야 하는데,
+    // 그러려면 여기서 겹침을 허용해 줘야 한다 (안 하면 지도가 다 먹는다).
+    ImGui::SetNextItemAllowOverlap();
     ImGui::InvisibleButton(id, ImVec2(W,H),
         ImGuiButtonFlags_MouseButtonLeft|ImGuiButtonFlags_MouseButtonRight);
     bool hovered = ImGui::IsItemHovered();

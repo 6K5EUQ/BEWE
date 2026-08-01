@@ -658,9 +658,12 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
 
     const ImVec2 map_p0 = ImGui::GetCursorScreenPos();
 
+    (void)modview_map::draw_map("##df_map", mv, pts, ImVec2(mapw, body_h),
+                              just_opened, &stns, nullptr);
+
     // ── 지도 우상단 조작 오버레이 (헤더바 대체) ──────────────────────────
-    // draw_map 보다 **먼저** 등록한다. 지도는 캔버스 전체를 덮는 InvisibleButton
-    // 이라, 나중에 그리면 그 버튼이 클릭을 먼저 먹어 여기 버튼이 눌리지 않는다.
+    // draw_map **뒤에** 등록한다: 나중에 그려야 지도 위에 보이고, 지도 캔버스
+    // 버튼이 SetNextItemAllowOverlap 을 걸어 두어 클릭도 이쪽이 가져간다.
     // 예전 헤더 스트립을 없애면서 남은 조작만 지도 위로 옮겼다. 지도를 가리지
     // 않게 우상단 모서리에 붙이고, 필요한 것만 둔다.
     {
@@ -699,9 +702,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         ImGui::PopStyleVar();
     }
 
-    ImGui::SetCursorScreenPos(map_p0);
-    (void)modview_map::draw_map("##df_map", mv, pts, ImVec2(mapw, body_h),
-                              just_opened, &stns, nullptr);
+
 
     // 지도 클릭 -> 표와 **동일한** 선택 경로 (선택 모델이 하나라야 ctrl/shift 의미가
     // 같다). 클릭 대상은 마커가 아니라 **광선 자체**다 — 아래 LOB 렌더 블록에서
