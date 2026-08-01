@@ -711,6 +711,14 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         if(!shown.empty()){
             FixSolution fx = df_solve_fix(shown.data(), (int)shown.size(), lob_km);
             if(fx.ok){
+                // 타원은 이 LOB 뭉치의 산물이므로 그 선들과 같은 색으로 그린다.
+                // 주파수 잠금이면 전부 같은 주파수고, 행 선택이면 대표(첫) 값을
+                // 쓴다 — 섞인 선택은 어차피 한 색으로 칠할 수밖에 없다.
+                const LobColor ec = lob_color_for_freq(shown[0]->cf_mhz);
+                const ImU32 ec_fill = (ec.core & 0x00FFFFFF) | ((ImU32)30  << 24);
+                const ImU32 ec_line = (ec.glow & 0x00FFFFFF) | ((ImU32)150 << 24);
+                const ImU32 ec_dash = (ec.glow & 0x00FFFFFF) | ((ImU32)130 << 24);
+                const ImU32 ec_cross= (ec.glow & 0x00FFFFFF) | ((ImU32)230 << 24);
                 const ImVec2 cp = P(fx.lat, fx.lon);
                 const double clat = std::cos(fx.lat * D2R);
                 const double kmlon = KM_PER_DEG_LAT * (clat > 0.05 ? clat : 0.05);
@@ -754,21 +762,21 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 }
 
                 if(!tiny){
-                    dl->AddConvexPolyFilled(poly, 48, IM_COL32(255,205,70,30));
+                    dl->AddConvexPolyFilled(poly, 48, ec_fill);
                     for(int i = 0; i < 48; i++)
-                        dl->AddLine(poly[i], poly[(i+1)%48], IM_COL32(255,232,130,150), 1.2f);
+                        dl->AddLine(poly[i], poly[(i+1)%48], ec_line, 1.2f);
                 } else {
                     // 점선 = 실제 타원이 이 원보다 작다는 뜻
                     for(int i = 0; i < 48; i += 2)
-                        dl->AddLine(poly[i], poly[(i+1)%48], IM_COL32(255,232,130,130), 1.2f);
+                        dl->AddLine(poly[i], poly[(i+1)%48], ec_dash, 1.2f);
                 }
                 // 중심은 십자만. 지구본 데모처럼 반지름 6px 글로우를 얹으면,
                 // 기본 줌에서 타원 자체가 1px 미만이라 **그 글로우가 곧 "동그라미"로
                 // 보인다** — 실제 오차 크기와 무관한 고정 크기 원이 오차타원 행세를
                 // 한다. 타원이 안 보일 만큼 작으면 작다는 사실이 보여야 맞다.
                 if(fx.crossing){
-                    dl->AddLine(ImVec2(cp.x-7,cp.y), ImVec2(cp.x+7,cp.y), IM_COL32(255,240,160,230), 1.6f);
-                    dl->AddLine(ImVec2(cp.x,cp.y-7), ImVec2(cp.x,cp.y+7), IM_COL32(255,240,160,230), 1.6f);
+                    dl->AddLine(ImVec2(cp.x-7,cp.y), ImVec2(cp.x+7,cp.y), ec_cross, 1.6f);
+                    dl->AddLine(ImVec2(cp.x,cp.y-7), ImVec2(cp.x,cp.y+7), ec_cross, 1.6f);
                 }
             }
         }
