@@ -2045,6 +2045,10 @@ static const char* draw_chat_cmd_popup(const char* buf, int& sel,
     return fill;
 }
 
+// S키로 STATUS 를 처음 열 때의 폭(px). 채널 행에 든 위젯 폭이 창 크기와 무관하게
+// 고정이라 비율이 아니라 픽셀로 잡는다. 이후 구분선을 끌면 그 값이 우선한다.
+static constexpr float STATUS_DEFAULT_W_PX = 462.0f;
+
 // ─────────────────────────────────────────────────────────────────────────────
 void run_streaming_viewer(){
     float cf=450.0f;
@@ -4571,7 +4575,12 @@ void run_streaming_viewer(){
                 right_panel_saved_ratio = v.right_panel_ratio;
                 v.right_panel_ratio = 0.0f;
             } else {
-                v.right_panel_ratio = (right_panel_saved_ratio > 0.01f) ? right_panel_saved_ratio : 0.3f;
+                // 기본 열림폭은 비율이 아니라 픽셀로 잡는다 — 안에 든 채널 행(텍스트 +
+                // L/L+R/R/M + AUTO DF + AM/FM/DET)의 폭이 창 크기와 무관하게 고정이라,
+                // 비율로 두면 큰 화면에서 쓸데없이 넓게 열린다.
+                v.right_panel_ratio = (right_panel_saved_ratio > 0.01f)
+                    ? right_panel_saved_ratio
+                    : std::min(0.9f, STATUS_DEFAULT_W_PX / std::max(1.0f, io.DisplaySize.x));
             }
         }
 
@@ -5133,8 +5142,14 @@ void run_streaming_viewer(){
             // 일단 잡았으면 버튼을 놓을 때까지만 끈다. mouse_blocked 로 끊으면 안 된다 —
             // 패널을 좁히는 방향으로 밀면 커서가 STATUS 창(##stat_panel) 위로 올라가고,
             // float_win_capturing_mouse() 가 true 가 되어 드래그가 몇 픽셀마다 끊긴다.
-            if(!ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            if(!ImGui::IsMouseDown(ImGuiMouseButton_Left)){
+                // 드래그를 놓는 순간 최종 폭을 한 줄 남긴다 — STATUS_DEFAULT_W_PX 를
+                // 정할 때 눈으로 맞춘 값을 그대로 옮겨 적기 위한 것.
+                if(vdiv_dragging)
+                    bewe_log_push(0,"[STATUS] panel width = %.0f px (ratio %.4f, disp %.0f)\n",
+                                  disp_w * v.right_panel_ratio, v.right_panel_ratio, disp_w);
                 vdiv_dragging = false;
+            }
             if(vdiv_dragging){
                 v.right_panel_ratio -= io.MouseDelta.x / disp_w;
                 v.right_panel_ratio = std::max(0.0f, std::min(1.0f, v.right_panel_ratio));
