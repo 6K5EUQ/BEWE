@@ -803,7 +803,7 @@ void run_cli_host(){
         { "DGS-1", 35.1786f, 128.5553f },
         { "DGS-2", 35.2054f, 128.7076f },
         { "DGS-3", 35.8685f, 128.6046f },
-        { "DGS-X", 38.7000f, 125.3833f },   // 드론 탑재 Pi5 (raspb2). 38 42'N 125 23'E
+        { "DGS-X", 35.1786f, 128.5553f },   // 드론 탑재 Pi5 (raspb2). DGS-1 과 같은 지점에서 운용
     };
     const int n_preset = (int)(sizeof(presets)/sizeof(presets[0]));
     const int etc_choice = n_preset + 1;   // ETC 는 항상 프리셋 다음 번호
