@@ -375,8 +375,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     // 이후 같은 주파수로 새 측정이 들어오면 자동으로 합류한다 — 행을 하나씩
     // 고르는 방식으로는 새로 들어오는 것을 담을 수 없어서 잠금을 따로 둔다.
     static uint32_t             freq_lock = 0;
-    // 게인 슬라이더는 드래그 중이 아니라 놓을 때 보낸다 (DAQ 재캘리브 방지).
-    static int                  pend_gain_idx = -1;
     static float  split_tw   = 460.f;
     static bool   setup_open = false;
     static int    sort_col   = -1;
@@ -896,33 +894,11 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         // 저장돼 있을 수 있어 여기서 되돌린다.
         c.enable_control = 1;
 
-        // 게인만 기본으로 열어 둔다 — 측정하면서 실제로 손이 가는 유일한 값이다.
-        if(ImGui::CollapsingHeader("GAIN", ImGuiTreeNodeFlags_DefaultOpen)){
+        // 게인은 파워스펙트럼 위 게인 위젯 하나가 소유한다 (그 경로가 곧 DAQ
+        // 5소자 동시 설정이다) — 여기에 같은 값을 또 두지 않는다.
 
-        // 튜너 게인. RTL 은 이산 스텝이라 슬라이더도 인덱스로 움직인다 — 중간값을
-        // 허용하면 DAQ 가 가장 가까운 단으로 스냅해 위젯과 실제가 어긋난다.
-        // 놓는 순간에만 보낸다: 드래그 중 매 프레임 보내면 그때마다 DAQ 가
-        // 재캘리브레이션을 시작해 DF 가 계속 멈춘다.
-        {
-            int gi = (c.gain_idx == 255) ? 0 : (int)c.gain_idx;
-            if(gi < 0) gi = 0;
-            if(gi >= HWConfig::RTL_GAIN_STEPS) gi = HWConfig::RTL_GAIN_STEPS - 1;
-            char glbl[32];
-            snprintf(glbl, sizeof glbl, "%.1f dB",
-                     HWConfig::rtl_gain_tenths_at(gi) / 10.0f);
-            ImGui::SetNextItemWidth(150);
-            if(ImGui::SliderInt("tuner gain", &gi, 0, HWConfig::RTL_GAIN_STEPS - 1, glbl))
-                pend_gain_idx = gi;                       // 놓을 때 보낸다
-            if(ImGui::IsItemDeactivatedAfterEdit() && pend_gain_idx >= 0){
-                c.gain_idx = (uint8_t)pend_gain_idx;
-                pend_gain_idx = -1;
-                v.df_set_cfg(c);                          // HOST 로 요청 (JOIN/HOST 공통 경로)
-            }
-        }
-        }
-
-        // 섹션은 전부 접이식이고 기본은 닫힘이다. 열어 두는 건 GAIN 하나뿐 —
-        // 나머지는 배치할 때 한 번 맞추고 마는 값이라 매번 펼쳐 둘 이유가 없다.
+        // 섹션은 전부 접이식이고 기본은 닫힘이다 — 배치할 때 한 번 맞추고 마는
+        // 값이라 매번 펼쳐 둘 이유가 없다.
         if(ImGui::CollapsingHeader("ARRAY GEOMETRY")){
         { int at = c.array_type; ImGui::SetNextItemWidth(150);
           const char* it[] = { "UCA", "ULA", "ULA+1", "Custom" };

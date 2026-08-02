@@ -140,6 +140,14 @@ void FFTViewer::set_gain(float db){
     } else if(hw.type == HWType::RTLSDR){
         int snapped = HWConfig::rtl_snap_gain(db);
         rtlsdr_set_tuner_gain(dev_rtl, snapped);
+    } else if(hw.type == HWType::KRAKEN){
+        // 게인 소유자는 heimdall DAQ 다 (5소자 동시). 파워스펙트럼 위 게인 위젯도
+        // 이 공통 경로로 들어오므로 DF 쪽과 같은 몸을 쓴다 — RTL 이산 스텝으로
+        // 스냅해 전 소자에 같은 값을 넣는다 (채널마다 다르면 위상 기준이 깨진다).
+        char kerr[128] = {};
+        if(!df_set_gain_index(HWConfig::rtl_gain_index((int)(db * 10.f + 0.5f)),
+                              kerr, sizeof kerr))
+            bewe_log_push(2, "[Kraken] gain set failed: %s\n", kerr);
     } else if(hw.type == HWType::PLUTO){
         auto* phy = (struct iio_device*)pluto_phy_dev;
         if(!phy) return;

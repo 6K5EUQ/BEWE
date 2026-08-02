@@ -49,9 +49,6 @@ struct Snapshot {
     ChanSnap chans[MAX_CHANNELS];
     // DF(방탐) 설정. 구버전 파일엔 없으므로 has_df=false 로 남고 기본값이 쓰인다.
     bool        has_df = false;
-    // enable_control 은 bool 이라 0 이 유효값이다 — "파일에 없음"과 "사용자가 끔"을
-    // 값만 보고는 구분할 수 없다. 키를 실제로 봤는지 따로 기록한다.
-    bool        has_df_enable_control = false;
     PktDfConfig df{};      // 전체 DF 설정. 필드가 늘어도 여기만 손대면 된다.
     // 노치. 구버전 파일엔 없으므로 n_notches=0 → 아무것도 복원하지 않는다.
     int       n_notches = 0;

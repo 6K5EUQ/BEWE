@@ -4176,8 +4176,9 @@ void run_streaming_viewer(){
         if(v.remote_mode && v.net_cli && v.net_cli->is_connected()){
             v.gain_db = v.net_cli->remote_gain_db.load();
             uint8_t hwt = v.net_cli->remote_hw.load();
-            if(hwt == 1){ v.hw.gain_min=0.f;   v.hw.gain_max=49.6f; }
-            else         { v.hw.gain_min=-12.f; v.hw.gain_max=60.f;  }
+            // Kraken(3) 은 소자마다 RTL 튜너라 RTL 과 같은 범위를 쓴다.
+            if(hwt == 1 || hwt == 3){ v.hw.gain_min=0.f;   v.hw.gain_max=49.6f; }
+            else                    { v.hw.gain_min=-12.f; v.hw.gain_max=60.f;  }
             // 주파수 변화 감지 > 오토스케일 트리거
             static float last_cf_mhz = 0.f;
             float cur_cf = v.net_cli->remote_cf_mhz.load();
@@ -4785,7 +4786,19 @@ void run_streaming_viewer(){
             ImDrawList* gdl=ImGui::GetWindowDrawList();
             const float GMIN=v.hw.gain_min, GMAX=v.hw.gain_max;
             const float GRNG=std::max(0.1f,GMAX-GMIN);
-            float gdb=v.gain_db;
+            // Kraken 은 게인 소유자가 heimdall DAQ 라 값을 보낼 때마다 재캘리브레이션이
+            // 돈다 — 드래그 중 매 프레임 보내면 DF 가 계속 멈춘다. 그래서 이산 RTL
+            // 스텝으로 스냅해 두고 놓는 순간에만 보낸다.
+            const bool krk = (v.remote_mode && v.net_cli)
+                           ? (v.net_cli->remote_hw.load() == 3)
+                           : (v.hw.type == HWType::KRAKEN);
+            static bool  gpend_on  = false;
+            static float gpend_db  = 0.f;
+            auto krk_snap=[&](float db)->float{
+                return HWConfig::rtl_gain_tenths_at(
+                           HWConfig::rtl_gain_index((int)(db*10.f+0.5f))) / 10.0f;
+            };
+            float gdb=(krk && gpend_on) ? gpend_db : v.gain_db;
             float gt=(gdb-GMIN)/GRNG; gt=gt<0?0:gt>1?1:gt;
             // 트랙
             gdl->AddRectFilled(ImVec2(gsp.x,gsp.y),ImVec2(gsp.x+GW,gsp.y+GH),IM_COL32(40,40,40,255),3);
@@ -4800,18 +4813,31 @@ void run_streaming_viewer(){
             if(ImGui::IsItemHovered()){
                 float wheel=ImGui::GetIO().MouseWheel;
                 if(wheel!=0.0f){
-                    float step=(v.hw.type==HWType::RTLSDR)?0.5f:1.0f;
-                    float ng=v.gain_db+(wheel>0?step:-step);
-                    ng=ng<GMIN?GMIN:ng>GMAX?GMAX:ng;
+                    float ng;
+                    if(krk){                       // 한 번에 이산 스텝 하나만
+                        int gi=HWConfig::rtl_gain_index((int)(v.gain_db*10.f+0.5f))
+                              +(wheel>0?1:-1);
+                        if(gi<0) gi=0;
+                        if(gi>=HWConfig::RTL_GAIN_STEPS) gi=HWConfig::RTL_GAIN_STEPS-1;
+                        ng=HWConfig::rtl_gain_tenths_at(gi)/10.0f;
+                    } else {
+                        float step=(v.hw.type==HWType::RTLSDR)?0.5f:1.0f;
+                        ng=v.gain_db+(wheel>0?step:-step);
+                        ng=ng<GMIN?GMIN:ng>GMAX?GMAX:ng;
+                    }
                     if(v.net_cli){ v.gain_db=ng; v.net_cli->cmd_set_gain(ng); }
                 }
-                ImGui::SetTooltip("Gain Control  Scroll or drag");
             }
             if(ImGui::IsItemActive()){
                 float mx=ImGui::GetIO().MousePos.x;
                 float ng=GMIN+((mx-gsp.x)/GW)*GRNG;
                 ng=ng<GMIN?GMIN:ng>GMAX?GMAX:ng;
-                if(v.net_cli){ v.gain_db=ng; v.net_cli->cmd_set_gain(ng); }
+                if(krk){ gpend_db=krk_snap(ng); gpend_on=true; }
+                else if(v.net_cli){ v.gain_db=ng; v.net_cli->cmd_set_gain(ng); }
+            }
+            if(krk && gpend_on && ImGui::IsItemDeactivated()){
+                gpend_on=false;
+                if(v.net_cli){ v.gain_db=gpend_db; v.net_cli->cmd_set_gain(gpend_db); }
             }
             ImGui::SetCursorScreenPos(ImVec2(gsp.x+GW+6,ImGui::GetCursorScreenPos().y));
         }

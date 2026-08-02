@@ -173,7 +173,7 @@ Snapshot load(const std::string& station){
         else if(key=="df_target_looks"){double d=0; js.read_number(d); st.df.target_looks=(uint16_t)d; st.has_df=true; }
         else if(key=="df_fft_size"){    double d=0; js.read_number(d); st.df.fft_size=(uint16_t)d;     st.has_df=true; }
         else if(key=="df_max_frames"){  double d=0; js.read_number(d); st.df.max_frames=(uint8_t)d;    st.has_df=true; }
-        else if(key=="df_enable_control"){double d=0;js.read_number(d);st.df.enable_control=(uint8_t)d;st.has_df=true; st.has_df_enable_control=true; }
+        else if(key=="df_enable_control"){double d=0;js.read_number(d);st.df.enable_control=(uint8_t)d;st.has_df=true; }
         else if(key=="df_array_type"){  double d=0; js.read_number(d); st.df.array_type=(uint8_t)d;    st.has_df=true; }
         else if(key.size()==6 && key.compare(0,5,"df_ex")==0 && key[5]>='0' && key[5]<='7'){
             double d=0; js.read_number(d); st.df.elem_x[key[5]-'0']=(float)d;                          st.has_df=true; }
@@ -360,9 +360,9 @@ void apply_df(FFTViewer& v, const Snapshot& st){
     if(d.dc_guard_hz <= 0)  d.dc_guard_hz = 2000.0f;
     if(d.c_papr <= 0)       d.c_papr = 30.0f;
     if(d.radius_m <= 0)     d.radius_m = 0.175f;
-    // 키 자체가 없던 파일이면 켠 상태로 둔다. BEWE 주파수축에서 재튠하는 게
-    // 정상 사용법인데, 여기서 0 이 되면 재튠이 조용히 무시돼 원인을 못 찾는다.
-    if(!st.has_df_enable_control) d.enable_control = 1;
+    // DAQ 제어는 항상 켠다 (v15.4.2 부터 끄는 수단이 없다). 저장돼 있던 0 도
+    // 되돌린다 — 0 이면 주파수축 재튠도 게인 변경도 조용히 무시돼 원인을 못 찾는다.
+    d.enable_control = 1;
     const_cast<Snapshot&>(st).df = d;
     v.df_set_cfg(st.df);
 }
