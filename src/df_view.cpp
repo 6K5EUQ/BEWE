@@ -897,6 +897,52 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         // 게인은 파워스펙트럼 위 게인 위젯 하나가 소유한다 (그 경로가 곧 DAQ
         // 5소자 동시 설정이다) — 여기에 같은 값을 또 두지 않는다.
 
+        // ── 신호형 프리셋 ────────────────────────────────────────────────
+        // 연속파와 버스트는 요구가 정반대다. 연속파는 시간을 쓸 수 있으니 오래
+        // 평균해 잡음을 줄이고 문턱을 높여 나쁜 순간을 버린다. 버스트는 그 시간이
+        // 없다 — 길게 잡으면 신호 없는 구간의 잡음만 더 섞이고, 세그먼트를 못 채워
+        // 측정이 아예 안 남는다. 그래서 짧게 자르고 문턱을 낮춰 놓치지 않게 한다.
+        //
+        // 손대는 건 튜닝 값뿐이다. 배열 기하(radius/heading/numbering)와 캘리브는
+        // 물리적 사실이라 프리셋이 건드리면 안 된다 — 그걸 덮어쓰면 방위가 통째로
+        // 틀어지고, 운용자는 프리셋을 눌렀을 뿐인데 원인을 못 찾는다.
+        {
+            // 지금 어느 쪽에 맞춰져 있는지 표시한다. 프리셋을 누른 뒤 값을 손보면
+            // 어느 쪽도 아니게 되는데, 그때 둘 다 눌리지 않은 것으로 보여야 맞다.
+            const bool is_cont  = (c.avg_frames == 12 && c.target_looks == 8192
+                                   && c.fft_size == 8192);
+            const bool is_burst = (c.avg_frames == 2  && c.target_looks == 1024
+                                   && c.fft_size == 2048);
+            const ImVec4 on_col(0.10f, 0.45f, 0.60f, 1.0f);
+
+            const float bw = (ImGui::GetContentRegionAvail().x - 6.f) * 0.5f;
+            if(is_cont) ImGui::PushStyleColor(ImGuiCol_Button, on_col);
+            if(ImGui::Button("Continuous", ImVec2(bw, 0))){
+                c.avg_frames   = 12;
+                c.max_frames   = 30;
+                c.target_looks = 8192;
+                c.fft_size     = 8192;
+                c.snr_thr_db   = 18.0f;
+                c.c_papr       = 30.0f;
+                v.df_set_cfg(c);
+                hold_until = now + 1.0;
+            }
+            if(is_cont) ImGui::PopStyleColor();
+            ImGui::SameLine(0, 6.f);
+            if(is_burst) ImGui::PushStyleColor(ImGuiCol_Button, on_col);
+            if(ImGui::Button("Burst", ImVec2(bw, 0))){
+                c.avg_frames   = 2;
+                c.max_frames   = 40;   // 버스트를 기다리는 창은 오히려 넓게
+                c.target_looks = 1024;
+                c.fft_size     = 2048;
+                c.snr_thr_db   = 6.0f;
+                c.c_papr       = 60.0f;
+                v.df_set_cfg(c);
+                hold_until = now + 1.0;
+            }
+            if(is_burst) ImGui::PopStyleColor();
+        }
+
         // 섹션은 전부 접이식이고 기본은 닫힘이다 — 배치할 때 한 번 맞추고 마는
         // 값이라 매번 펼쳐 둘 이유가 없다.
         if(ImGui::CollapsingHeader("ARRAY GEOMETRY")){
