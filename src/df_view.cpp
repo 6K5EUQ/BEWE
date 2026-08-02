@@ -860,7 +860,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         ImGui::BeginChild("##df_setup", ImVec2(setup_w, body_h), true);
         ImGui::BeginDisabled(!cfg_ready);
 
-        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "DAQ");
         {
             const ImVec4 cl = (L.link==2) ? ImVec4(0.3f,0.9f,0.3f,1.f)
                             : (L.link==1) ? ImVec4(1.f,0.8f,0.f,1.f)
@@ -937,37 +936,9 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 const char* it[] = { "CW", "CCW" };
                 if(ImGui::Combo("numbering", &sn, it, 2)){ c.sense = (uint8_t)sn; df_preset_coords(c); }
             }
-            // 현재 주파수의 권장 치수. 최근접 소자쌍이 lambda/2 의 kTarget 배가 되게
-            // 잡는다 — 1.0 이 격자엽이 시작되는 한계이므로 20% 를 여유로 둔다.
-            // 개구는 클수록 방위 정밀도가 좋아지니 한계 바로 아래가 최적점이다.
-            //   UCA : 최근접쌍 = 2 r sin(pi/M)  ->  r = kTarget (lambda/4) / sin(pi/M)
-            //   ULA : 최근접쌍 = d              ->  d = kTarget (lambda/2)
-            if(L.lambda_m > 0.0){
-                const double kTarget = 0.8;
-                const int    nel = (c.elements < 3) ? 3 : c.elements;
-                const double rec = (c.array_type == 0)
-                    ? kTarget * (L.lambda_m * 0.25) / std::sin(3.14159265358979 / nel)
-                    : kTarget * (L.lambda_m * 0.5);
-                const bool off = std::fabs(rec - c.radius_m) > 0.005;   // 5 mm 넘게 어긋날 때만
-                ImGui::TextColored(off ? ImVec4(1.f,0.8f,0.3f,1.f) : ImVec4(0.6f,0.7f,0.6f,1.f),
-                                   "recommended %.3f m", rec);
-                if(off){
-                    ImGui::SameLine();
-                    if(ImGui::SmallButton("apply")){ c.radius_m = (float)rec; df_preset_coords(c); }
-                }
-            }
         }
         ImGui::SetNextItemWidth(150);
         ImGui::InputFloat("heading offset (deg)", &c.heading_deg, 1.0f, 10.0f, "%.1f");
-        if(L.lambda_m > 0.0){
-            ImGui::Text("lambda %.3f m   ambiguity %.3f", L.lambda_m, L.ambiguity);
-            if(L.ambiguity > 1.0)
-                ImGui::TextColored(ImVec4(1.f,0.6f,0.f,1.f), "grating lobes");
-        }
-        // ULA 는 배열 축에 대해 대칭이라 b 와 180-b 의 조향벡터가 같다 — 좌우를
-        // 원리적으로 못 가른다. 배치를 고르는 자리에서 알려야 할 값이라 남긴다.
-        if(c.array_type == 1)
-            ImGui::TextColored(ImVec4(1.f,0.6f,0.f,1.f), "mirror ambiguity: b / 180-b");
 
         ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
         ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "ESTIMATION");
@@ -1041,9 +1012,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             if(ci.n > 0){
                 ImGui::Text("%d pts  %.4f MHz  dev %.1f dB",
                             (int)ci.n, ci.freq_hz/1e6, ci.worst_dev_db);
-                ImGui::TextColored(ci.active ? ImVec4(0.4f,0.9f,0.5f,1.f)
-                                             : ImVec4(0.7f,0.7f,0.4f,1.f),
-                                   ci.active ? "applied" : "not applied at this frequency");
                 // 측정된 방위들. 어디가 비었는지 한눈에 보이는 게 목적이라
                 // 표가 아니라 나열이다.
                 char line[256] = {}; int used = 0;
