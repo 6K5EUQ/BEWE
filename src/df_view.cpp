@@ -1005,7 +1005,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 PktDfCalib cmd{}; cmd.cmd = 1; cmd.arg_deg = cal_bearing;
                 v.df_cal_cmd(cmd);
             }
-            ImGui::SameLine(); ImGui::TextDisabled("deg");
             ImGui::SameLine();
             if(ImGui::SmallButton("clear")){ PktDfCalib cmd{}; cmd.cmd = 2; v.df_cal_cmd(cmd); }
 
@@ -1042,20 +1041,28 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                     const ImVec2 o = ImGui::GetCursorScreenPos();
                     ImDrawList* d = ImGui::GetWindowDrawList();
                     d->AddRectFilled(o, ImVec2(o.x+w, o.y+h), IM_COL32(10,12,18,255));
-                    // spec_q 는 0..255 로 양자화된 0..-51 dB (0.2 dB/LSB 규약).
+                    // spec_q 는 dB = -0.5 * q 로 양자화돼 있다 (0 = 피크, 클수록 아래).
+                    // 그대로 높이로 쓰면 위아래가 뒤집혀 봉우리가 골로 보인다.
+                    // 폭도 측정마다 다르므로 그 프레임의 최저값에 맞춰 늘려 그린다 —
+                    // 고정 눈금이면 부엽 차이가 몇 dB 인 측정에서 전부 바닥에 깔린다.
+                    float lo = 0.f;
+                    for(int b = 0; b < 360; b++) lo = std::max(lo, (float)f.spec_q[b]);
+                    if(lo < 20.f) lo = 20.f;             // 평탄한 스펙트럼이 화면을 꽉 채우지 않게
                     for(int x = 0; x < (int)w; x++){
                         const int b  = (int)((float)x / w * 360.f) % 360;
-                        const float q = f.spec_q[b] / 255.f;
+                        const float q = 1.f - (float)f.spec_q[b] / lo;   // 1=피크, 0=최저
                         d->AddLine(ImVec2(o.x+x, o.y+h), ImVec2(o.x+x, o.y+h - q*h),
                                    IM_COL32(70,150,220,255));
                     }
-                    // 보고된 방위(주엽)와 지금 입력한 방위를 같이 긋는다.
-                    auto vline = [&](float deg, ImU32 col){
+                    // 보고된 방위(주엽)와 지금 입력한 방위. 봉우리가 낮을 때도 어디에
+                    // 섰는지 보여야 하므로 선은 스펙트럼 위에 그린다.
+                    auto vline = [&](float deg, ImU32 col, const char* tag){
                         const float x = o.x + std::fmod(deg+360.f, 360.f) / 360.f * w;
-                        d->AddLine(ImVec2(x, o.y), ImVec2(x, o.y+h), col);
+                        d->AddLine(ImVec2(x, o.y), ImVec2(x, o.y+h), col, 2.f);
+                        d->AddText(ImVec2(x+3, o.y+2), col, tag);
                     };
-                    vline(f.bearing_deg, IM_COL32(255,220,80,255));
-                    vline(cal_bearing,   IM_COL32(90,255,140,160));
+                    vline(f.bearing_deg, IM_COL32(255,220,80,255), "peak");
+                    vline(cal_bearing,   IM_COL32(90,255,140,220), "target");
                     ImGui::Dummy(ImVec2(w, h));
                     ImGui::Text("peak %.1f  target %.1f  SNR %.1f dB",
                                 f.bearing_deg, cal_bearing, f.snr_db);
