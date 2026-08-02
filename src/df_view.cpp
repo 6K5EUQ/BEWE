@@ -890,12 +890,14 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             ImGui::ProgressBar(L.progress, ImVec2(-1, 0));
         }
 
-        ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
         // DAQ 제어(:5001 로 FREQ/GAIN 송신)는 항상 켠다. BEWE 에서 주파수를 바꿔
         // 쓰는 게 정상 사용법이고, 꺼두면 주파수축 드래그도 게인 슬라이더도
         // 조용히 먹지 않아 "왜 안 되지" 가 된다. 구 host_state 에 꺼진 채로
         // 저장돼 있을 수 있어 여기서 되돌린다.
         c.enable_control = 1;
+
+        // 게인만 기본으로 열어 둔다 — 측정하면서 실제로 손이 가는 유일한 값이다.
+        if(ImGui::CollapsingHeader("GAIN", ImGuiTreeNodeFlags_DefaultOpen)){
 
         // 튜너 게인. RTL 은 이산 스텝이라 슬라이더도 인덱스로 움직인다 — 중간값을
         // 허용하면 DAQ 가 가장 가까운 단으로 스냅해 위젯과 실제가 어긋난다.
@@ -917,9 +919,11 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 v.df_set_cfg(c);                          // HOST 로 요청 (JOIN/HOST 공통 경로)
             }
         }
+        }
 
-        ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "ARRAY GEOMETRY");
+        // 섹션은 전부 접이식이고 기본은 닫힘이다. 열어 두는 건 GAIN 하나뿐 —
+        // 나머지는 배치할 때 한 번 맞추고 마는 값이라 매번 펼쳐 둘 이유가 없다.
+        if(ImGui::CollapsingHeader("ARRAY GEOMETRY")){
         { int at = c.array_type; ImGui::SetNextItemWidth(150);
           const char* it[] = { "UCA", "ULA", "ULA+1", "Custom" };
           if(ImGui::Combo("array", &at, it, 4)){
@@ -941,9 +945,9 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         }
         ImGui::SetNextItemWidth(150);
         ImGui::InputFloat("heading offset (deg)", &c.heading_deg, 1.0f, 10.0f, "%.1f");
+        }
 
-        ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "ESTIMATION");
+        if(ImGui::CollapsingHeader("ESTIMATION")){
         { int al = c.algo; ImGui::SetNextItemWidth(150);
           const char* it[] = { "Bartlett", "Capon (MVDR)", "MUSIC" };
           if(ImGui::Combo("algorithm", &al, it, 3)) c.algo = (uint8_t)al; }
@@ -955,14 +959,14 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
           ImGui::SameLine(); ImGui::TextDisabled("~%.1f s", af * 0.437); }
         { int mf = c.max_frames; ImGui::SetNextItemWidth(150);
           if(ImGui::SliderInt("frame budget", &mf, c.avg_frames, 60)) c.max_frames = (uint8_t)mf; }
+        }
 
-        ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "ACCEPTANCE");
+        if(ImGui::CollapsingHeader("ACCEPTANCE")){
         ImGui::SetNextItemWidth(150);
         ImGui::SliderFloat("SNR threshold (dB)", &c.snr_thr_db, -10.0f, 40.0f, "%.0f");
+        }
 
-        ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "SIGNAL EXTRACTION");
+        if(ImGui::CollapsingHeader("SIGNAL EXTRACTION")){
         ImGui::SetNextItemWidth(150);
         ImGui::InputFloat("DC guard (Hz)", &c.dc_guard_hz, 100.f, 1000.f, "%.0f");
         { int tl = c.target_looks; ImGui::SetNextItemWidth(150);
@@ -978,21 +982,20 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             ImGui::InputFloat("c_papr", &c.c_papr, 1.0f, 10.0f, "%.1f");
             ImGui::TreePop();
         }
+        }
 
         ImGui::EndDisabled();
 
         // 표시 전용 (와이어에 안 올린다 — HOST 소유 설정이 아니라 화면 취향이다)
-        ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "DISPLAY");
-        ImGui::SetNextItemWidth(150);
+        if(ImGui::CollapsingHeader("DISPLAY")){
         ImGui::SetNextItemWidth(150);
         ImGui::SliderFloat("LOB length (km)", &lob_km, 10.f, 500.f, "%.0f");
+        }
 
         // ── 매니폴드 캘리브레이션 ─────────────────────────────────────────
         // 아는 방위에서 실제로 쏴 보고, 그때 배열이 본 조향벡터를 이론값과
         // 비교해 보정을 만든다. 좌표 오차·케이블 편차·상호결합·기체 산란이
         // 전부 이 한 표에 흡수된다 (계산으로는 어느 것도 못 잡는다).
-        ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
         if(ImGui::CollapsingHeader("CALIBRATION")){
             PktDfCalib ci{}; v.df_cal_get(ci);
 
@@ -1073,7 +1076,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         // ── 배열 에디터 ───────────────────────────────────────────────────
         // 위에서 내려다본 배치. 소자를 끌어 옮기면 array 가 Custom 으로 바뀌고
         // 좌표가 정본이 된다. 프리셋으로 되돌리려면 위 콤보에서 다시 고르면 된다.
-        ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
         if(ImGui::CollapsingHeader("ARRAY EDITOR")){
             // 폭은 남김없이 쓰고 세로만 남은 공간에 맞춘다. 정사각형으로 잡으면
             // 좁은 쪽에 끌려가 옆이 비었다.
