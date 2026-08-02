@@ -124,7 +124,17 @@ bool FFTViewer::initialize_kraken(float cf_mhz){
         bewe_log_push(2,"[Kraken] no DAQ on %s:%u (%s)\n",
                       cfg.host, (unsigned)cfg.data_port,
                       st.last_error[0] ? st.last_error : "timeout");
-        bewe_log_push(2,"[Kraken] start it with: /home/ku/krakensdr_doa/bewe_df_start.sh\n");
+        // 경로를 박아두지 않는다 — 기지마다 홈이 다르다 (ku / raspb2 …). 그리고
+        // 운용 중 실제 복구 수단은 스크립트 직접 실행이 아니라 DAQ 유닛 재시작이다.
+        // DAQ 가 떠 있는데도 여기로 오는 경우가 있다: 동글을 뽑았다 꽂으면 커널은
+        // 새로 열거하지만 돌던 DAQ 는 옛 핸들을 붙들어 rtl_daq 가 -4(NO_DEVICE)로
+        // 계속 실패하고 IQ 를 한 프레임도 못 뱉는다. 그때도 답은 DAQ 재시작이다.
+        {
+            const char* home = getenv("HOME");
+            bewe_log_push(2,"[Kraken] restart the DAQ: systemctl restart bewe-<station>-daq\n");
+            bewe_log_push(2,"[Kraken]   or run %s/krakensdr_doa/bewe_df_start.sh\n",
+                          home && *home ? home : "~");
+        }
         K.engine->stop();
         return false;
     }

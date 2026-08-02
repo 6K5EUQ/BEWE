@@ -925,8 +925,9 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
               c.array_type = (uint8_t)at;
               df_preset_coords(c);            // Custom 이면 좌표를 그대로 둔다
           } }
-        { int el = c.elements; ImGui::SetNextItemWidth(150);
-          if(ImGui::SliderInt("elements", &el, 3, 8)){ c.elements = (uint8_t)el; df_preset_coords(c); } }
+        // 소자 수는 조작 대상이 아니다. DAQ 가 몇 채널을 내주는지가 곧 답이고,
+        // 다른 값을 넣으면 엔진이 ArrayMismatch 로 측정을 거부할 뿐이다 —
+        // 틀리게 만들 수만 있는 위젯이었다. HOST 가 DAQ 헤더에서 읽어 맞춘다.
         if(c.array_type != 3){
             ImGui::SetNextItemWidth(150);
             if(ImGui::InputFloat(c.array_type == 0 ? "radius (m)" : "spacing (m)",

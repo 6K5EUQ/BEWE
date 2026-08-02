@@ -403,10 +403,23 @@ void Engine::Impl::loop(){
 
             if(cur.bandwidth_hz <= 0.0 || cur.center_hz <= 0.0){ fail(cur, Status::BadRequest); continue; }
             if(h.active_ant_chs < 3){ fail(cur, Status::TooFewChannels); continue; }
+            // 소자 수는 DAQ 가 정한다. 예전엔 설정과 다르면 ArrayMismatch 로
+            // 거부했는데, 그 설정을 운용자가 맞출 방법이 슬라이더 하나뿐이라
+            // 틀리게 두면 측정이 통째로 막혔다 (Kraken 은 늘 5채널이므로 5 말고는
+            // 전부 오답이다). 이제 DAQ 값으로 맞추고 좌표도 따라 다시 만든다.
             if((int)h.active_ant_chs != c.elements){
-                char n[96]; snprintf(n, sizeof n, "DAQ reports %u channels, DF is configured for %d",
-                                     h.active_ant_chs, c.elements);
-                fail(cur, Status::ArrayMismatch, n); continue;
+                c.elements = (int)h.active_ant_chs;
+                // Custom 좌표는 소자 수가 바뀌면 남거나 모자란다 — 손으로 찍은
+                // 배치를 반쪽만 쓰느니 프리셋으로 되돌리는 편이 낫다.
+                if(c.array_type == ArrayType::Custom) c.array_type = ArrayType::Uca;
+                c.rebuild_geom();
+                std::lock_guard<std::mutex> lk(cfg_mtx);
+                cfg.elements   = c.elements;
+                cfg.array_type = c.array_type;
+                for(int m = 0; m < kMaxElements; m++){
+                    cfg.elem_x[m] = c.elem_x[m];
+                    cfg.elem_y[m] = c.elem_y[m];
+                }
             }
 
             XSpec::Params xp;

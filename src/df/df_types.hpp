@@ -54,7 +54,9 @@ enum class Status : uint8_t {
     BandOutOfSpan,   // 요청 채널이 DAQ 의 ±fs/2 밖
     DcOverlap,       // LO 누설 위에 얹혀 있어 쓸 빈이 너무 적다
     TooFewChannels,  // active_ant_chs < 3
-    ArrayMismatch,   // 헤더의 M 이 설정된 소자 수와 다름
+    // 헤더의 M 이 설정된 소자 수와 다르다는 뜻이었다. 이제 엔진이 DAQ 값으로
+    // 맞추므로(df_engine.cpp) 발생하지 않는다. Overdrive 와 같은 이유로 남긴다.
+    ArrayMismatch,
     Timeout,         // 프레임 예산 안에 충분히 못 모음
     BadRequest,      // 대역폭 0/음수 등
     Cancelled,
