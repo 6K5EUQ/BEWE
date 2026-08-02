@@ -58,7 +58,11 @@ enum class Status : uint8_t {
     Timeout,         // 프레임 예산 안에 충분히 못 모음
     BadRequest,      // 대역폭 0/음수 등
     Cancelled,
-    Overdrive,       // ADC 클리핑으로 쓸 프레임이 없었다 (gain 을 내려야 한다)
+    // ADC 클리핑으로 쓸 프레임이 없었다는 뜻이었다. 엔진이 더 이상 클리핑
+    // 프레임을 버리지 않으므로(df_engine.cpp 의 adc_overdrive_flags 주석) 이제
+    // 발생하지 않는다. 값은 와이어/표시 호환을 위해 남긴다 — 구 HOST 가 보낸
+    // 결과를 신 JOIN 이 읽을 수 있어야 한다.
+    Overdrive,
 };
 
 const char* status_text(Status s);

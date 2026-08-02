@@ -456,7 +456,9 @@ void Engine::Impl::loop(){
                         if(hf.rf_center_hz != h.rf_center_freq ||
                            hf.sampling_hz  != h.sampling_freq  ||
                            hf.channels     != h.active_ant_chs){ discarded++; continue; }
-                        if(hf.overdrive){ discarded++; od_mask |= hf.overdrive; continue; }
+                        // 실시간 경로와 같은 이유로 버리지 않는다 (아래 긴 주석 참조):
+                        // heimdall 의 플래그는 1 샘플 기준이라 포화 판정으로 못 쓴다.
+                        if(hf.overdrive) od_mask |= hf.overdrive;
                         if(xspec.add_frame(hf.iq.data(), hf.samples_per_ch)){
                             got++;
                             frames_done.store(got);
@@ -491,30 +493,40 @@ void Engine::Impl::loop(){
                     continue;
                 }
                 // ── 과입력 프레임은 누적하지 않고 버린다 ──────────────────
-                // ADC 클리핑은 측정 대상 그 자체인 채널간 위상을 파괴하는 경성
-                // 비선형이다. 그런데 클리핑된 프레임도 강한 지배 고유값과 높은
-                // PAPR 을 만들어 수락 규칙을 그대로 통과한다 — 즉 결과가 "자신만만
-                // 하게 틀린 방위"가 되고 출력만 봐서는 구분할 방법이 없다.
-                // 예전엔 전량 누적하고 플래그만 od_mask 에 OR 해 표시용으로 썼다.
-                if(h.adc_overdrive_flags){
-                    discarded++;
-                    od_mask |= h.adc_overdrive_flags;
-                } else if(xspec.add_frame(f.iq, f.samples_per_ch)){
+                // ADC 클리핑은 채널간 위상을 파괴하는 경성 비선형이라 한동안
+                // 그 프레임을 통째로 버렸다. 그런데 heimdall 의 판정이 그 대응을
+                // 감당할 만큼 정밀하지 않다 (rtl_daq.c):
+                //
+                //   for(n=0; n<buffer_size; n++) if(buf[n] == 255) flags |= 1<<i;
+                //
+                // 임계도 비율도 없다 — CPI 한 장(262144 샘플, I/Q 52만 바이트)에
+                // 255 가 **하나만** 있어도 그 채널이 클리핑으로 찍히고, rebuffer 가
+                // 그걸 CPI 전체에 OR 로 누적한다. 8 비트 ADC 라 잡음의 가우시안
+                // 꼬리만으로도 이따금 걸린다. 즉 이 플래그는 "포화했다" 가 아니라
+                // "최댓값 샘플이 한 번 있었다" 는 뜻이다.
+                //
+                // 그 상태에서 프레임을 버리면 멀쩡한 신호에서도 쓸 프레임이 안 모여
+                // 진행바가 0% 에 멈춘 채 Overdrive 로 실패한다 (2026-08-02 DGS-X:
+                // 게인을 1.4 dB 까지 내려도 계속 떴다). 52 만 샘플 중 몇 개가 잘린
+                // 것은 공분산 추정에 사실상 영향이 없으므로 누적하고, 플래그는
+                // 표시용으로만 남긴다.
+                //
+                // 진짜로 심하게 포화하면 파형이 뭉개져 eig_snr 과 PAPR 이 같이
+                // 떨어지므로 수락 규칙이 거른다 — 그쪽이 원래 그 일을 하는 관문이다.
+                if(h.adc_overdrive_flags) od_mask |= h.adc_overdrive_flags;
+                if(xspec.add_frame(f.iq, f.samples_per_ch)){
                     got++;
                     frames_done.store(got);
                 }
                 if(got < cur.frames && budget > 0) continue;
             }
             if(got == 0){
-                // 쓸 만한 프레임이 하나도 없었다. 원인이 과입력이면 그렇게
-                // 말해준다 — enable_control 이 켜져 있으면 운용자가 DAQ gain 을
-                // 바로 내릴 수 있으니 실행 가능한 안내다.
-                fail(cur, od_mask ? Status::Overdrive : Status::Timeout);
+                // 쓸 만한 프레임이 하나도 없었다. 클리핑은 더 이상 프레임을
+                // 버리지 않으므로(위 주석) 여기까지 왔다면 원인은 usable 아님 /
+                // 재튠으로 인한 불일치 / 프레임 자체가 안 온 것이다.
+                fail(cur, Status::Timeout);
                 measuring = false; continue;
             }
-            // got > 0 이면 예산이 클리핑 프레임에서 끝났더라도 모아둔 클린
-            // 프레임으로 푼다. 여기서 버리면 "3장 중 2장은 깨끗했는데 마지막이
-            // 클리핑" 이 통째로 실패가 된다 — 부분 평균이 실패보다 낫다.
 
             // ── 풀이 ─────────────────────────────────────────────────────
             Config c = [&]{ std::lock_guard<std::mutex> lk(cfg_mtx); return cfg; }();
