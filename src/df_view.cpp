@@ -386,7 +386,9 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     static uint32_t last_seq  = 0;    // 마지막으로 본 df_hist_seq (개수 아님)
     static int      last_vis_n = 0;   // 직전 프레임 가시행 수 (tail-follow 용)
 
-    if(just_opened){ mv.big = false; }
+    // 열자마자 지도가 전체를 쓴다. 방위가 어디를 가리키는지가 먼저 보여야 하고,
+    // 이력표는 필요할 때 펼치면 된다.
+    if(just_opened){ mv.big = true; }
 
     // 새 결과 도착 감지 (tail-follow 판정용). 개수가 아니라 push 시퀀스로 본다 —
     // df_hist_n 은 64 에서 포화하므로 링이 한 번 차면 개수 비교가 영원히 거짓이 된다.
