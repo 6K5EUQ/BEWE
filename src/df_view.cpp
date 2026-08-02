@@ -935,6 +935,25 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 const char* it[] = { "CW", "CCW" };
                 if(ImGui::Combo("numbering", &sn, it, 2)){ c.sense = (uint8_t)sn; df_preset_coords(c); }
             }
+            // 현재 주파수의 권장 치수. 최근접 소자쌍이 lambda/2 의 kTarget 배가 되게
+            // 잡는다 — 1.0 이 격자엽이 시작되는 한계이므로 20% 를 여유로 둔다.
+            // 개구는 클수록 방위 정밀도가 좋아지니 한계 바로 아래가 최적점이다.
+            //   UCA : 최근접쌍 = 2 r sin(pi/M)  ->  r = kTarget (lambda/4) / sin(pi/M)
+            //   ULA : 최근접쌍 = d              ->  d = kTarget (lambda/2)
+            if(L.lambda_m > 0.0){
+                const double kTarget = 0.8;
+                const int    nel = (c.elements < 3) ? 3 : c.elements;
+                const double rec = (c.array_type == 0)
+                    ? kTarget * (L.lambda_m * 0.25) / std::sin(3.14159265358979 / nel)
+                    : kTarget * (L.lambda_m * 0.5);
+                const bool off = std::fabs(rec - c.radius_m) > 0.005;   // 5 mm 넘게 어긋날 때만
+                ImGui::TextColored(off ? ImVec4(1.f,0.8f,0.3f,1.f) : ImVec4(0.6f,0.7f,0.6f,1.f),
+                                   "recommended %.3f m", rec);
+                if(off){
+                    ImGui::SameLine();
+                    if(ImGui::SmallButton("apply")){ c.radius_m = (float)rec; df_preset_coords(c); }
+                }
+            }
         }
         ImGui::SetNextItemWidth(150);
         ImGui::InputFloat("heading offset (deg)", &c.heading_deg, 1.0f, 10.0f, "%.1f");
