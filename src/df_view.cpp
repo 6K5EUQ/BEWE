@@ -1019,43 +1019,47 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
         ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "ARRAY EDITOR");
         {
-            // 정사각형이되 남은 세로에도 들어가야 한다 — 폭만 보고 잡으면 패널
-            // 아래로 넘쳐 스크롤이 생기고 격자가 잘린다.
+            // 폭은 남김없이 쓰고 세로만 남은 공간에 맞춘다. 정사각형으로 잡으면
+            // 좁은 쪽에 끌려가 옆이 비었다.
             const ImVec2 avail = ImGui::GetContentRegionAvail();
-            float side = std::min(avail.x - 4.f, avail.y - 8.f);
-            if(side < 120.f) side = 120.f;          // 너무 눌리면 조작이 불가능하다
+            const float cw = avail.x - 4.f;
+            float ch_ = avail.y - 8.f;
+            if(ch_ < 140.f) ch_ = 140.f;            // 너무 눌리면 조작이 불가능하다
             const ImVec2 org = ImGui::GetCursorScreenPos();
-            const ImVec2 cen(org.x + side*0.5f, org.y + side*0.5f);
+            const ImVec2 cen(org.x + cw*0.5f, org.y + ch_*0.5f);
             ImDrawList* dl = ImGui::GetWindowDrawList();
             // 캔버스 밖으로 새는 그리기(격자·lambda/2 원)를 자른다.
-            dl->PushClipRect(org, ImVec2(org.x+side, org.y+side), true);
+            dl->PushClipRect(org, ImVec2(org.x+cw, org.y+ch_), true);
 
             const int nel = (c.elements < 1) ? 1 : ((c.elements > 8) ? 8 : c.elements);
 
             // 스케일: 배열이 항상 화면의 70% 를 채우게. lambda/2 원도 들어오면
-            // 같이 담아 격자엽 한계를 눈으로 비교할 수 있게 한다.
+            // 같이 담아 격자엽 한계를 눈으로 비교할 수 있게 한다. 가로/세로 중
+            // 좁은 쪽을 기준으로 잡아야 어느 축으로도 안 잘린다.
             float ext = 0.05f;
             for(int m = 0; m < nel; m++)
                 ext = std::max(ext, std::max(std::fabs(c.elem_x[m]), std::fabs(c.elem_y[m])));
             const float half_lam = (L.lambda_m > 0.0) ? (float)(L.lambda_m * 0.5) : 0.f;
             if(half_lam > 0.f) ext = std::max(ext, half_lam * 0.55f);
-            const float px_per_m = (side * 0.35f) / ext;      // 반쪽이 70%/2
+            const float px_per_m = (std::min(cw, ch_) * 0.35f) / ext;   // 반쪽이 70%/2
 
-            dl->AddRectFilled(org, ImVec2(org.x+side, org.y+side), IM_COL32(12,14,20,255));
+            dl->AddRectFilled(org, ImVec2(org.x+cw, org.y+ch_), IM_COL32(12,14,20,255));
 
             // 10 cm 격자 (배열이 크면 자동으로 성글게)
             {
                 float step_m = 0.10f;
                 while(step_m * px_per_m < 18.f) step_m *= 2.f;
-                const int ng = (int)(side * 0.5f / (step_m * px_per_m)) + 1;
+                const int ngx = (int)(cw  * 0.5f / (step_m * px_per_m)) + 1;
+                const int ngy = (int)(ch_ * 0.5f / (step_m * px_per_m)) + 1;
+                const int ng  = std::max(ngx, ngy);
                 for(int i = -ng; i <= ng; i++){
                     const float o = i * step_m * px_per_m;
                     const ImU32 col = (i==0) ? IM_COL32(70,80,100,255) : IM_COL32(34,38,48,255);
-                    dl->AddLine(ImVec2(cen.x+o, org.y), ImVec2(cen.x+o, org.y+side), col);
-                    dl->AddLine(ImVec2(org.x, cen.y+o), ImVec2(org.x+side, cen.y+o), col);
+                    dl->AddLine(ImVec2(cen.x+o, org.y), ImVec2(cen.x+o, org.y+ch_), col);
+                    dl->AddLine(ImVec2(org.x, cen.y+o), ImVec2(org.x+cw, cen.y+o), col);
                 }
                 char gl[32]; snprintf(gl, sizeof gl, "grid %.0f cm", step_m*100.f);
-                dl->AddText(ImVec2(org.x+6, org.y+side-18), IM_COL32(120,130,150,255), gl);
+                dl->AddText(ImVec2(org.x+6, org.y+ch_-18), IM_COL32(120,130,150,255), gl);
             }
 
             // lambda/2 원 — 최근접 소자쌍이 이 원의 반경을 넘으면 격자엽이 생긴다
@@ -1064,7 +1068,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
 
             // 소자 드래그. ImGui 아이템을 소자마다 두지 않고 캔버스 하나로 받는다 —
             // 위젯을 겹쳐 놓으면 격자/원 위의 클릭이 전부 그쪽으로 새기 때문이다.
-            ImGui::InvisibleButton("##arr_edit", ImVec2(side, side));
+            ImGui::InvisibleButton("##arr_edit", ImVec2(cw, ch_));
             const bool hov = ImGui::IsItemHovered();
             const ImVec2 mp = ImGui::GetIO().MousePos;
             if(hov && ImGui::IsMouseClicked(0)){
@@ -1086,13 +1090,34 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             }
             if(!ImGui::IsMouseDown(0)) arr_drag = -1;
 
+            // 소자마다 축까지 점선을 긋는다 — 격자만으로는 좌표를 눈으로 읽기
+            // 어렵고, 끌어 옮길 때 지금 몇 cm 인지 바로 보이는 게 중요하다.
+            auto dashed = [&](ImVec2 a, ImVec2 b, ImU32 col){
+                const float dx = b.x-a.x, dy = b.y-a.y;
+                const float len = std::sqrt(dx*dx + dy*dy);
+                if(len < 1.f) return;
+                const float ux = dx/len, uy = dy/len;
+                for(float t = 0.f; t < len; t += 6.f){
+                    const float e = std::min(t + 3.f, len);
+                    dl->AddLine(ImVec2(a.x+ux*t, a.y+uy*t), ImVec2(a.x+ux*e, a.y+uy*e), col);
+                }
+            };
+            for(int m = 0; m < nel; m++){
+                const ImVec2 p(cen.x + c.elem_x[m]*px_per_m, cen.y - c.elem_y[m]*px_per_m);
+                const bool on = (arr_drag == m);
+                const ImU32 dcol = on ? IM_COL32(255,200,60,120) : IM_COL32(90,140,200,70);
+                dashed(ImVec2(p.x, cen.y), p, dcol);      // x축까지 (세로 점선)
+                dashed(ImVec2(cen.x, p.y), p, dcol);      // y축까지 (가로 점선)
+            }
             for(int m = 0; m < nel; m++){
                 const ImVec2 p(cen.x + c.elem_x[m]*px_per_m, cen.y - c.elem_y[m]*px_per_m);
                 const bool on = (arr_drag == m);
                 dl->AddCircleFilled(p, on ? 8.f : 6.f,
                                     on ? IM_COL32(255,200,60,255) : IM_COL32(90,170,255,255));
-                char id[8]; snprintf(id, sizeof id, "%d", m);
-                dl->AddText(ImVec2(p.x+9, p.y-7), IM_COL32(210,220,240,255), id);
+                char id[40];
+                snprintf(id, sizeof id, "%d  %.1f,%.1f", m, c.elem_x[m]*100.f, c.elem_y[m]*100.f);
+                dl->AddText(ImVec2(p.x+9, p.y-7),
+                            on ? IM_COL32(255,230,150,255) : IM_COL32(210,220,240,255), id);
             }
 
             // 최근접쌍 간격 — 격자엽 판정의 실제 근거라 숫자로 보여준다
