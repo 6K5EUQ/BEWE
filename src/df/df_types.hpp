@@ -2,6 +2,7 @@
 // ── DF(방탐) UI 대면 어휘 ─────────────────────────────────────────────────
 // UI 계층이 아는 타입은 전부 여기 있다. DSP 내부 타입은 새어나가지 않는다.
 
+#include <complex>
 #include <cstdint>
 
 namespace df {
@@ -114,6 +115,10 @@ struct Result {
     double   alt_deg[2] = {};
     double   alt_db[2]  = {};
     int      alt_n      = 0;
+
+    // 배열이 실제로 본 조향벡터 (주 고유벡터, 소자 0 위상 0 으로 정규화).
+    // 매니폴드 캘리브레이션이 이론값과 비교해 방위별 보정을 만든다.
+    std::complex<double> principal[kMaxElements] = {};
 
     float    spectrum_db[360] = {}; // 보고 알고리즘, 최대 정규화 dB
     int64_t  t_start_ms = 0, t_end_ms = 0;

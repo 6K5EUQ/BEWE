@@ -31,6 +31,11 @@ struct Estimate {
     bool   imbalance = false;    // 중앙값 대비 10배 밖으로 벗어난 소자가 있다
     int    eig_sweeps = 0;       // Jacobi 스윕 수. <0 이면 실패, 상한이면 미수렴
 
+    // 최대 고유값에 대응하는 고유벡터 = 그 방위에서 배열이 실제로 본 조향벡터.
+    // 매니폴드 캘리브레이션이 이걸 이론값과 비교해 보정을 만든다. 위상 기준이
+    // 임의라 소자 0 의 위상이 0 이 되게 회전시켜 둔다 (그래야 측정끼리 비교된다).
+    std::complex<double> principal[kMaxElements] = {};
+
     bool   ok = false;           // 수락 규칙 통과 여부
 };
 

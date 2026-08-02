@@ -91,6 +91,7 @@ if(CLI)
         src/df/heimdall_client.cpp
         src/df/df_linalg.cpp
         src/df/df_manifold.cpp
+        src/df/df_calib.cpp
         src/df/df_xspec.cpp
         src/df/df_estimator.cpp
         src/df/df_engine.cpp

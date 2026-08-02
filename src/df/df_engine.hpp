@@ -13,6 +13,7 @@
 
 #include "df_types.hpp"
 #include "df_config.hpp"
+#include "df_calib.hpp"
 #include <atomic>
 #include <complex>
 #include <functional>
@@ -45,6 +46,26 @@ public:
     DaqStatus status() const;
     Config    config() const;
     void      apply_config(const Config& c);   // host/port 외 전부 즉시 반영
+
+    // ── 매니폴드 캘리브레이션 ────────────────────────────────────────────
+    // 직전 측정의 주 고유벡터를 "이 방위의 실측 조향벡터" 로 받아 보정을 만든다.
+    // 측정을 새로 돌리지 않고 마지막 결과를 쓰므로, 운용자는 평소처럼 측정한 뒤
+    // 방위를 입력하고 이 함수를 부르면 된다. 아직 측정이 없거나 그 측정이
+    // 거부됐으면 false.
+    bool cal_add(double bearing_deg, char* err, size_t errn);
+    void cal_clear();
+    void cal_remove(int idx);
+    // UI 표시용 요약 (점 개수·주파수·잔차). 포인터로 내주면 수명이 얽히므로 복사.
+    struct CalInfo {
+        int    n = 0;
+        double freq_hz = 0;
+        int    elements = 0;
+        double worst_dev_db = 0;
+        bool   active = false;              // 지금 매니폴드에 실제로 걸려 있는가
+        double bearing[kMaxCalPoints] = {};
+        double snr_db[kMaxCalPoints]  = {};
+    };
+    CalInfo cal_info() const;
 
     // ── ch0 탭 (BEWE 스펙트럼용) ─────────────────────────────────────────
     // DAQ 스레드에서 프레임마다 호출된다. 블로킹 금지 — 필요한 만큼 복사하고

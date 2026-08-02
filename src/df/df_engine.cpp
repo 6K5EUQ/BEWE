@@ -70,9 +70,27 @@ struct Engine::Impl {
     Manifold       manifold;
     XSpec          xspec;
 
+    // ── 매니폴드 캘리브레이션 ────────────────────────────────────────────
+    // last_ok 는 poll() 로 소비된 뒤에도 남는 "마지막으로 수락된 측정" 이다.
+    // 캘리브는 운용자가 결과를 보고 "이건 90 도가 맞다" 고 판단한 뒤에 누르므로,
+    // 그 시점에는 res 슬롯이 이미 비어 있다.
+    std::mutex cal_mtx;
+    Calib      cal;
+    Result     last_ok{};
+    bool       has_last_ok = false;
+    // manifold 는 엔진 스레드 소유라 UI 에서 직접 읽으면 race 다. 보정이 실제로
+    // 걸렸는지만 원자적으로 내보낸다.
+    std::atomic<bool> cal_active{false};
+
     void loop();
     void publish(const Result& r){
         { std::lock_guard<std::mutex> lk(slot_mtx); res = r; }
+        // 수락된 측정만 캘리브 후보로 남긴다 — 거부된 것(잡음뿐)의 주 고유벡터는
+        // 방위와 무관한 잡음 방향이라 보정에 넣으면 매니폴드를 망친다.
+        if(r.status == Status::Ok){
+            std::lock_guard<std::mutex> lk(cal_mtx);
+            last_ok = r; has_last_ok = true;
+        }
         res_ready.store(true, std::memory_order_release);
         is_armed.store(false, std::memory_order_release);
     }
@@ -113,6 +131,70 @@ void Engine::apply_config(const Config& c){
 DaqStatus Engine::status() const {
     std::lock_guard<std::mutex> lk(d_->st_mtx);
     return d_->st;
+}
+
+// ── 매니폴드 캘리브레이션 ────────────────────────────────────────────────
+bool Engine::cal_add(double bearing_deg, char* err, size_t errn){
+    auto fail = [&](const char* m){
+        if(err && errn){ snprintf(err, errn, "%s", m); }
+        return false;
+    };
+    Config c = config();
+
+    std::lock_guard<std::mutex> lk(d_->cal_mtx);
+    if(!d_->has_last_ok)             return fail("no accepted measurement yet");
+    const Result& r = d_->last_ok;
+    if(r.elements != c.elements)     return fail("element count changed since that measurement");
+    if(r.center_hz <= 0.0)           return fail("measurement has no frequency");
+
+    // 캘리브 세트는 한 주파수·한 배열에 묶인다. 그것과 다른 측정이 들어오면
+    // 이전 점들은 의미가 없으므로 비우고 새로 시작한다 (조용히 섞으면 보정이
+    // 엉뚱해지고 원인을 찾기 어렵다).
+    if(d_->cal.count() > 0 && !d_->cal.usable_at(r.center_hz, r.elements))
+        d_->cal.clear();
+    if(d_->cal.count() == 0) d_->cal.set_context(r.center_hz, r.elements);
+
+    // 그 방위의 **이론** 조향벡터. 보정 없는 순수 기하로 만들어야 한다 —
+    // 이미 보정된 매니폴드로 나누면 보정이 두 번 곱해진다.
+    Manifold plain;
+    plain.ensure(r.center_hz, c.geom(), nullptr);
+    if(!plain.valid())               return fail("bad array geometry");
+    std::complex<double> a[kMaxElements];
+    plain.steer(bearing_deg - c.heading_deg, a);   // 보고값은 offset 이 더해진 값이다
+
+    // 이론 벡터도 소자 0 위상 0 으로 맞춘다 (실측이 그렇게 정규화돼 있다).
+    if(std::abs(a[0]) > 1e-12){
+        const std::complex<double> rot = std::conj(a[0]) / std::abs(a[0]);
+        for(int m = 0; m < r.elements; m++) a[m] *= rot;
+    }
+
+    d_->cal.add(bearing_deg - c.heading_deg, r.eig_snr_db, r.principal, a, r.elements);
+    return true;
+}
+
+void Engine::cal_clear(){
+    std::lock_guard<std::mutex> lk(d_->cal_mtx);
+    d_->cal.clear();
+}
+
+void Engine::cal_remove(int idx){
+    std::lock_guard<std::mutex> lk(d_->cal_mtx);
+    d_->cal.remove_at(idx);
+}
+
+Engine::CalInfo Engine::cal_info() const {
+    CalInfo o;
+    std::lock_guard<std::mutex> lk(d_->cal_mtx);
+    o.n            = d_->cal.count();
+    o.freq_hz      = d_->cal.freq_hz();
+    o.elements     = d_->cal.elements();
+    o.worst_dev_db = d_->cal.worst_dev_db();
+    o.active       = d_->cal_active.load(std::memory_order_relaxed);
+    for(int i = 0; i < o.n && i < kMaxCalPoints; i++){
+        o.bearing[i] = d_->cal.at(i).bearing_deg;
+        o.snr_db[i]  = d_->cal.at(i).snr_db;
+    }
+    return o;
 }
 
 void Engine::set_ch0_sink(Ch0Sink s){
@@ -331,7 +413,10 @@ void Engine::Impl::loop(){
             xspec.reset();
 
             // 소자 수는 바로 위에서 active_ant_chs 와 일치함이 확인됐다.
-            manifold.ensure(cur.center_hz, c.geom());
+            // 캘리브가 이 주파수에 유효하면 보정된 매니폴드가 만들어진다.
+            { std::lock_guard<std::mutex> lk(cal_mtx);
+              manifold.ensure(cur.center_hz, c.geom(), &cal);
+              cal_active.store(manifold.calibrated(), std::memory_order_relaxed); }
             if(!manifold.valid()){ fail(cur, Status::BadRequest, "bad array geometry"); continue; }
 
             measuring  = true;
@@ -453,7 +538,10 @@ void Engine::Impl::loop(){
             r.algo_papr_db = e.algo_papr_db;
             r.diag_spread_db = e.diag_spread_db;
             r.imbalance = e.imbalance;
-            for(int i = 0; i < M && i < kMaxElements; i++) r.eval[i] = e.eval[i];
+            for(int i = 0; i < M && i < kMaxElements; i++){
+                r.eval[i]      = e.eval[i];
+                r.principal[i] = e.principal[i];   // 캘리브레이션이 쓰는 실측 조향벡터
+            }
             r.alt_n = e.alt_n;
             for(int i = 0; i < e.alt_n; i++){
                 r.alt_deg[i] = std::fmod(e.alt_deg[i] + c.heading_deg + 360.0, 360.0);

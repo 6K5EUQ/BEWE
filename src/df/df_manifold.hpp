@@ -33,6 +33,7 @@
 // 그래서 Sense 를 런타임 설정으로 둔다 — 현장에서 재빌드 없이 뒤집는다.
 
 #include "df_types.hpp"
+#include "df_calib.hpp"
 #include <complex>
 #include <vector>
 
@@ -45,7 +46,14 @@ public:
     // 필요한 파라미터가 바뀌었을 때만 재생성한다. 조향벡터 생성은
     // M*360 개의 exp() 라 싸지 않고, 측정마다 부르게 된다.
     // 기하는 소자 좌표로 받는다 — UCA/ULA/임의 배치가 같은 경로를 탄다.
-    void ensure(double freq_hz, const ArrayGeom& geom);
+    //
+    // cal 을 주면 그 보정을 곱한 매니폴드를 만든다 (실측 캘리브레이션). 보정이
+    // 걸린 테이블은 캐시 비교에도 반영되므로, 캘리브를 갱신하면 다음 ensure 가
+    // 알아서 다시 만든다.
+    void ensure(double freq_hz, const ArrayGeom& geom, const Calib* cal = nullptr);
+
+    // 이 테이블에 캘리브 보정이 걸려 있는가 (UI 표시용).
+    bool calibrated() const { return cal_stamp_ != 0; }
 
     // 열 우선 접근: bin b (=시계방향 도), 소자 m
     const std::complex<double>* col(int bin) const { return &sv_[(size_t)bin * m_]; }
@@ -76,6 +84,7 @@ private:
     double freq_hz_ = 0.0;
     double gx_[kMaxElements] = {}, gy_[kMaxElements] = {};   // 소자 좌표 (m)
     int    m_ = 0;
+    uint32_t cal_stamp_ = 0;   // 반영된 Calib::stamp() (0=무보정). 캐시 비교용
     double sidelobe_db_ = 0.0, sidelobe_deg_ = 0.0;
 };
 

@@ -99,24 +99,44 @@ void Manifold::steer(double bearing_deg, std::complex<double>* out) const {
     }
 }
 
-void Manifold::ensure(double freq_hz, const ArrayGeom& g){
+void Manifold::ensure(double freq_hz, const ArrayGeom& g, const Calib* cal){
     if(g.n < 1 || g.n > kMaxElements || freq_hz <= 0.0) return;
     // 소자가 전부 한 점에 몰려 있으면 방위 정보가 없다.
     { double span = 0;
       for(int m = 0; m < g.n; m++) span += std::abs(g.x[m]) + std::abs(g.y[m]);
       if(span <= 1e-9) return; }
 
-    bool same = (m_ == g.n && std::abs(freq_hz - freq_hz_) < 1.0);   // 1 Hz 안쪽이면 같은 것
+    // 이 주파수·소자수에서 쓸 수 있는 캘리브만 반영한다. 못 쓰면 스탬프 0 =
+    // 무보정이고, 그 상태 역시 캐시 비교 대상이다 (주파수가 캘리브 범위를
+    // 벗어나면 보정이 걸린 테이블을 버리고 다시 만들어야 한다).
+    const bool use_cal = (cal && cal->usable_at(freq_hz, g.n));
+    const uint32_t want_stamp = use_cal ? cal->stamp() : 0;
+
+    bool same = (m_ == g.n && std::abs(freq_hz - freq_hz_) < 1.0   // 1 Hz 안쪽이면 같은 것
+                 && cal_stamp_ == want_stamp);
     if(same) for(int m = 0; m < g.n; m++)
         if(std::abs(g.x[m]-gx_[m]) > 1e-9 || std::abs(g.y[m]-gy_[m]) > 1e-9){ same = false; break; }
     if(same) return;
 
-    freq_hz_ = freq_hz;
-    m_       = g.n;
+    freq_hz_   = freq_hz;
+    m_         = g.n;
+    cal_stamp_ = want_stamp;
     for(int m = 0; m < g.n; m++){ gx_[m] = g.x[m]; gy_[m] = g.y[m]; }
     sv_.resize((size_t)kAngleBins * m_);
     for(int b = 0; b < kAngleBins; b++)
         steer((double)b, &sv_[(size_t)b * m_]);
+
+    // 실측 보정을 곱한다. 이론 조향벡터가 "이상적인 배열이 볼 것", 보정이
+    // "실제 배열은 그것과 이만큼 다르더라" 이므로 곱이 곧 실제 매니폴드다.
+    // 이후 추정기는 이 테이블만 보므로 알고리즘 쪽은 손댈 게 없다.
+    if(use_cal){
+        std::complex<double> corr[kMaxElements];
+        for(int b = 0; b < kAngleBins; b++){
+            cal->correction((double)b, corr, m_);
+            std::complex<double>* col_b = &sv_[(size_t)b * m_];
+            for(int m = 0; m < m_; m++) col_b[m] *= corr[m];
+        }
+    }
 
     // ── 배열 고유 사이드로브 ──────────────────────────────────────────────
     // |a(b0+d)^H a(b0)| / M 의 주엽 밖 최댓값. 단일 소스만 있어도 Bartlett

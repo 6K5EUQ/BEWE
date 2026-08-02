@@ -125,6 +125,17 @@ Estimate estimate_doa(const cd* R, int m, const Manifold& mf, Algo algo,
     e.eig_sweeps = hermitian_eigen(R, m, eval, evec);
     for(int i = 0; i < m; i++) e.eval[i] = eval[i];
 
+    // 주 고유벡터 (최대 고유값 = 마지막 열, eval 은 오름차순). 캘리브레이션이
+    // "배열이 실제로 본 조향벡터" 로 쓴다. 고유벡터의 전체 위상은 임의라 소자 0
+    // 을 실수 양수로 만들어 기준을 고정한다 — 안 그러면 같은 방위를 두 번 재도
+    // 서로 다른 벡터가 나와 비교가 무의미해진다.
+    {
+        cd p0 = evec[0*m + (m-1)];
+        const double a0 = std::abs(p0);
+        const cd rot = (a0 > 1e-12) ? std::conj(p0) / a0 : cd(1.0, 0.0);
+        for(int i = 0; i < m; i++) e.principal[i] = evec[i*m + (m-1)] * rot;
+    }
+
     // MUSIC 모델 차수. MUSIC 분기에서만 쓴다 — 아래 SNR 지표는 일부러 이 값에
     // 의존시키지 않는다 (그러면 "sources (MUSIC)" 슬라이더가 Bartlett/Capon 의
     // 수락 임계까지 조용히 움직인다).
