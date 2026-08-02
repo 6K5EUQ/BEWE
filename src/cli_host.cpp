@@ -2611,6 +2611,46 @@ void run_cli_host(){
         // 재초기화 자체는 하지 않고 sdr_stream_error 로 아래 reconnect 로직에
         // 위임한다. 그쪽이 이미 fft plan 재생성·dem_worker 재기동·autoscale
         // 재트리거를 다 하고 있어서, 여기서 중복 구현하면 어긋난다.
+        // ── Kraken: USB 리셋 자리에 DAQ 재시작을 넣는다 ───────────────────────
+        // Kraken 모드에서 BEWE 는 USB 장치를 하나도 소유하지 않는다 (sdr_usb_ids 가
+        // false 를 반환해 모든 USB 리셋 경로가 무장해제된다 — 동글 5개 중 첫 번째를
+        // 잡아 남의 DAQ 를 파괴하는 사고를 막기 위해서다). 그 결과 Kraken 기지에서는
+        // /chassis 1 reset 이 캡처만 내리고 정작 복구는 아무것도 못 했다.
+        //
+        // 이 모드에서 "케이블을 뽑았다 꽂는 것"에 해당하는 조치는 heimdall DAQ
+        // 재시작이다. DAQ 가 동글을 소유하므로, 허브가 리셋되거나(RFI) 동글이
+        // 재열거되면 DAQ 가 옛 핸들을 붙든 채 rtl_daq 가 무한 실패하고 BEWE 재시작
+        // 으로는 절대 안 고쳐진다 (2026-08-02 DGS-X: 무전기 송신에 허브가 리셋됨).
+        //
+        // 유닛명은 station 에서 만든다: "DGS-X" -> bewe-dgsx-daq (FIFO 명명과 동일
+        // 규칙 — 하이픈 제거 + 소문자). 그 유닛이 없는 기지면 조용히 건너뛴다.
+        auto kraken_restart_daq = [&](const char* tag){
+            if(v.hw.type != HWType::KRAKEN) return false;
+            std::string s;
+            for(char c : station_str) if(c != '-' && c != '_') s += (char)tolower((unsigned char)c);
+            if(s.empty()) return false;
+            const std::string unit = "bewe-" + s + "-daq";
+            // 유닛이 실제로 있는지 먼저 본다 — 없는 기지에서 sudo 를 부르지 않는다.
+            if(system(("systemctl cat " + unit + " >/dev/null 2>&1").c_str()) != 0){
+                bewe_log_push(2,"[CLI] %s: %s not installed - skipping DAQ restart\n",
+                              tag, unit.c_str());
+                return false;
+            }
+            bewe_log_push(0,"[CLI] %s: restarting heimdall DAQ (%s) ...\n", tag, unit.c_str());
+            if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM", "Chassis 1 reset: restarting DAQ ...");
+            // -n: 비번을 물으면 그냥 실패한다. 무인 기지라 물어볼 사람이 없다.
+            int rc = system(("sudo -n systemctl restart " + unit + " >/dev/null 2>&1").c_str());
+            if(rc != 0){
+                bewe_log_push(2,"[CLI] %s: DAQ restart FAILED (rc=%d) - need NOPASSWD sudo "
+                                "for 'systemctl restart %s'\n", tag, rc, unit.c_str());
+                if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM",
+                    "Chassis 1 reset: DAQ restart failed - check station log");
+                return false;
+            }
+            bewe_log_push(0,"[CLI] %s: DAQ restarted - it calibrates for ~40s\n", tag);
+            return true;
+        };
+
         auto stop_sdr_and_reenumerate = [&](const char* tag){
             uint16_t vid = 0, pid = 0; const char* pc_label = "SDR";
             sdr_usb_ids(v.hw.type, &vid, &pid, &pc_label);
@@ -2663,13 +2703,26 @@ void run_cli_host(){
         // 죽어 있으면(BladeRF NIOS II timeout, Pluto USB wedge) 그 리셋조차 장치에
         // 안 닿아 몇 번을 쳐도 안 살아났다. 이제는 커널에게 unbind/재열거를 시켜
         // (authorized 0>1) 케이블을 뽑았다 꽂은 것과 같은 상태로 만든다.
-        if(v.net_srv && pending_chassis1_reset.load()){
+        if(pending_chassis1_reset.load()){
             pending_chassis1_reset.store(false);
             bewe_log_push(0,"[CLI] Chassis 1 reset: deep USB re-enumeration ...\n");
-            v.net_srv->broadcast_chat("SYSTEM", "Chassis 1 reset ...");
-            v.net_srv->broadcast_heartbeat(1);
+            if(v.net_srv){
+                v.net_srv->broadcast_chat("SYSTEM", "Chassis 1 reset ...");
+                v.net_srv->broadcast_heartbeat(1);
+            }
 
             auto [vid, pid, pc_label] = stop_sdr_and_reenumerate("Chassis 1 reset");
+
+            // Kraken 은 vid==0 이라 아래 USB 딥리셋이 통째로 건너뛰어진다. 그 자리에
+            // DAQ 재시작을 넣는다 — 이 모드에서 장치를 되살리는 유일한 수단이다.
+            // 재초기화는 아래 reconnect 로직이 sdr_stream_error 를 보고 이어받는다.
+            if(kraken_restart_daq("Chassis 1 reset")){
+                bg_join_started = false;
+                cap_joined.store(true);
+                usb_reset_pending = false;
+                usb_reset_done    = true;
+                continue;
+            }
 
             // 블로킹 구간(최소 2초 off + 재열거 대기)이라 메인 루프를 세우지 않도록
             // 별도 스레드에서 돌린다. 끝나면 reconnect 로직이 이어받는다.
@@ -2998,18 +3051,13 @@ void run_cli_host(){
                 }
                 fflush(stdout);
             } else if(line == "/chassis 1 reset"){
+                // 원격(CMD CHASSIS_RESET)과 같은 몸을 쓴다. 예전엔 여기서 플래그만
+                // 세우는 자체 구현이었는데, 그 경로는 딥 USB 재열거도 Kraken DAQ
+                // 재시작도 안 탔다 — 같은 명령이 stdin 이냐 JOIN 이냐에 따라 다른
+                // 일을 했다 (2026-08-02 DGS-X 실측).
                 bewe_log_push(0,"[CMD:CLI] /chassis 1 reset\n");
-                if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM", "Chassis 1 reset ...");
-                if(v.net_srv) v.net_srv->broadcast_heartbeat(1);
-                if(v.is_running || cap.joinable()){
-                    v.is_running = false;
-                    v.sdr_stream_error.store(true);
-                    v.tm_iq_on.store(false);
-                    v.spectrum_pause.store(true);
-                    usb_reset_pending = true;
-                } else {
-                    bewe_log_push(0,"[CLI] No SDR connected - skip HW reset\n");
-                }
+                if(v.is_running || cap.joinable()) pending_chassis1_reset.store(true);
+                else bewe_log_push(0,"[CLI] No SDR connected - skip HW reset\n");
             } else if(line == "/chassis 2 reset"){
                 bewe_log_push(0,"[CMD:CLI] /chassis 2 reset\n");
                 pending_chassis2_reset.store(true);
