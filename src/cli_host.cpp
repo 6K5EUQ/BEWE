@@ -871,6 +871,78 @@ void run_cli_host(){
     // ── SDR init ─────────────────────────────────────────────────────────
     // 부팅 직후 USB 재열거/느린 부팅과 겹칠 수 있어 5회(2초 간격)까지 재시도 후 포기.
     std::thread cap;
+
+    // ── /rx stop · /rx start 공용 몸통 ────────────────────────────────────
+    // stdin 과 원격(CMD RX_STOP/RX_START) 이 같은 몸을 쓴다. 예전엔 두 벌로 복사돼
+    // 있었고 그 사이가 벌어져 있었다 — 원격만 HIST/미션 워커를 내렸다 올리고 stdin 은
+    // 안 해서, stdin 으로 SDR 을 갈아끼우면 HIST 파일이 옛 sr/fft 헤더 그대로 이어졌다.
+    //
+    // stop 은 장치를 완전히 놓아 준다: 이 로그가 찍힌 뒤엔 SDR 을 물리적으로 뽑아도
+    // 안전하고, 다시 꽂아 /rx start 를 치면 그대로 이어진다.
+    //
+    // HOST 자체(net_srv·Central 룸·채널 필터·미션 상태)는 건드리지 않는다. SDR 만
+    // 내려가므로 JOIN 은 접속을 유지한 채 하트비트의 sdr_st 로 상태를 본다.
+    auto sdr_down = [&](const char* why){
+        if(v.rx_stopped.load() || !(v.is_running || cap.joinable())) return false;
+        bewe_log_push(0,"[CLI] RX stop (%s)\n", why);
+        if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM", "RX stop");
+        if(v.rec_on.load()) v.stop_rec();
+        if(v.tm_iq_on.load()){ v.tm_iq_on.store(false); v.tm_iq_close(); }
+        v.stop_all_dem();
+        v.is_running = false;
+        if(v.dev_rtl) rtlsdr_cancel_async(v.dev_rtl);
+        v.mix_stop.store(true);
+        if(v.mix_thr.joinable()) v.mix_thr.join();
+        if(cap.joinable()) cap.join();
+        Mission::stop_utc0_worker();
+        LongWaterfall::stop_worker();
+        if(v.fft_plan){ fftwf_destroy_plan(v.fft_plan); v.fft_plan=nullptr; }
+        if(v.fft_in)  { fftwf_free(v.fft_in);   v.fft_in=nullptr; }
+        if(v.fft_out) { fftwf_free(v.fft_out);  v.fft_out=nullptr; }
+        // 장치 핸들은 4종 전부 닫는다. 하나라도 남기면 그 USB 를 뽑았을 때 커널
+        // 쪽에 좀비 핸들이 남아 재삽입 시 열리지 않는다.
+        if(v.dev_blade){
+            bladerf_enable_module(v.dev_blade, BLADERF_CHANNEL_RX(0), false);
+            bladerf_close(v.dev_blade); v.dev_blade=nullptr;
+        }
+        if(v.dev_rtl){ rtlsdr_close(v.dev_rtl); v.dev_rtl=nullptr; }
+        v.df_stop_engine();     // Kraken: Heimdall DAQ 연결 해제 (다른 SDR 이면 no-op)
+        v.pluto_release();      // Pluto: iio buffer/context 해제 (idempotent)
+        v.rx_stopped.store(true);
+        v.sdr_stream_error.store(false);
+        v.spectrum_pause.store(false);
+        bewe_log_push(0,"[CLI] RX stopped - safe to unplug the SDR.\n");
+        return true;
+    };
+    auto sdr_up = [&](const char* why){
+        if(!v.rx_stopped.load()) return false;
+        bewe_log_push(0,"[CLI] RX start (%s) - detecting SDR ...\n", why);
+        v.rx_stopped.store(false);
+        float cur_cf = (float)(v.header.center_frequency / 1e6);
+        if(cur_cf < 0.1f) cur_cf = cf;
+        float cur_sr = v.header.sample_rate / 1e6f;
+        if(cur_sr < 0.1f) cur_sr = 61.44f;
+        v.is_running = true;
+        // initialize() 가 장치를 새로 감지하므로 RTL->Pluto 교체처럼 sr/fft 가 바뀌는
+        // 경우도 그대로 반영된다. HIST 는 rotate 로 현재 파일을 닫아 새 헤더로 만든다.
+        if(!v.initialize(cur_cf, cur_sr)){
+            v.is_running = false;
+            v.rx_stopped.store(true);
+            bewe_log_push(0,"[CLI] RX start failed - no SDR found.\n");
+            return false;
+        }
+        v.set_gain(v.gain_db);
+        bewe_spawn_capture(v, cap);
+        v.mix_stop.store(false);
+        v.mix_thr = std::thread(&FFTViewer::mix_worker, &v);
+        LongWaterfall::start_worker(&v);      // idempotent
+        LongWaterfall::request_rotate();
+        Mission::start_utc0_worker(&v);       // idempotent
+        if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM", "RX start");
+        bewe_log_push(0,"[CLI] RX started - streaming.\n");
+        return true;
+    };
+
     // 캘리브 세트 경로. 엔진이 뜬 뒤에 읽어야 하므로 initialize 다음에 로드한다.
     {
         std::string s = station_str.empty() ? "default" : station_str;
@@ -2723,64 +2795,11 @@ void run_cli_host(){
         // RX stop/start from network
         if(v.net_srv && pending_rx_stop.load()){
             pending_rx_stop.store(false);
-            if(!v.rx_stopped.load() && (v.is_running || cap.joinable())){
-                bewe_log_push(0,"[CLI] RX stop (remote)\n");
-                v.net_srv->broadcast_chat("SYSTEM", "RX stop");
-                if(v.rec_on.load()) v.stop_rec();
-                if(v.tm_iq_on.load()){ v.tm_iq_on.store(false); v.tm_iq_close(); }
-                v.stop_all_dem();
-                v.is_running = false;
-                if(v.dev_rtl) rtlsdr_cancel_async(v.dev_rtl);
-                v.mix_stop.store(true);
-                if(v.mix_thr.joinable()) v.mix_thr.join();
-                if(cap.joinable()) cap.join();
-                Mission::stop_utc0_worker();
-                LongWaterfall::stop_worker();
-                if(v.fft_plan){ fftwf_destroy_plan(v.fft_plan); v.fft_plan=nullptr; }
-                if(v.fft_in)  { fftwf_free(v.fft_in);   v.fft_in=nullptr; }
-                if(v.fft_out) { fftwf_free(v.fft_out);  v.fft_out=nullptr; }
-                if(v.dev_blade){
-                    bladerf_enable_module(v.dev_blade, BLADERF_CHANNEL_RX(0), false);
-                    bladerf_close(v.dev_blade); v.dev_blade=nullptr;
-                }
-                if(v.dev_rtl){ rtlsdr_close(v.dev_rtl); v.dev_rtl=nullptr; }
-                v.rx_stopped.store(true);
-                v.sdr_stream_error.store(false);
-                v.spectrum_pause.store(false);
-                bewe_log_push(0,"[CLI] RX stopped\n");
-            }
+            sdr_down("remote");
         }
         if(v.net_srv && pending_rx_start.load()){
             pending_rx_start.store(false);
-            if(v.rx_stopped.load()){
-                bewe_log_push(0,"[CLI] RX start (remote)\n");
-                v.rx_stopped.store(false);
-                float cur_cf = (float)(v.header.center_frequency / 1e6);
-                if(cur_cf < 0.1f) cur_cf = 100.f;
-                float cur_sr = v.header.sample_rate / 1e6f;
-                if(cur_sr < 0.1f) cur_sr = 61.44f;
-                v.is_running = true;
-                if(v.initialize(cur_cf, cur_sr)){
-                    v.set_gain(v.gain_db);
-                    bewe_spawn_capture(v, cap);
-                    v.mix_stop.store(false);
-                    v.mix_thr = std::thread(&FFTViewer::mix_worker, &v);
-                    // RX stop 이 stop_worker() 로 HIST worker 를 죽였으므로 재개한다.
-                    // start_worker 는 idempotent (이미 돌면 뷰어 rebind 만). initialize() 가
-                    // SDR 을 새로 감지하므로 RTL->Pluto 교체 등 fft_size/sr 변경도 반영된다.
-                    // rotate 로 현재 파일을 닫아 새 헤더(sr/fft)로 재생성시킨다.
-                    LongWaterfall::start_worker(&v);
-                    LongWaterfall::request_rotate();
-                    // RX stop 이 죽인 미션 자정 rollover worker 도 재개 (idempotent).
-                    Mission::start_utc0_worker(&v);
-                    v.net_srv->broadcast_chat("SYSTEM", "RX start");
-                    bewe_log_push(0,"[CLI] RX started\n");
-                } else {
-                    v.is_running = false;
-                    v.rx_stopped.store(true);
-                    bewe_log_push(0,"[CLI] RX start failed - SDR not found\n");
-                }
-            }
+            sdr_up("remote");
         }
 
         // ── Chassis 1 unpause timer ──────────────────────────────────────
@@ -2996,59 +3015,13 @@ void run_cli_host(){
                 pending_chassis2_reset.store(true);
             } else if(line == "/rx stop"){
                 bewe_log_push(0,"[CMD:CLI] /rx stop\n");
-                if(v.rx_stopped.load()){
-                    bewe_log_push(0,"[CLI] RX already stopped.\n");
-                } else if(!v.is_running && !cap.joinable()){
-                    bewe_log_push(0,"[CLI] No SDR running.\n");
-                } else {
-                    bewe_log_push(0,"[CLI] RX stop\n");
-                    if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM", "RX stop");
-                    if(v.rec_on.load()) v.stop_rec();
-                    if(v.tm_iq_on.load()){ v.tm_iq_on.store(false); v.tm_iq_close(); }
-                    v.stop_all_dem();
-                    v.is_running = false;
-                    if(v.dev_rtl) rtlsdr_cancel_async(v.dev_rtl);
-                    v.mix_stop.store(true);
-                    if(v.mix_thr.joinable()) v.mix_thr.join();
-                    if(cap.joinable()) cap.join();
-                    if(v.fft_plan){ fftwf_destroy_plan(v.fft_plan); v.fft_plan=nullptr; }
-                    if(v.fft_in)  { fftwf_free(v.fft_in);   v.fft_in=nullptr; }
-                    if(v.fft_out) { fftwf_free(v.fft_out);  v.fft_out=nullptr; }
-                    if(v.dev_blade){
-                        bladerf_enable_module(v.dev_blade, BLADERF_CHANNEL_RX(0), false);
-                        bladerf_close(v.dev_blade); v.dev_blade=nullptr;
-                    }
-                    if(v.dev_rtl){ rtlsdr_close(v.dev_rtl); v.dev_rtl=nullptr; }
-                    v.rx_stopped.store(true);
-                    v.sdr_stream_error.store(false);
-                    v.spectrum_pause.store(false);
-                    bewe_log_push(0,"[CLI] RX stopped.\n");
-                }
+                if(v.rx_stopped.load())                      bewe_log_push(0,"[CLI] RX already stopped.\n");
+                else if(!v.is_running && !cap.joinable())     bewe_log_push(0,"[CLI] No SDR running.\n");
+                else                                         sdr_down("cli");
             } else if(line == "/rx start"){
                 bewe_log_push(0,"[CMD:CLI] /rx start\n");
-                if(!v.rx_stopped.load()){
-                    bewe_log_push(0,"[CLI] RX already running.\n");
-                } else {
-                    bewe_log_push(0,"[CLI] RX start - initializing SDR ...\n");
-                    v.rx_stopped.store(false);
-                    float cur_cf = (float)(v.header.center_frequency / 1e6);
-                    if(cur_cf < 0.1f) cur_cf = cf;
-                    float cur_sr3 = v.header.sample_rate / 1e6f;
-                    if(cur_sr3 < 0.1f) cur_sr3 = 61.44f;
-                    v.is_running = true;
-                    if(v.initialize(cur_cf, cur_sr3)){
-                        v.set_gain(v.gain_db);
-                        bewe_spawn_capture(v, cap);
-                        v.mix_stop.store(false);
-                        v.mix_thr = std::thread(&FFTViewer::mix_worker, &v);
-                        if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM", "RX start");
-                        bewe_log_push(0,"[CLI] RX started. SDR online.\n");
-                    } else {
-                        v.is_running = false;
-                        v.rx_stopped.store(true);
-                        bewe_log_push(0,"[CLI] RX start failed - SDR not found.\n");
-                    }
-                }
+                if(!v.rx_stopped.load()) bewe_log_push(0,"[CLI] RX already running.\n");
+                else                     sdr_up("cli");
             } else if(line.rfind("/freq", 0) == 0){
                 // /freq <MHz> — 중심 주파수 변경 (HOST 자기 SDR + JOIN sync)
                 const char* arg = line.c_str() + 5;
@@ -3368,8 +3341,8 @@ void run_cli_host(){
                 bewe_log_push(0,"  /chassis 2 reset    - Network broadcast reset\n");
                 bewe_log_push(0,"  /powercycle partial - above + restart BEWE (keeps machine)\n");
                 bewe_log_push(0,"  /powercycle full    - above + reboot machine\n");
-                bewe_log_push(0,"  /rx stop         - Stop SDR capture\n");
-                bewe_log_push(0,"  /rx start        - Restart SDR capture\n");
+                bewe_log_push(0,"  /rx stop         - Release the SDR (safe to unplug; station stays online)\n");
+                bewe_log_push(0,"  /rx start        - Re-detect the SDR and resume streaming\n");
                 bewe_log_push(0,"  /shutdown        - Clean exit\n");
                 bewe_log_push(0,"  /help            - Show this help\n");
                 bewe_log_push(0,"  <text>           - Broadcast as chat message\n");
