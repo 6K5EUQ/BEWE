@@ -330,7 +330,8 @@ void Engine::Impl::loop(){
             if(!xspec.prepare(xp, why)){ fail(cur, why); continue; }
             xspec.reset();
 
-            manifold.ensure(cur.center_hz, c.radius_m, (int)h.active_ant_chs, c.sense);
+            // 소자 수는 바로 위에서 active_ant_chs 와 일치함이 확인됐다.
+            manifold.ensure(cur.center_hz, c.geom());
             if(!manifold.valid()){ fail(cur, Status::BadRequest, "bad array geometry"); continue; }
 
             measuring  = true;

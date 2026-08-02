@@ -694,7 +694,7 @@ void FFTViewer::df_get_live(FFTViewer::DFLive& o) const {
     df::Config c = K.engine->config();
     if(s.rf_center_hz > 0){
         df::Manifold mf;
-        mf.ensure((double)s.rf_center_hz, c.radius_m, c.elements, c.sense);
+        mf.ensure((double)s.rf_center_hz, c.geom());
         o.lambda_m  = mf.lambda_m();
         o.ambiguity = mf.ambiguity_ratio();
     }
@@ -731,6 +731,11 @@ static void cfg_to_pkt(const df::Config& c, PktDfConfig& p){
     p.signal_dim     = (uint8_t)c.signal_dim;
     p.enable_control = c.enable_control ? 1 : 0;
     p.gain_idx       = 255;   // 정본 송신 시엔 아래 df_get_cfg 가 실제값으로 채운다
+    p.array_type     = (uint8_t)c.array_type;
+    for(int m = 0; m < df::kMaxElements; m++){
+        p.elem_x[m] = (float)c.elem_x[m];
+        p.elem_y[m] = (float)c.elem_y[m];
+    }
 }
 
 static void pkt_to_cfg(const PktDfConfig& p, df::Config& c){
@@ -748,6 +753,21 @@ static void pkt_to_cfg(const PktDfConfig& p, df::Config& c){
     c.max_frames       = p.max_frames;
     c.signal_dim       = p.signal_dim;
     c.enable_control   = (p.enable_control != 0);
+    c.array_type       = (df::ArrayType)std::min<int>(p.array_type, 3);
+    for(int m = 0; m < df::kMaxElements; m++){
+        c.elem_x[m] = p.elem_x[m];
+        c.elem_y[m] = p.elem_y[m];
+    }
+    // 좌표가 전부 0 이면 (구버전 host_state 나 좌표를 안 채운 요청) 프리셋에서
+    // 되만든다. Custom 인데 좌표가 비면 배열이 한 점이 되어 DF 가 죽으므로
+    // UCA 로 되돌린다.
+    { double span = 0;
+      for(int m = 0; m < c.elements && m < df::kMaxElements; m++)
+          span += std::abs(c.elem_x[m]) + std::abs(c.elem_y[m]);
+      if(span <= 1e-9){
+          if(c.array_type == df::ArrayType::Custom) c.array_type = df::ArrayType::Uca;
+          c.rebuild_geom();
+      } }
 }
 
 void FFTViewer::df_get_cfg(PktDfConfig& out) const {

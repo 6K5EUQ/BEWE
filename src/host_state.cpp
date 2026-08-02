@@ -47,15 +47,24 @@ void save(const FFTViewer& v, const std::string& station){
         "  \"df_algo\":%d,\n  \"df_sense\":%d,\n  \"df_avg_frames\":%d,\n  \"df_signal_dim\":%d,\n"
         "  \"df_snr_thr_db\":%.2f,\n  \"df_dc_guard_hz\":%.1f,\n  \"df_c_papr\":%.2f,\n"
         "  \"df_target_looks\":%d,\n  \"df_fft_size\":%d,\n  \"df_max_frames\":%d,\n"
-        "  \"df_enable_control\":%d,\n"
-        "  \"channels\": [\n",
+        "  \"df_enable_control\":%d,\n  \"df_array_type\":%d,\n",
         cf, sr, v.gain_db,
         (double)dfc.radius_m, (double)dfc.heading_deg, (int)dfc.elements, (int)dfc.algo,
         (int)dfc.sense, (int)dfc.avg_frames, (int)dfc.signal_dim,
         (double)dfc.snr_thr_db, (double)dfc.dc_guard_hz, (double)dfc.c_papr,
         (int)dfc.target_looks, (int)dfc.fft_size, (int)dfc.max_frames,
-        (int)dfc.enable_control);
+        (int)dfc.enable_control, (int)dfc.array_type);
     out += buf;
+
+    // 소자 좌표. 파서가 배열을 안 읽으므로 소자마다 키를 하나씩 쓴다 (최대 8개라
+    // 장황해도 감당된다). 구버전 파일엔 이 키가 없고, 그러면 좌표가 0 으로 남아
+    // df::Config::geom() 이 프리셋에서 되만든다.
+    for(int m = 0; m < 8; m++){
+        snprintf(buf, sizeof(buf), "  \"df_ex%d\":%.6f,\n  \"df_ey%d\":%.6f,\n",
+                 m, (double)dfc.elem_x[m], m, (double)dfc.elem_y[m]);
+        out += buf;
+    }
+    out += "  \"channels\": [\n";
 
     bool first = true;
     for(int i=0;i<MAX_CHANNELS;i++){
@@ -165,6 +174,11 @@ Snapshot load(const std::string& station){
         else if(key=="df_fft_size"){    double d=0; js.read_number(d); st.df.fft_size=(uint16_t)d;     st.has_df=true; }
         else if(key=="df_max_frames"){  double d=0; js.read_number(d); st.df.max_frames=(uint8_t)d;    st.has_df=true; }
         else if(key=="df_enable_control"){double d=0;js.read_number(d);st.df.enable_control=(uint8_t)d;st.has_df=true; st.has_df_enable_control=true; }
+        else if(key=="df_array_type"){  double d=0; js.read_number(d); st.df.array_type=(uint8_t)d;    st.has_df=true; }
+        else if(key.size()==6 && key.compare(0,5,"df_ex")==0 && key[5]>='0' && key[5]<='7'){
+            double d=0; js.read_number(d); st.df.elem_x[key[5]-'0']=(float)d;                          st.has_df=true; }
+        else if(key.size()==6 && key.compare(0,5,"df_ey")==0 && key[5]>='0' && key[5]<='7'){
+            double d=0; js.read_number(d); st.df.elem_y[key[5]-'0']=(float)d;                          st.has_df=true; }
         else if(key=="notches"){
             if(!js.consume('[')) break;
             while(!js.peek(']')){

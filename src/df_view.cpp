@@ -377,6 +377,10 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     static bool   sort_asc   = true;
     static bool   at_bottom  = true;
     static float  lob_km     = 10.f;    // 지도에 그리는 방위선 길이 (km)
+    // 배열 에디터: 끌고 있는 소자(-1=없음)와 "놓으면 보내야 한다" 표시.
+    // 캔버스는 ImGui 아이템이 아니라 IsAnyItemActive 로 드래그를 못 걸러낸다 —
+    // 드래그 중 매 프레임 보내면 HOST 가 매번 매니폴드를 다시 만든다.
+    static int    arr_drag   = -1;
     static uint32_t last_seq  = 0;    // 마지막으로 본 df_hist_seq (개수 아님)
     static int      last_vis_n = 0;   // 직전 프레임 가시행 수 (tail-follow 용)
 
@@ -914,13 +918,24 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
 
         ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
         ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "ARRAY GEOMETRY");
-        ImGui::SetNextItemWidth(150);
-        ImGui::InputFloat("radius (m)", &c.radius_m, 0.005f, 0.05f, "%.4f");
+        { int at = c.array_type; ImGui::SetNextItemWidth(150);
+          const char* it[] = { "UCA", "ULA", "ULA+1", "Custom" };
+          if(ImGui::Combo("array", &at, it, 4)){
+              c.array_type = (uint8_t)at;
+              df_preset_coords(c);            // Custom 이면 좌표를 그대로 둔다
+          } }
         { int el = c.elements; ImGui::SetNextItemWidth(150);
-          if(ImGui::SliderInt("elements", &el, 3, 8)) c.elements = (uint8_t)el; }
-        { int sn = c.sense; ImGui::SetNextItemWidth(150);
-          const char* it[] = { "CW", "CCW" };
-          if(ImGui::Combo("numbering", &sn, it, 2)) c.sense = (uint8_t)sn; }
+          if(ImGui::SliderInt("elements", &el, 3, 8)){ c.elements = (uint8_t)el; df_preset_coords(c); } }
+        if(c.array_type != 3){
+            ImGui::SetNextItemWidth(150);
+            if(ImGui::InputFloat(c.array_type == 0 ? "radius (m)" : "spacing (m)",
+                                 &c.radius_m, 0.005f, 0.05f, "%.4f")) df_preset_coords(c);
+            if(c.array_type == 0){
+                int sn = c.sense; ImGui::SetNextItemWidth(150);
+                const char* it[] = { "CW", "CCW" };
+                if(ImGui::Combo("numbering", &sn, it, 2)){ c.sense = (uint8_t)sn; df_preset_coords(c); }
+            }
+        }
         ImGui::SetNextItemWidth(150);
         ImGui::InputFloat("heading offset (deg)", &c.heading_deg, 1.0f, 10.0f, "%.1f");
         if(L.lambda_m > 0.0){
@@ -928,6 +943,10 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             if(L.ambiguity > 1.0)
                 ImGui::TextColored(ImVec4(1.f,0.6f,0.f,1.f), "grating lobes");
         }
+        // ULA 는 배열 축에 대해 대칭이라 b 와 180-b 의 조향벡터가 같다 — 좌우를
+        // 원리적으로 못 가른다. 배치를 고르는 자리에서 알려야 할 값이라 남긴다.
+        if(c.array_type == 1)
+            ImGui::TextColored(ImVec4(1.f,0.6f,0.f,1.f), "mirror ambiguity: b / 180-b");
 
         ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
         ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "ESTIMATION");
@@ -975,11 +994,104 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         ImGui::SetNextItemWidth(150);
         ImGui::SliderFloat("LOB length (km)", &lob_km, 10.f, 500.f, "%.0f");
 
+        // ── 배열 에디터 ───────────────────────────────────────────────────
+        // 위에서 내려다본 배치. 소자를 끌어 옮기면 array 가 Custom 으로 바뀌고
+        // 좌표가 정본이 된다. 프리셋으로 되돌리려면 위 콤보에서 다시 고르면 된다.
+        ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "ARRAY EDITOR");
+        {
+            const float side = ImGui::GetContentRegionAvail().x - 4.f;
+            const ImVec2 org = ImGui::GetCursorScreenPos();
+            const ImVec2 cen(org.x + side*0.5f, org.y + side*0.5f);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+
+            const int nel = (c.elements < 1) ? 1 : ((c.elements > 8) ? 8 : c.elements);
+
+            // 스케일: 배열이 항상 화면의 70% 를 채우게. lambda/2 원도 들어오면
+            // 같이 담아 격자엽 한계를 눈으로 비교할 수 있게 한다.
+            float ext = 0.05f;
+            for(int m = 0; m < nel; m++)
+                ext = std::max(ext, std::max(std::fabs(c.elem_x[m]), std::fabs(c.elem_y[m])));
+            const float half_lam = (L.lambda_m > 0.0) ? (float)(L.lambda_m * 0.5) : 0.f;
+            if(half_lam > 0.f) ext = std::max(ext, half_lam * 0.55f);
+            const float px_per_m = (side * 0.35f) / ext;      // 반쪽이 70%/2
+
+            dl->AddRectFilled(org, ImVec2(org.x+side, org.y+side), IM_COL32(12,14,20,255));
+
+            // 10 cm 격자 (배열이 크면 자동으로 성글게)
+            {
+                float step_m = 0.10f;
+                while(step_m * px_per_m < 18.f) step_m *= 2.f;
+                const int ng = (int)(side * 0.5f / (step_m * px_per_m)) + 1;
+                for(int i = -ng; i <= ng; i++){
+                    const float o = i * step_m * px_per_m;
+                    const ImU32 col = (i==0) ? IM_COL32(70,80,100,255) : IM_COL32(34,38,48,255);
+                    dl->AddLine(ImVec2(cen.x+o, org.y), ImVec2(cen.x+o, org.y+side), col);
+                    dl->AddLine(ImVec2(org.x, cen.y+o), ImVec2(org.x+side, cen.y+o), col);
+                }
+                char gl[32]; snprintf(gl, sizeof gl, "grid %.0f cm", step_m*100.f);
+                dl->AddText(ImVec2(org.x+6, org.y+side-18), IM_COL32(120,130,150,255), gl);
+            }
+
+            // lambda/2 원 — 최근접 소자쌍이 이 원의 반경을 넘으면 격자엽이 생긴다
+            if(half_lam > 0.f)
+                dl->AddCircle(cen, half_lam * px_per_m, IM_COL32(90,110,160,160), 64, 1.0f);
+
+            // 소자 드래그. ImGui 아이템을 소자마다 두지 않고 캔버스 하나로 받는다 —
+            // 위젯을 겹쳐 놓으면 격자/원 위의 클릭이 전부 그쪽으로 새기 때문이다.
+            ImGui::InvisibleButton("##arr_edit", ImVec2(side, side));
+            const bool hov = ImGui::IsItemHovered();
+            const ImVec2 mp = ImGui::GetIO().MousePos;
+            if(hov && ImGui::IsMouseClicked(0)){
+                float best = 14.f; int hit = -1;
+                for(int m = 0; m < nel; m++){
+                    const ImVec2 p(cen.x + c.elem_x[m]*px_per_m, cen.y - c.elem_y[m]*px_per_m);
+                    const float d = std::sqrt((mp.x-p.x)*(mp.x-p.x) + (mp.y-p.y)*(mp.y-p.y));
+                    if(d < best){ best = d; hit = m; }
+                }
+                arr_drag = hit;
+            }
+            if(arr_drag >= 0 && ImGui::IsMouseDown(0) && arr_drag < nel){
+                // 0.5 cm 스냅. 줄자로 재서 옮기는 값이라 그보다 잘게 둘 이유가 없다.
+                const float gx = (mp.x - cen.x) / px_per_m;
+                const float gy = (cen.y - mp.y) / px_per_m;
+                c.elem_x[arr_drag] = std::round(gx / 0.005f) * 0.005f;
+                c.elem_y[arr_drag] = std::round(gy / 0.005f) * 0.005f;
+                c.array_type = 3;                    // Custom — 좌표가 정본이 된다
+            }
+            if(!ImGui::IsMouseDown(0)) arr_drag = -1;
+
+            for(int m = 0; m < nel; m++){
+                const ImVec2 p(cen.x + c.elem_x[m]*px_per_m, cen.y - c.elem_y[m]*px_per_m);
+                const bool on = (arr_drag == m);
+                dl->AddCircleFilled(p, on ? 8.f : 6.f,
+                                    on ? IM_COL32(255,200,60,255) : IM_COL32(90,170,255,255));
+                char id[8]; snprintf(id, sizeof id, "%d", m);
+                dl->AddText(ImVec2(p.x+9, p.y-7), IM_COL32(210,220,240,255), id);
+            }
+
+            // 최근접쌍 간격 — 격자엽 판정의 실제 근거라 숫자로 보여준다
+            if(nel >= 2){
+                double dmin = 1e30;
+                for(int a = 0; a < nel; a++) for(int b = a+1; b < nel; b++){
+                    const double dx = c.elem_x[a]-c.elem_x[b], dy = c.elem_y[a]-c.elem_y[b];
+                    const double d = std::sqrt(dx*dx + dy*dy);
+                    if(d > 1e-9 && d < dmin) dmin = d;
+                }
+                if(dmin < 1e29){
+                    char sl[64];
+                    snprintf(sl, sizeof sl, "min spacing %.1f cm", dmin*100.0);
+                    dl->AddText(ImVec2(org.x+6, org.y+6), IM_COL32(180,195,220,255), sl);
+                }
+            }
+        }
+
         ImGui::EndChild();
 
         // 손을 뗀 프레임에만 한 번 보낸다. HOST 가 거절하면 에코가 안 오고,
         // hold 만료 시 ui = canon 으로 진실에 스냅백한다.
-        if(cfg_ready && !ImGui::IsAnyItemActive()){
+        // 소자를 끄는 동안엔 보내지 않는다 (놓는 프레임에 arr_dirty 로 한 번).
+        if(cfg_ready && !ImGui::IsAnyItemActive() && arr_drag < 0){
             clamp_cross_fields(ui);
             if(memcmp(&canon, &ui, sizeof ui) != 0){
                 v.df_set_cfg(ui);

@@ -44,7 +44,8 @@ class Manifold {
 public:
     // 필요한 파라미터가 바뀌었을 때만 재생성한다. 조향벡터 생성은
     // M*360 개의 exp() 라 싸지 않고, 측정마다 부르게 된다.
-    void ensure(double freq_hz, double radius_m, int elements, Sense sense);
+    // 기하는 소자 좌표로 받는다 — UCA/ULA/임의 배치가 같은 경로를 탄다.
+    void ensure(double freq_hz, const ArrayGeom& geom);
 
     // 열 우선 접근: bin b (=시계방향 도), 소자 m
     const std::complex<double>* col(int bin) const { return &sv_[(size_t)bin * m_]; }
@@ -54,7 +55,7 @@ public:
     // 임의 각도(정수 격자 밖)의 조향벡터. 피크 국소 보정에 쓴다.
     void steer(double bearing_deg, std::complex<double>* out) const;
 
-    // 격자엽 지표: 인접 소자 간격 / (lambda/2). 1 을 넘으면 모호성이 생긴다.
+    // 격자엽 지표: 최근접 소자쌍 간격 / (lambda/2). 1 을 넘으면 모호성이 생긴다.
     //
     // 주의 — 이건 ULA 휴리스틱이라 UCA 에서는 양방향으로 틀린다. M=5, r=0.175 의
     // 700 MHz(현 운용점)에서 0.96 을 내놓아 "안전" 이라 하지만, 실제 배열 상관은
@@ -72,9 +73,9 @@ public:
 
 private:
     std::vector<std::complex<double>> sv_;   // 360 * M, bin-major
-    double freq_hz_ = 0.0, radius_m_ = 0.0;
+    double freq_hz_ = 0.0;
+    double gx_[kMaxElements] = {}, gy_[kMaxElements] = {};   // 소자 좌표 (m)
     int    m_ = 0;
-    Sense  sense_ = Sense::CW;
     double sidelobe_db_ = 0.0, sidelobe_deg_ = 0.0;
 };
 

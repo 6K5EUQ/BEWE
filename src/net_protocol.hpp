@@ -682,9 +682,21 @@ struct __attribute__((packed)) PktDfConfig {
     uint8_t  enable_control;  // :5001 로 FREQ/GAIN 을 보낼지
     // KrakenSDR 튜너 게인. RTL 은 이산 스텝(29단계)이라 dB 가 아니라 그 표의
     // 인덱스를 싣는다 — 반올림 왕복으로 값이 흔들리지 않고 1 바이트에 들어간다.
-    // 255 = 미지정(변경 요청 아님). 구 _pad 자리라 구조체 크기는 그대로 32 B.
+    // 255 = 미지정(변경 요청 아님).
     uint8_t  gain_idx;
+
+    // ── 배열 기하 (v15.0.0 에서 추가 — 구조체가 32 B 에서 커졌다) ──────────
+    // 정본은 좌표다. array_type 은 그 좌표를 어떤 프리셋으로 만들었는지를 기억해
+    // UI 가 반경/간격 위젯을 되살릴 수 있게 하는 값이며, Custom 이면 좌표만 쓴다.
+    // radius_m 은 UCA 면 반경, ULA/ULA+1 이면 소자 간격으로 재해석된다.
+    // _pad 는 8 배수 정렬용이다 — host_state 의 fingerprint 가 이 구조체를 u64 로
+    // 나눠 섞으므로 크기가 8 의 배수여야 한다 (static_assert 로 강제됨). 32+8+64=104.
+    uint8_t  array_type;             // df::ArrayType (0=UCA 1=ULA 2=ULA+1 3=Custom)
+    uint8_t  _pad[7];
+    float    elem_x[8];              // m, 배열 중심 기준 (동쪽 +)
+    float    elem_y[8];              // m, (북쪽 +)
 };
+static_assert(sizeof(PktDfConfig) == 104, "PktDfConfig wire size changed - bump protocol");
 
 // ── DF_RESULT (HOST → JOIN) ───────────────────────────────────────────────
 // GUI 는 JOIN 전용이라 DF 엔진을 링크하지 않는다. 그래서 v13.20 의 역할 분리

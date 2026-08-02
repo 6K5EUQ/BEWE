@@ -1312,3 +1312,10 @@ void demod_draw_panel(FFTViewer& v, bool just_opened);
 
 // ── DF 설정 오버레이 렌더 (df_view.cpp) ───────────────────────────────────
 void df_draw_panel(FFTViewer& v, bool just_opened);
+
+// PktDfConfig 의 array_type/elements/radius_m/sense 로 elem_x/elem_y 를 다시 만든다.
+// array_type 이 Custom 이면 좌표를 건드리지 않는다. GUI(JOIN)도 HOST 도 같은 규칙을
+//써야 하므로 df/df_config.hpp 가 아니라 여기 둔다 — GUI 는 df/ 를 링크하지 않는다.
+// df::make_geom 과 같은 식이며, 어느 한쪽을 고치면 다른 쪽도 고쳐야 한다
+// (df_selftest 가 두 경로의 좌표 일치를 확인한다).
+void df_preset_coords(PktDfConfig& p);

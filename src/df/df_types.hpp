@@ -17,6 +17,27 @@ enum class Algo : uint8_t { Bartlett = 0, Capon = 1, Music = 2 };
 //   CCW : 반시계 방향
 enum class Sense : uint8_t { CW = 0, CCW = 1 };
 
+// 배열 기하. UCA 는 반경 하나로 표현되지만 그 밖의 배치는 소자 좌표가 필요하다.
+//   Uca    : 반경 + sense 로 좌표를 자동 생성 (구버전과 동일 동작)
+//   Ula    : 일직선 등간격. 배열 축에 대해 대칭이라 좌우 모호성이 원리적으로 있다
+//            (β 와 180-β 의 조향벡터가 같다) — 그래서 방위를 반평면으로만 읽거나
+//            기체를 틀어 두 번 재야 한다.
+//   UlaPlus: 일직선 M-1 개 + 1 개를 축 밖으로. 대칭이 깨져 좌우가 갈린다.
+//   Custom : 좌표를 직접 준다 (드래그 에디터)
+enum class ArrayType : uint8_t { Uca = 0, Ula = 1, UlaPlus = 2, Custom = 3 };
+
+// 소자 좌표 (m). 배열 중심 기준, x=동 y=북. 방위 β 의 평면파에 대한 위상은
+// k*(x sin β + y cos β) 이므로 UCA 도 이 표현의 특수해다.
+struct ArrayGeom {
+    int    n = 0;
+    double x[kMaxElements] = {};
+    double y[kMaxElements] = {};
+};
+
+// 프리셋 → 좌표. spacing 은 UCA 면 반경, 그 밖에는 소자 간격이다.
+// 좌표는 항상 무게중심이 원점이 되게 만든다 (heading offset 과 독립).
+ArrayGeom make_geom(ArrayType t, int elements, double spacing_m, Sense sense);
+
 enum class LinkState : uint8_t {
     Down = 0,      // 소켓 없음
     Connecting,    // 접속/핸드셰이크 중

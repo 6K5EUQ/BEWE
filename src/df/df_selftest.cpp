@@ -158,7 +158,7 @@ void test_convention(){
     printf("[3] bearing convention (THE critical test)\n");
     const int    M = 5;
     const double R_M = 0.175, F = 700e6;
-    Manifold mf; mf.ensure(F, R_M, M, Sense::CW);
+    Manifold mf; mf.ensure(F, make_geom(ArrayType::Uca, M, R_M, Sense::CW));
 
     check(mf.valid() && mf.elements() == M, "manifold built (lambda %.4f m, ambiguity %.3f)",
           mf.lambda_m(), mf.ambiguity_ratio());
@@ -264,8 +264,8 @@ void test_convention(){
     // (e) CCW 설정이 실제로 뒤집는지 — 현장 탈출구가 동작하는지 확인
     {
         Manifold cw, ccw;
-        cw.ensure(F, R_M, M, Sense::CW);
-        ccw.ensure(F, R_M, M, Sense::CCW);
+        cw.ensure(F, make_geom(ArrayType::Uca, M, R_M, Sense::CW));
+        ccw.ensure(F, make_geom(ArrayType::Uca, M, R_M, Sense::CCW));
         cd Rm[25]; double amp[1]={1.0}; double br[1]={110.0};
         // 배열이 실제로 CCW 로 배선된 상황을 합성한다.
         synth_R(Rm, M, R_M, F, br, amp, 1, 1e-6, 4000, 31337, Sense::CCW);
@@ -276,13 +276,61 @@ void test_convention(){
         check(ang_err(ecw.bearing_deg, 250.0) < 1.0,
               "CCW array + Sense::CW  -> mirrored 250 (got %.2f)", ecw.bearing_deg);
     }
+
+    // (f) 좌표 경로가 옛 UCA 폐쇄식과 같은 조향벡터를 내는가.
+    // ensure() 가 반경/소자수/sense 대신 좌표를 받도록 바뀌었다 (v15). UCA 는
+    // x=r sin(phi), y=r cos(phi) 를 넣으면 k r cos(phi-b) 로 되돌아가는 특수해라
+    // 수치가 정확히 같아야 한다 — 어긋나면 기존 배치의 방위가 통째로 틀어진다.
+    {
+        Manifold mf2; mf2.ensure(F, make_geom(ArrayType::Uca, M, R_M, Sense::CW));
+        const double k = 2.0*M_PI*F/299792458.0;
+        double worst = 0.0;
+        for(int b = 0; b < 360; b += 7){
+            const cd* a = mf2.col(b);
+            const double beta = b * M_PI / 180.0;
+            for(int m = 0; m < M; m++){
+                const double phi = 2.0*M_PI*m/(double)M;
+                const double ph  = k * R_M * std::cos(phi - beta);   // 옛 식
+                worst = std::max(worst, std::abs(a[m] - cd(std::cos(ph), std::sin(ph))));
+            }
+        }
+        check(worst < 1e-9, "coordinate path matches the closed-form UCA (max dev %.2e)", worst);
+    }
+
+    // (g) ULA 는 배열 축에 대해 대칭이라 b 와 180-b 를 원리적으로 못 가른다.
+    // 이건 버그가 아니라 기하의 성질이고, UI 가 그 경고를 띄우는 근거다.
+    // 여기서 확인하는 건 "정말로 같은가" — 같지 않다면 좌표 생성이 틀린 것이다.
+    {
+        Manifold ula; ula.ensure(F, make_geom(ArrayType::Ula, M, 0.125, Sense::CW));
+        double worst = 0.0;
+        for(int b = 10; b < 170; b += 13){
+            const cd* a1 = ula.col(b);
+            const cd* a2 = ula.col(180 - b);
+            for(int m = 0; m < M; m++) worst = std::max(worst, std::abs(a1[m] - a2[m]));
+        }
+        check(worst < 1e-9, "ULA is mirror-degenerate as designed (max dev %.2e)", worst);
+    }
+
+    // (h) ULA+1 은 한 소자를 축 밖으로 빼 그 대칭을 깬다. 좌우가 실제로 갈리는지.
+    {
+        Manifold up; up.ensure(F, make_geom(ArrayType::UlaPlus, M, 0.125, Sense::CW));
+        double best_match = 1e30;
+        for(int b = 10; b < 170; b += 13){
+            const cd* a1 = up.col(b);
+            const cd* a2 = up.col(180 - b);
+            double d = 0.0;
+            for(int m = 0; m < M; m++) d += std::abs(a1[m] - a2[m]);
+            best_match = std::min(best_match, d);
+        }
+        check(best_match > 0.1, "ULA+1 breaks the mirror (closest pair differs by %.3f)", best_match);
+    }
 }
 
 // ── 4. 분해능 ─────────────────────────────────────────────────────────────
 void test_resolution(){
     printf("[4] two-source resolution\n");
     const int M = 5; const double R_M = 0.175, F = 700e6;
-    Manifold mf; mf.ensure(F, R_M, M, Sense::CW);
+    Manifold mf; mf.ensure(F, make_geom(ArrayType::Uca, M, R_M, Sense::CW));
     double br[2] = {60.0, 150.0}, amp[2] = {1.0, 1.0};
     cd Rm[25];
     synth_R(Rm, M, R_M, F, br, amp, 2, 1e-4, 8000, 555, Sense::CW);
@@ -295,7 +343,7 @@ void test_resolution(){
 void test_accept(){
     printf("[5] accept / reject rule\n");
     const int M = 5; const double R_M = 0.175, F = 700e6;
-    Manifold mf; mf.ensure(F, R_M, M, Sense::CW);
+    Manifold mf; mf.ensure(F, make_geom(ArrayType::Uca, M, R_M, Sense::CW));
 
     // 잡음만: 100% 거부되어야 한다. 임의 각도를 보고하면 최악의 실패다.
     int accepted = 0;
@@ -509,7 +557,7 @@ void test_xspec(){
     std::complex<double> Rn[64];
     check(xs.snapshot_R(Rn), "snapshot_R ok (n_eff=%.0f)", xs.n_eff());
 
-    Manifold mf; mf.ensure(CH_CF, R_M, M, Sense::CW);
+    Manifold mf; mf.ensure(CH_CF, make_geom(ArrayType::Uca, M, R_M, Sense::CW));
     Estimate e = estimate_doa(Rn, M, mf, Algo::Music, 1, xs.n_eff(), 30.0, -99.0);
     check(e.ok, "accepted (conf %.2f dB, eigSNR %.1f dB, pwr %.1f dBFS)",
           e.confidence_db, e.eig_snr_db, e.power_dbfs);

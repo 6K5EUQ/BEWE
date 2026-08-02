@@ -3,6 +3,7 @@
 // 설정 패널이 노출하는 값 전부. HostState 로 영속화된다.
 
 #include "df_types.hpp"
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -20,10 +21,38 @@ struct Config {
     bool     enable_control = true;
 
     // ── 배열 기하 ────────────────────────────────────────────────────────
-    int    elements  = 5;        // UCA 소자 수 = DAQ 채널 수여야 한다
-    double radius_m  = 0.175;    // 원 반경(미터). 반경이지 소자간 거리가 아니다.
-    Sense  sense     = Sense::CW;
-    double heading_deg = 0.0;    // 배열 0° 가 기수와 안 맞을 때 더할 값
+    // 정본은 elem_x/elem_y 좌표다. array_type/radius_m/sense 는 그 좌표를
+    // 프리셋으로 생성하기 위한 입력이며, Custom 이면 좌표만 쓴다.
+    int       elements  = 5;        // 소자 수 = DAQ 채널 수여야 한다
+    ArrayType array_type = ArrayType::Uca;
+    double    radius_m  = 0.175;    // UCA 면 반경, ULA/ULA+1 이면 소자 간격 (m)
+    Sense     sense     = Sense::CW;
+    double    heading_deg = 0.0;    // 배열 0° 가 기수와 안 맞을 때 더할 값
+    double    elem_x[kMaxElements] = {};   // m, 배열 중심 기준 (동쪽 +)
+    double    elem_y[kMaxElements] = {};   // m, (북쪽 +)
+
+    // 프리셋에서 좌표를 다시 만든다. Custom 이면 아무것도 하지 않는다.
+    void rebuild_geom(){
+        if(array_type == ArrayType::Custom) return;
+        const ArrayGeom g = make_geom(array_type, elements, radius_m, sense);
+        for(int m = 0; m < kMaxElements; m++){
+            elem_x[m] = (m < g.n) ? g.x[m] : 0.0;
+            elem_y[m] = (m < g.n) ? g.y[m] : 0.0;
+        }
+    }
+    // 좌표가 비어 있으면(기본 생성된 Config, 구버전 상태파일) 프리셋에서 만든다.
+    // 이걸 안 하면 소자가 전부 원점에 몰려 Manifold::ensure 가 거부한다.
+    ArrayGeom geom() const {
+        const int n = (elements < kMaxElements) ? elements : kMaxElements;
+        double span = 0;
+        for(int m = 0; m < n; m++) span += std::abs(elem_x[m]) + std::abs(elem_y[m]);
+        if(span <= 1e-9)
+            return make_geom(array_type == ArrayType::Custom ? ArrayType::Uca : array_type,
+                             n, radius_m, sense);
+        ArrayGeom g; g.n = n;
+        for(int m = 0; m < n; m++){ g.x[m] = elem_x[m]; g.y[m] = elem_y[m]; }
+        return g;
+    }
 
     // ── 추정 ─────────────────────────────────────────────────────────────
     Algo algo       = Algo::Music;

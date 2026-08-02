@@ -19,6 +19,7 @@
 #include "net_client.hpp"
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -177,6 +178,48 @@ bool FFTViewer::df_request_by_display_num(int dnum, bool from_auto){
 }
 
 // ── 설정 ─────────────────────────────────────────────────────────────────
+// 프리셋 → 소자 좌표. df/df_manifold.cpp 의 df::make_geom 과 **같은 식**이어야 한다
+// (GUI 는 df/ 를 링크하지 않아 그 함수를 부를 수 없다). 어느 한쪽을 고치면 다른
+// 쪽도 고칠 것. HOST 는 df::make_geom 을, JOIN 은 이 함수를 쓴다.
+//
+// 좌표계: x=동 y=북, 배열 중심이 원점. 방위 b 의 위상은 k(x sin b + y cos b).
+void df_preset_coords(PktDfConfig& p){
+    const int n = (p.elements < 1) ? 1 : ((p.elements > 8) ? 8 : p.elements);
+    const double sp  = p.radius_m;            // UCA 면 반경, 그 밖에는 소자 간격
+    const double dir = (p.sense == 0) ? 1.0 : -1.0;
+    const double kTwoPi = 6.283185307179586;
+    for(int m = 0; m < 8; m++){ p.elem_x[m] = 0.f; p.elem_y[m] = 0.f; }
+
+    switch(p.array_type){
+    case 1: {                                  // ULA — 동서 등간격 직선
+        const double x0 = -sp * (n - 1) / 2.0;
+        for(int m = 0; m < n; m++) p.elem_x[m] = (float)(x0 + sp * m);
+        break;
+    }
+    case 2: {                                  // ULA+1 — 마지막 하나만 축 밖으로
+        const int nl = (n > 1) ? n - 1 : 1;
+        const double x0 = -sp * (nl - 1) / 2.0;
+        double cx = 0, cy = 0;
+        for(int m = 0; m < nl; m++){ p.elem_x[m] = (float)(x0 + sp * m); }
+        if(n > 1){ p.elem_x[n-1] = 0.f; p.elem_y[n-1] = (float)sp; }
+        for(int m = 0; m < n; m++){ cx += p.elem_x[m]; cy += p.elem_y[m]; }
+        cx /= n; cy /= n;
+        for(int m = 0; m < n; m++){ p.elem_x[m] -= (float)cx; p.elem_y[m] -= (float)cy; }
+        break;
+    }
+    case 3:                                    // Custom — 좌표가 정본이라 손대지 않는다
+        return;
+    case 0:
+    default:                                   // UCA
+        for(int m = 0; m < n; m++){
+            const double phi = dir * kTwoPi * m / (double)n;
+            p.elem_x[m] = (float)(sp * std::sin(phi));
+            p.elem_y[m] = (float)(sp * std::cos(phi));
+        }
+        break;
+    }
+}
+
 // HOST 방송을 아직 못 받았을 때 보여줄 기본값. df::Config 의 기본값과 같은 값을
 // 손으로 옮겨 적은 것이다 — GUI 는 df/df_config.hpp 를 include 하지 않기 때문.
 // 이 값은 "첫 방송 전 빈 화면" 을 막는 용도뿐이고, HOST 가 한 번 방송하면 즉시
@@ -197,6 +240,8 @@ static void df_default_pkt(PktDfConfig& p){
     p.max_frames     = 12;
     p.signal_dim     = 1;
     p.enable_control = 1;
+    p.array_type     = 0;   // UCA
+    df_preset_coords(p);    // 좌표까지 채워야 에디터가 첫 프레임에 원점 5개를 안 그린다
 }
 
 void FFTViewer::df_get_cfg(PktDfConfig& out) const {
