@@ -375,7 +375,10 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     // 이후 같은 주파수로 새 측정이 들어오면 자동으로 합류한다 — 행을 하나씩
     // 고르는 방식으로는 새로 들어오는 것을 담을 수 없어서 잠금을 따로 둔다.
     static uint32_t             freq_lock = 0;
-    static float  split_tw   = 460.f;
+    // 표 폭은 설정 패널(kSetupW) 과 같이 고정이다. 열 폭을 코드에 박아 두었으므로
+    // 표만 늘리면 Brg 만 늘어나고, 줄이면 Brg 가 잘린다 — 끌 수 있게 두면 얻는 건
+    // 없고 어긋나기만 한다. 실측으로 맞춘 값이다.
+    constexpr float kTableW = 338.f;
     static bool   setup_open = false;
     static int    sort_col   = -1;
     static bool   sort_asc   = true;
@@ -384,9 +387,11 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     static uint32_t last_seq  = 0;    // 마지막으로 본 df_hist_seq (개수 아님)
     static int      last_vis_n = 0;   // 직전 프레임 가시행 수 (tail-follow 용)
 
-    // 열자마자 지도가 전체를 쓴다. 방위가 어디를 가리키는지가 먼저 보여야 하고,
-    // 이력표는 필요할 때 펼치면 된다.
-    if(just_opened){ mv.big = true; }
+    // 표를 펼쳐 뒀는지 접어 뒀는지는 창을 닫아도 기억한다 (SETUP 과 같다).
+    // 예전엔 열 때마다 mv.big=true 로 접었는데, 표를 보며 일하다 F 로 잠깐
+    // 나갔다 오면 매번 다시 펼쳐야 했다. 첫 오픈에서만 지도를 전체 폭으로 준다.
+    static bool big_seeded = false;
+    if(just_opened && !big_seeded){ mv.big = true; big_seeded = true; }
 
     // 새 결과 도착 감지 (tail-follow 판정용). 개수가 아니라 push 시퀀스로 본다 —
     // df_hist_n 은 64 에서 포화하므로 링이 한 번 차면 개수 비교가 영원히 거짓이 된다.
@@ -467,24 +472,32 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     float tw, mapw;
     if(mv.big){ tw = 0.f; mapw = W - setup_w - (setup_w > 0 ? 4.f : 0.f); }
     else {
-        tw = split_tw;
+        // 창이 좁으면 표가 지도를 밀어내지 않게 줄인다 (그때만 고정폭을 깬다).
+        tw = kTableW;
         const float maxtw = W - setup_w - 60.f;
         if(tw > maxtw) tw = maxtw;
-        if(tw < 200.f) tw = 200.f;
         mapw = W - tw - 6.f - setup_w - (setup_w > 0 ? 4.f : 0.f);
         if(mapw < 10.f) mapw = 10.f;
     }
 
     if(!mv.big){
+        // BordersOuter 로 표 바깥을 두른다. 다만 ImGui 는 표 테두리에
+        // TableBorderStrong 을, 차일드(설정 패널) 에는 Border 를 쓴다 — 기본값이
+        // 서로 달라 그대로 두면 좌우 두 영역의 테두리 색이 어긋난다. 설정 패널
+        // 쪽 색으로 맞춰 같은 무게로 보이게 한다.
+        // Resizable 은 뺐다 — 폭은 아래 TableSetupColumn 값으로 고정한다.
+        // 끌어서 바꿀 수 있으면 열 합계가 표 폭과 어긋나 Brg 가 밀려 잘린다.
         ImGuiTableFlags tf = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
-                             ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable;
+                             ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter;
+        ImGui::PushStyleColor(ImGuiCol_TableBorderStrong,
+                              ImGui::GetStyleColorVec4(ImGuiCol_Border));
         if(ImGui::BeginTable("##df_tbl", 5, tf, ImVec2(tw, body_h))){
             ImGui::TableSetupScrollFreeze(2, 1);
-            ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 74);
-            ImGui::TableSetupColumn("CH",   ImGuiTableColumnFlags_WidthFixed, 36);
-            ImGui::TableSetupColumn("Freq", ImGuiTableColumnFlags_WidthFixed, 84);
+            ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 64);
+            ImGui::TableSetupColumn("CH",   ImGuiTableColumnFlags_WidthFixed, 20);
+            ImGui::TableSetupColumn("Freq", ImGuiTableColumnFlags_WidthFixed, 70);
             ImGui::TableSetupColumn("Brg",  ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableSetupColumn("SNR",  ImGuiTableColumnFlags_WidthFixed, 50);
+            ImGui::TableSetupColumn("SNR",  ImGuiTableColumnFlags_WidthFixed, 36);
             modview::sortable_headers(5, sort_col, sort_asc, /*text_col=*/-1);
 
             for(int p = 0; p < (int)vis.size(); p++){
@@ -555,28 +568,12 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             // 비교하면 필터가 켜진 동안 매 프레임 참이 되어 스크롤이 바닥에
             // 못박히고, 필터가 없으면 영영 거짓이라 tail-follow 자체가 죽는다.
             modview::tail_follow(at_bottom, (int)vis.size() > last_vis_n && sort_col < 0);
+
             ImGui::EndTable();
         }
+        ImGui::PopStyleColor();
 
-        // 스플리터
-        ImGui::SameLine(0, 0);
-        ImGui::InvisibleButton("##df_split", ImVec2(6.f, body_h));
-        if(ImGui::IsItemActive()){
-            // 클램프한 값(tw)에서 이어 받는다. 원시 누적값을 계속 키우면 한계
-            // 밖으로 나간 만큼이 그대로 남아, 되돌릴 때 그만큼 먹통 구간이 생긴다.
-            split_tw = tw + io.MouseDelta.x;
-            const float maxtw = W - setup_w - 60.f;
-            if(split_tw > maxtw) split_tw = maxtw;
-            if(split_tw < 200.f) split_tw = 200.f;
-        }
-        if(ImGui::IsItemHovered() || ImGui::IsItemActive()){
-            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-            const ImVec2 rmin = ImGui::GetItemRectMin(), rmax = ImGui::GetItemRectMax();
-            ImGui::GetWindowDrawList()->AddLine(ImVec2((rmin.x+rmax.x)*0.5f, rmin.y),
-                                                ImVec2((rmin.x+rmax.x)*0.5f, rmax.y),
-                                                IM_COL32(120,160,200,180), 1.5f);
-        }
-        ImGui::SameLine(0, 0);
+        ImGui::SameLine(0, 6.f);   // 지도와의 간격 (설정 패널 쪽과 같은 값)
     }
 
     // ── 선택된 fix 들 ────────────────────────────────────────────────────
