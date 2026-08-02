@@ -5297,29 +5297,18 @@ void run_streaming_viewer(){
                 // HOST/JOIN 두 줄의 열을 픽셀 위치로 고정한다. 본문 폰트가 가변폭이라
                 // 공백 패딩으로는 자릿수(7% ↔ 26%)가 바뀔 때마다 뒤 항목이 밀린다.
                 // 각 열 폭은 최악 문자열을 CalcTextSize 로 재서 잡는다.
-                // 각 열은 자기 값을 오른쪽 끝에 붙인다(우측정렬). 왼쪽 정렬이면 최악
-                // 문자열과 실제 값의 길이 차이만큼 빈 공간이 값 '뒤'에 남아, 항목 사이가
-                // 위 Freq 줄(공백 2칸)보다 훨씬 벌어져 보였다. 빈 공간을 값 앞으로
-                // 보내면 열은 그대로 고정되면서 간격은 col_gap 그대로가 된다.
+                // 레이트 라벨은 UP/DN 두 글자로 맞춰 두 줄의 값 시작점이 저절로 같다.
                 const float col_gap = ImGui::CalcTextSize("  ").x;
                 const float w_cpu   = ImGui::CalcTextSize("CPU : 100% [100\xC2\xB0""C]").x;
-                const float w_rte   = ImGui::CalcTextSize("Download : 999.99KB/s").x;
+                const float w_rte   = ImGui::CalcTextSize("UP : 999.99KB/s").x;
                 const float col_cpu = ImGui::CalcTextSize("HOST |").x + col_gap;
                 const float col_rte = col_cpu + w_cpu + col_gap;
                 const float col_bat = col_rte + w_rte + col_gap;
-                // 열 [x, x+w) 안에서 오른쪽 끝에 맞춰 그린다.
-                auto right_at = [&](float x, float w, const char* s){
-                    ImGui::SameLine(x + w - ImGui::CalcTextSize(s).x);
-                    ImGui::TextUnformatted(s);
-                };
                 auto status_row = [&](const char* who, int cpu, int ct,
                                       const char* rate_label, const char* rate, const char* bat){
-                    char b[64];
                     ImGui::TextUnformatted(who);
-                    snprintf(b, sizeof(b), "CPU : %d%% [%d\xC2\xB0""C]", cpu, ct);
-                    right_at(col_cpu, w_cpu, b);
-                    snprintf(b, sizeof(b), "%s : %s", rate_label, rate);
-                    right_at(col_rte, w_rte, b);
+                    ImGui::SameLine(col_cpu); ImGui::Text("CPU : %d%% [%d\xC2\xB0""C]", cpu, ct);
+                    ImGui::SameLine(col_rte); ImGui::Text("%s : %s", rate_label, rate);
                     if(bat && bat[0]){ ImGui::SameLine(col_bat); ImGui::TextUnformatted(bat); }
                 };
                 // HOST CPU/Upload/전원
@@ -5331,18 +5320,18 @@ void run_streaming_viewer(){
                     fmt_bat(bbuf, sizeof(bbuf), vv.net_cli->remote_host_bat.load());
                     status_row("HOST |", vv.net_cli->remote_host_cpu.load(),
                                vv.net_cli->remote_host_cpu_temp.load(),
-                               "Upload", rbuf, bbuf);
+                               "UP", rbuf, bbuf);
                 } else {
                     fmt_rate(rbuf, sizeof(rbuf), vv.net_up_kbps.load());
                     fmt_bat(bbuf, sizeof(bbuf), vv.sysmon_bat.load());
                     status_row("HOST |", (int)vv.sysmon_cpu, vv.sysmon_cpu_temp_c.load(),
-                               "Upload", rbuf, bbuf);
+                               "UP", rbuf, bbuf);
                 }
                 // JOIN Download = 이 창이 접속한 그 기지 하나로부터 받는 양 (창별 독립, 합산 아님)
                 if(vv.net_cli){
                     fmt_rate(rbuf, sizeof(rbuf), vv.net_down_kbps.load());
                     status_row("JOIN |", (int)vv.sysmon_cpu, vv.sysmon_cpu_temp_c.load(),
-                               "Download", rbuf, nullptr);
+                               "DN", rbuf, nullptr);
                 }
             };
 
