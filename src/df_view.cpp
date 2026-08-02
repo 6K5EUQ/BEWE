@@ -891,17 +891,17 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         }
 
         ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "DAQ CONTROL");
-        { bool ctl = (c.enable_control != 0);
-          if(ImGui::Checkbox("retune DAQ", &ctl)) c.enable_control = ctl?1:0; }
+        // DAQ 제어(:5001 로 FREQ/GAIN 송신)는 항상 켠다. BEWE 에서 주파수를 바꿔
+        // 쓰는 게 정상 사용법이고, 꺼두면 주파수축 드래그도 게인 슬라이더도
+        // 조용히 먹지 않아 "왜 안 되지" 가 된다. 구 host_state 에 꺼진 채로
+        // 저장돼 있을 수 있어 여기서 되돌린다.
+        c.enable_control = 1;
 
         // 튜너 게인. RTL 은 이산 스텝이라 슬라이더도 인덱스로 움직인다 — 중간값을
         // 허용하면 DAQ 가 가장 가까운 단으로 스냅해 위젯과 실제가 어긋난다.
         // 놓는 순간에만 보낸다: 드래그 중 매 프레임 보내면 그때마다 DAQ 가
         // 재캘리브레이션을 시작해 DF 가 계속 멈춘다.
         {
-            const bool can = (c.enable_control != 0);
-            ImGui::BeginDisabled(!can);
             int gi = (c.gain_idx == 255) ? 0 : (int)c.gain_idx;
             if(gi < 0) gi = 0;
             if(gi >= HWConfig::RTL_GAIN_STEPS) gi = HWConfig::RTL_GAIN_STEPS - 1;
@@ -916,7 +916,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 pend_gain_idx = -1;
                 v.df_set_cfg(c);                          // HOST 로 요청 (JOIN/HOST 공통 경로)
             }
-            ImGui::EndDisabled();
         }
 
         ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
