@@ -685,7 +685,9 @@ public:
     size_t             autoscale_wp=0;   // 순환 버퍼 write pointer
     bool               autoscale_buf_full=false;
     std::chrono::steady_clock::time_point autoscale_last;
-    std::chrono::steady_clock::time_point autoscale_check_last{};  // 10s 천장초과 감시 타이머
+    std::chrono::steady_clock::time_point autoscale_check_last{};  // 10s 천장초과 감시 타이머 (JOIN 표시용)
+    // HOST 양자화 창의 천장초과 감시 (캡처 스레드 소유 — JOIN 것과 별개다).
+    std::chrono::steady_clock::time_point autoscale_ceil_last{};
     // 데드라인 — autoscale 이 "처음" 켜진 시각. 재트리거는 autoscale_last(1초 창)만 되감고
     // 이건 건드리지 않는다. 주파수축 드래그처럼 매 프레임 재트리거가 쏟아지면 1초 창이
     // 영영 못 차서 autoscale 이 굶어죽는데, 이 데드라인이 지나면 모인 만큼으로 강제 확정한다.

@@ -1942,6 +1942,7 @@ struct ChatCmdInfo { const char* cmd; const char* desc; bool early_ok; };
 static const ChatCmdInfo CHAT_CMDS[] = {
     {"/rx start",        "Start SDR capture",     false},
     {"/rx stop",         "Stop SDR capture",      false},
+    {"/autoscale",       "Re-fit dB to noise floor", false},
     {"/chassis 1 reset", "Re-enumerate SDR USB",  false},
     {"/chassis 2 reset", "Reset network link",    false},
     {"/powercycle partial", "Station: restart BEWE",  false},
@@ -7106,7 +7107,8 @@ void run_streaming_viewer(){
                         }
 
                     } else if(chat_str.rfind("/mission", 0) == 0 || chat_str.rfind("/hist", 0) == 0
-                              || chat_str.rfind("/powercycle", 0) == 0){
+                              || chat_str.rfind("/powercycle", 0) == 0
+                              || chat_str == "/autoscale"){
                         // HOST 가 실행해야 하는 명령 — 채팅 그대로 넘긴다.
                         // (/rx·/chassis 처럼 전용 패킷을 새로 만들지 않고 on_chat 경로 재사용.
                         //  HOST/LOCAL 이면 자기 on_chat 이 바로 받으므로 broadcast 한 번이면 된다.)

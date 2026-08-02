@@ -657,6 +657,30 @@ void FFTViewer::commit_fft_row(const std::vector<float>& pacc, int fcnt){
              cached_sp_idx=-1;
          }
      }
+     else {
+         // 10초마다 천장 초과 감시. 양자화는 [power_min..power_max] 밖을 잘라 버리므로
+         // (net_server.cpp broadcast_fft), 창을 잡은 뒤 더 강한 신호가 나타나면 그 초과분은
+         // 전송 단계에서 사라진다. JOIN 에도 같은 주기의 감시가 있지만 그쪽이 보는 값은
+         // 이미 255 에 눌린 뒤라 초과 사실 자체를 못 본다 — 잘림을 감지할 수 있는 건
+         // float 행을 쥐고 있는 여기뿐이다.
+         //
+         // 바닥(노이즈플로어가 내려가 동적범위를 낭비하는 경우)은 보지 않는다. 그건 대비만
+         // 손해고 정보는 안 잃는데, 재조정마다 HIST 파일이 갈리기 때문이다.
+         auto now_c = std::chrono::steady_clock::now();
+         if(autoscale_ceil_last == std::chrono::steady_clock::time_point{})
+             autoscale_ceil_last = now_c;
+         if(std::chrono::duration<float>(now_c - autoscale_ceil_last).count() >= 10.0f){
+             autoscale_ceil_last = now_c;
+             float mx = -1e30f;
+             for(int i=1;i<fft_size;i++) if(rowp[i] > mx) mx = rowp[i];
+             if(mx > header.power_max){
+                 bewe_log_push(0,"[autoscale] peak %.1f > pmax %.1f - re-fitting\n",
+                               mx, header.power_max);
+                 autoscale_accum.clear(); autoscale_init=false; autoscale_active=true;
+                 autoscale_wp=0; autoscale_buf_full=false;
+             }
+         }
+     }
      total_ffts++; current_fft_idx=total_ffts-1;
      header.num_ffts=std::min(total_ffts,FFT_HISTORY_ROWS);
      row_write_pos[current_fft_idx%MAX_FFTS_MEMORY]=tm_iq_write_sample;

@@ -1483,6 +1483,16 @@ void run_cli_host(){
                 v.net_srv->broadcast_chat("SYSTEM", "Usage: /hist check");
             }
         }
+        // "/autoscale" — 워터폴 dB 창을 현재 노이즈플로어에 다시 맞춘다.
+        // JOIN 이 쳐도 이 기지(명령을 받은 HOST)가 자기 캡처를 다시 잡는다.
+        else if(strcmp(msg, "/autoscale") == 0){
+            bewe_log_push(0,"[CMD:%s] /autoscale\n", from);
+            const bool up = !v.rx_stopped.load() && v.is_running;
+            if(up) v.autoscale_req.store(true, std::memory_order_relaxed);
+            if(v.net_srv)
+                v.net_srv->broadcast_chat("SYSTEM", up ? "Autoscale requested."
+                                                       : "No SDR running - start RX first.");
+        }
         // "/powercycle partial|full" — /chassis 1 reset 이 안 먹을 때의 상위 복구.
         // JOIN 이든 HOST UI 든 여기로 모인다. 실제 동작은 메인 루프가 한다
         // (SDR 재초기화가 캡처 스레드 수명을 건드리므로 네트워크 스레드에선 안 된다).
@@ -3070,6 +3080,16 @@ void run_cli_host(){
                 bewe_log_push(0,"[CMD:CLI] /rx start\n");
                 if(!v.rx_stopped.load()) bewe_log_push(0,"[CLI] RX already running.\n");
                 else                     sdr_up("cli");
+            } else if(line == "/autoscale"){
+                // 워터폴 dB 창을 지금 노이즈플로어에 다시 맞춘다. 실제 리셋은
+                // 캡처 스레드가 data_mtx 안에서 한다 (JOIN 버튼과 같은 경로).
+                bewe_log_push(0,"[CMD:CLI] /autoscale\n");
+                if(v.rx_stopped.load() || !v.is_running)
+                    bewe_log_push(0,"[CLI] No SDR running - start RX first.\n");
+                else {
+                    v.autoscale_req.store(true, std::memory_order_relaxed);
+                    bewe_log_push(0,"[CLI] Autoscale requested.\n");
+                }
             } else if(line.rfind("/freq", 0) == 0){
                 // /freq <MHz> — 중심 주파수 변경 (HOST 자기 SDR + JOIN sync)
                 const char* arg = line.c_str() + 5;
@@ -3392,6 +3412,7 @@ void run_cli_host(){
                 bewe_log_push(0,"  /powercycle full    - above + reboot machine\n");
                 bewe_log_push(0,"  /rx stop         - Release the SDR (safe to unplug; station stays online)\n");
                 bewe_log_push(0,"  /rx start        - Re-detect the SDR and resume streaming\n");
+                bewe_log_push(0,"  /autoscale       - Re-fit the waterfall dB window to the noise floor\n");
                 bewe_log_push(0,"  /shutdown        - Clean exit\n");
                 bewe_log_push(0,"  /help            - Show this help\n");
                 bewe_log_push(0,"  <text>           - Broadcast as chat message\n");
