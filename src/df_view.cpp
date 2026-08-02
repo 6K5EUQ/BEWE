@@ -357,9 +357,13 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     v.df_get_cfg(canon);
     static PktDfConfig ui{};
     static double      hold_until = 0.0;
+    // 배열 에디터에서 끌고 있는 소자(-1=없음). 캔버스는 ImGui 아이템이 아니라
+    // IsAnyItemActive() 에 안 잡힌다 — 이걸 같이 보지 않으면 끄는 도중 매 프레임
+    // ui 가 canon 으로 덮여 소자가 제자리로 튕겨 돌아간다.
+    static int arr_drag = -1;
     const double now = ImGui::GetTime();
-    if(just_opened){ ui = canon; hold_until = 0.0; }
-    if(!(ImGui::IsAnyItemActive() || now < hold_until)) ui = canon;
+    if(just_opened){ ui = canon; hold_until = 0.0; arr_drag = -1; }
+    if(!(ImGui::IsAnyItemActive() || arr_drag >= 0 || now < hold_until)) ui = canon;
     PktDfConfig& c = ui;
 
     // ── 영속 UI 상태 ──────────────────────────────────────────────────────
@@ -377,10 +381,6 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     static bool   sort_asc   = true;
     static bool   at_bottom  = true;
     static float  lob_km     = 10.f;    // 지도에 그리는 방위선 길이 (km)
-    // 배열 에디터: 끌고 있는 소자(-1=없음)와 "놓으면 보내야 한다" 표시.
-    // 캔버스는 ImGui 아이템이 아니라 IsAnyItemActive 로 드래그를 못 걸러낸다 —
-    // 드래그 중 매 프레임 보내면 HOST 가 매번 매니폴드를 다시 만든다.
-    static int    arr_drag   = -1;
     static uint32_t last_seq  = 0;    // 마지막으로 본 df_hist_seq (개수 아님)
     static int      last_vis_n = 0;   // 직전 프레임 가시행 수 (tail-follow 용)
 
@@ -1000,10 +1000,16 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
         ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "ARRAY EDITOR");
         {
-            const float side = ImGui::GetContentRegionAvail().x - 4.f;
+            // 정사각형이되 남은 세로에도 들어가야 한다 — 폭만 보고 잡으면 패널
+            // 아래로 넘쳐 스크롤이 생기고 격자가 잘린다.
+            const ImVec2 avail = ImGui::GetContentRegionAvail();
+            float side = std::min(avail.x - 4.f, avail.y - 8.f);
+            if(side < 120.f) side = 120.f;          // 너무 눌리면 조작이 불가능하다
             const ImVec2 org = ImGui::GetCursorScreenPos();
             const ImVec2 cen(org.x + side*0.5f, org.y + side*0.5f);
             ImDrawList* dl = ImGui::GetWindowDrawList();
+            // 캔버스 밖으로 새는 그리기(격자·lambda/2 원)를 자른다.
+            dl->PushClipRect(org, ImVec2(org.x+side, org.y+side), true);
 
             const int nel = (c.elements < 1) ? 1 : ((c.elements > 8) ? 8 : c.elements);
 
@@ -1084,6 +1090,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                     dl->AddText(ImVec2(org.x+6, org.y+6), IM_COL32(180,195,220,255), sl);
                 }
             }
+            dl->PopClipRect();
         }
 
         ImGui::EndChild();
