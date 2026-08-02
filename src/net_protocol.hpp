@@ -717,7 +717,8 @@ struct __attribute__((packed)) PktDfCalib {
     float    arg_deg;         // capture: 송신기 방위. remove: 인덱스를 실수로
     double   freq_hz;         // 세트가 묶인 주파수 (요약)
     float    worst_dev_db;    // 보정 크기 최댓값 — 배열이 모델과 얼마나 다른가
-    float    bearing[36];     // 측정된 방위들 (요약)
+    float    bearing[36];     // 운용자가 신고한 참 방위 (요약)
+    float    measured[36];    // 그때 배열이 보고한 방위 — 참값과의 차가 곧 보정량
     float    snr_db[36];      // 각 측정의 eig SNR (요약)
     char     err[64];         // capture 실패 사유 (HOST->JOIN, 비면 성공)
 };

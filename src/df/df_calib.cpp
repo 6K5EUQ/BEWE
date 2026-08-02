@@ -32,7 +32,7 @@ void Calib::remove_at(int idx){
     stamp_++;
 }
 
-void Calib::add(double bearing_deg, double snr_db,
+void Calib::add(double bearing_deg, double measured_deg, double snr_db,
                 const std::complex<double>* measured,
                 const std::complex<double>* theory,
                 int elements){
@@ -40,8 +40,9 @@ void Calib::add(double bearing_deg, double snr_db,
     bearing_deg = std::fmod(bearing_deg + 360.0, 360.0);
 
     CalPoint p;
-    p.bearing_deg = bearing_deg;
-    p.snr_db      = snr_db;
+    p.bearing_deg  = bearing_deg;
+    p.measured_deg = measured_deg;
+    p.snr_db       = snr_db;
     // c[m] = x[m] / a[m]. 둘 다 소자 0 위상 0 으로 정규화돼 들어오므로 c[0] 은
     // 실수 양수가 된다. 이론값이 0 에 가까우면(있을 수 없지만) 보정을 1 로 둔다.
     for(int m = 0; m < elements; m++){
@@ -132,9 +133,9 @@ void Calib::correction(double bearing_deg, std::complex<double>* out, int elemen
 bool Calib::save(const char* path) const {
     FILE* f = fopen(path, "w");
     if(!f) return false;
-    fprintf(f, "1 %.6f %d %d\n", freq_hz_, m_, n_);
+    fprintf(f, "2 %.6f %d %d\n", freq_hz_, m_, n_);
     for(int i = 0; i < n_; i++){
-        fprintf(f, "%.4f %.2f", pts_[i].bearing_deg, pts_[i].snr_db);
+        fprintf(f, "%.4f %.4f %.2f", pts_[i].bearing_deg, pts_[i].measured_deg, pts_[i].snr_db);
         for(int m = 0; m < m_; m++)
             fprintf(f, " %.9g %.9g", pts_[i].corr[m].real(), pts_[i].corr[m].imag());
         fputc('\n', f);
@@ -147,7 +148,7 @@ bool Calib::load(const char* path){
     FILE* f = fopen(path, "r");
     if(!f) return false;
     int ver = 0, m = 0, n = 0; double fz = 0;
-    if(fscanf(f, "%d %lf %d %d", &ver, &fz, &m, &n) != 4 || ver != 1
+    if(fscanf(f, "%d %lf %d %d", &ver, &fz, &m, &n) != 4 || ver < 1 || ver > 2
        || m < 1 || m > kMaxElements || n < 0 || n > kMaxCalPoints){
         fclose(f); return false;
     }
@@ -155,7 +156,12 @@ bool Calib::load(const char* path){
     freq_hz_ = fz; m_ = m;
     for(int i = 0; i < n; i++){
         CalPoint p;
-        if(fscanf(f, "%lf %lf", &p.bearing_deg, &p.snr_db) != 2){ break; }
+        // ver 1 은 measured_deg 가 없다 — 그 칸을 건너뛰고 0 으로 둔다.
+        if(ver >= 2){
+            if(fscanf(f, "%lf %lf %lf", &p.bearing_deg, &p.measured_deg, &p.snr_db) != 3) break;
+        } else {
+            if(fscanf(f, "%lf %lf", &p.bearing_deg, &p.snr_db) != 2) break;
+        }
         bool bad = false;
         for(int k = 0; k < m; k++){
             double re = 0, im = 0;

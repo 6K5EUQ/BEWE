@@ -644,7 +644,7 @@ void test_calib(){
         mf_bel.steer(b, a);
         const cd r = std::conj(a[0]) / std::abs(a[0]);
         for(int m = 0; m < M; m++) a[m] *= r;
-        cal.add(b, 30.0, x, a, M);
+        cal.add(b, b, 30.0, x, a, M);
     }
     check(cal.count() == 12, "collected %d calibration points", cal.count());
 
@@ -671,7 +671,7 @@ void test_calib(){
         one.set_context(F, M);
         cd x[kMaxElements], a[kMaxElements];
         observe(0.0, x); mf_bel.steer(0.0, a);
-        one.add(0.0, 30.0, x, a, M);
+        one.add(0.0, 0.0, 30.0, x, a, M);
         check(one.count() == 1, "one point stored");
         check(one.same_context(F, M), "a one-point set is still the same context");
         check(!one.usable_at(F, M),   "but not yet applicable (needs 2)");

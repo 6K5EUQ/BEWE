@@ -62,8 +62,9 @@ public:
         int    elements = 0;
         double worst_dev_db = 0;
         bool   active = false;              // 지금 매니폴드에 실제로 걸려 있는가
-        double bearing[kMaxCalPoints] = {};
-        double snr_db[kMaxCalPoints]  = {};
+        double bearing[kMaxCalPoints]  = {};   // 운용자가 신고한 참 방위
+        double measured[kMaxCalPoints] = {};   // 그때 배열이 보고한 방위 (보정 전)
+        double snr_db[kMaxCalPoints]   = {};
     };
     CalInfo cal_info() const;
     // 파일로 남기고 되읽는다. 경로는 호출측(스테이션별 파일)이 정한다.

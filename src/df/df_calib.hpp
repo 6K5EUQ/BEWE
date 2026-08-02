@@ -42,6 +42,7 @@ inline constexpr int kMaxCalPoints = 36;   // 10 도 간격이면 한 바퀴
 
 struct CalPoint {
     double bearing_deg = 0;                       // 운용자가 입력한 참값
+    double measured_deg = 0;                      // 그때 배열이 보고한 방위 (보정 전)
     double snr_db      = 0;                       // 그때의 eig_snr — 신뢰도 판단용
     std::complex<double> corr[kMaxElements] = {}; // 소자별 보정 (corr[0] == 1)
 };
@@ -51,7 +52,7 @@ public:
     // 측정점 추가/치환. 같은 방위(2 도 안쪽)가 이미 있으면 덮어쓴다 — 운용자가
     // 마음에 안 드는 측정을 다시 하는 게 정상 흐름이라 중복을 쌓지 않는다.
     // 방위 순으로 정렬해 둔다 (보간이 이웃을 찾는다).
-    void add(double bearing_deg, double snr_db,
+    void add(double bearing_deg, double measured_deg, double snr_db,
              const std::complex<double>* measured,   // 실측 주 고유벡터
              const std::complex<double>* theory,     // 같은 방위의 이론 조향벡터
              int elements);

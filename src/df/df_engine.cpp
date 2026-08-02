@@ -170,7 +170,8 @@ bool Engine::cal_add(double bearing_deg, char* err, size_t errn){
         for(int m = 0; m < r.elements; m++) a[m] *= rot;
     }
 
-    d_->cal.add(bearing_deg - c.heading_deg, r.eig_snr_db, r.principal, a, r.elements);
+    d_->cal.add(bearing_deg - c.heading_deg, r.bearing_rel_deg, r.eig_snr_db,
+                r.principal, a, r.elements);
     return true;
 }
 
@@ -203,8 +204,9 @@ Engine::CalInfo Engine::cal_info() const {
     o.worst_dev_db = d_->cal.worst_dev_db();
     o.active       = d_->cal_active.load(std::memory_order_relaxed);
     for(int i = 0; i < o.n && i < kMaxCalPoints; i++){
-        o.bearing[i] = d_->cal.at(i).bearing_deg;
-        o.snr_db[i]  = d_->cal.at(i).snr_db;
+        o.bearing[i]  = d_->cal.at(i).bearing_deg;
+        o.measured[i] = d_->cal.at(i).measured_deg;
+        o.snr_db[i]   = d_->cal.at(i).snr_db;
     }
     return o;
 }

@@ -858,8 +858,9 @@ void FFTViewer::df_cal_get(PktDfCalib& out) const {
     out.freq_hz      = ci.freq_hz;
     out.worst_dev_db = (float)ci.worst_dev_db;
     for(int i = 0; i < out.n; i++){
-        out.bearing[i] = (float)ci.bearing[i];
-        out.snr_db[i]  = (float)ci.snr_db[i];
+        out.bearing[i]  = (float)ci.bearing[i];
+        out.measured[i] = (float)ci.measured[i];
+        out.snr_db[i]   = (float)ci.snr_db[i];
     }
 }
 

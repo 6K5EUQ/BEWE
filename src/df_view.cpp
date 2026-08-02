@@ -994,8 +994,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         // 비교해 보정을 만든다. 좌표 오차·케이블 편차·상호결합·기체 산란이
         // 전부 이 한 표에 흡수된다 (계산으로는 어느 것도 못 잡는다).
         ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "CALIBRATION");
-        {
+        if(ImGui::CollapsingHeader("CALIBRATION")){
             PktDfCalib ci{}; v.df_cal_get(ci);
 
             ImGui::SetNextItemWidth(90);
@@ -1014,19 +1013,21 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             if(ci.n > 0){
                 ImGui::Text("%d pts  %.4f MHz  dev %.1f dB",
                             (int)ci.n, ci.freq_hz/1e6, ci.worst_dev_db);
-                // 측정된 방위들. 어디가 비었는지 한눈에 보이는 게 목적이라
-                // 표가 아니라 나열이다.
-                char line[256] = {}; int used = 0;
-                for(int i = 0; i < ci.n && used < (int)sizeof(line)-8; i++)
-                    used += snprintf(line+used, sizeof(line)-used, "%.0f ", ci.bearing[i]);
-                ImGui::TextWrapped("%s", line);
+                // 점마다 한 줄. offset = 참값 - 배열이 본 값 = 그 방위에서
+                // 보정이 메워야 하는 각도다. 큰 값이 몰려 있으면 배열 설정이나
+                // heading offset 을 의심할 자리다.
                 for(int i = 0; i < ci.n; i++){
                     char bid[24]; snprintf(bid, sizeof bid, "x##cal%d", i);
-                    if(i) ImGui::SameLine();
                     if(ImGui::SmallButton(bid)){
                         PktDfCalib cmd{}; cmd.cmd = 3; cmd.arg_deg = (float)i;
                         v.df_cal_cmd(cmd);
                     }
+                    float off = ci.bearing[i] - ci.measured[i];
+                    while(off <= -180.f) off += 360.f;
+                    while(off >   180.f) off -= 360.f;
+                    ImGui::SameLine();
+                    ImGui::Text("#%d  peak %6.1f  real %6.1f  offset %+6.1f",
+                                i+1, ci.measured[i], ci.bearing[i], off);
                 }
             }
 
@@ -1074,8 +1075,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         // 위에서 내려다본 배치. 소자를 끌어 옮기면 array 가 Custom 으로 바뀌고
         // 좌표가 정본이 된다. 프리셋으로 되돌리려면 위 콤보에서 다시 고르면 된다.
         ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "ARRAY EDITOR");
-        {
+        if(ImGui::CollapsingHeader("ARRAY EDITOR")){
             // 폭은 남김없이 쓰고 세로만 남은 공간에 맞춘다. 정사각형으로 잡으면
             // 좁은 쪽에 끌려가 옆이 비었다.
             const ImVec2 avail = ImGui::GetContentRegionAvail();
