@@ -375,12 +375,24 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     // 이후 같은 주파수로 새 측정이 들어오면 자동으로 합류한다 — 행을 하나씩
     // 고르는 방식으로는 새로 들어오는 것을 담을 수 없어서 잠금을 따로 둔다.
     static uint32_t             freq_lock = 0;
+    // 표는 두 단계다. 0 이면 주파수별 요약 목록, 그 외면 그 주파수(kHz)의 개별
+    // 측정 목록. AIS 뷰처럼 한 표적이 한 줄을 차지해야 표가 읽히기 때문이다 —
+    // 같은 송신기를 100번 재면 지금까지는 그 100줄이 다른 표적을 화면 밖으로
+    // 밀어냈다.
+    static uint32_t             drill_khz = 0;
     // 표 폭은 설정 패널(kSetupW) 과 같이 고정이다. 열 폭을 코드에 박아 두었으므로
     // 표만 늘리면 Brg 만 늘어나고, 줄이면 Brg 가 잘린다 — 끌 수 있게 두면 얻는 건
     // 없고 어긋나기만 한다. 실측으로 맞춘 값이다.
     constexpr float kTableW = 338.f;
     static bool   setup_open = false;
     static int    sort_col   = -1;
+    // S = 설정 패널 토글. DF 창 안에서만 먹는다 — 메인의 S(STATUS 토글)는
+    // main_kbd_active 안에 있어 DF 가 열려 있으면 이미 죽어 있다 (오버레이 격리).
+    // 표 필터 같은 입력창에 글자를 치는 중이면 그쪽이 먼저다.
+    if(win_focus && !typing && !ImGui::IsAnyItemActive()
+       && ImGui::IsKeyPressed(ImGuiKey_S, false))
+        setup_open = !setup_open;
+
     static bool   sort_asc   = true;
     static bool   at_bottom  = true;
     static float  lob_km     = 10.f;    // 지도에 그리는 방위선 길이 (km)
@@ -480,6 +492,15 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         if(mapw < 10.f) mapw = 10.f;
     }
 
+    // 상세로 보던 주파수가 사라졌으면 (Del, 이력 회전) 목록으로 되돌린다.
+    // 안 그러면 아무 행도 안 나오는 빈 표에 갇혀 우클릭 말고는 나올 길이 없다.
+    if(drill_khz){
+        bool alive = false;
+        for(int i = 0; i < v.df_hist_n && !alive; i++)
+            if((uint32_t)(v.df_hist_at(i).cf_mhz * 1000.0f + 0.5f) == drill_khz) alive = true;
+        if(!alive) drill_khz = 0;
+    }
+
     if(!mv.big){
         // BordersOuter 로 표 바깥을 두른다. 다만 ImGui 는 표 테두리에
         // TableBorderStrong 을, 차일드(설정 패널) 에는 Border 를 쓴다 — 기본값이
@@ -494,15 +515,71 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         if(ImGui::BeginTable("##df_tbl", 5, tf, ImVec2(tw, body_h))){
             ImGui::TableSetupScrollFreeze(2, 1);
             ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 64);
-            ImGui::TableSetupColumn("CH",   ImGuiTableColumnFlags_WidthFixed, 20);
+            // 목록에선 CH 자리에 그 주파수의 측정 개수를 쓴다 (AIS 뷰와 같은 뜻).
+            // 폭은 두 모드가 같아야 한다 — 드나들 때마다 열이 움직이면 눈이 쫓아간다.
+            ImGui::TableSetupColumn(drill_khz ? "CH" : "N",
+                                    ImGuiTableColumnFlags_WidthFixed, 20);
             ImGui::TableSetupColumn("Freq", ImGuiTableColumnFlags_WidthFixed, 70);
             ImGui::TableSetupColumn("Brg",  ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("SNR",  ImGuiTableColumnFlags_WidthFixed, 36);
             modview::sortable_headers(5, sort_col, sort_asc, /*text_col=*/-1);
 
-            for(int p = 0; p < (int)vis.size(); p++){
+            // ── 목록 모드: 주파수당 한 줄 ────────────────────────────────
+            // 대표값은 **가장 최근 측정**이다. 평균을 쓰면 표적이 움직였을 때
+            // 지나간 자리와 지금 자리의 중간이라는, 아무도 없는 방위가 찍힌다.
+            if(!drill_khz){
+                static std::vector<uint32_t> gk;     // 주파수(kHz), 첫 등장 순
+                static std::vector<int>      gcount; // 그 주파수의 측정 수
+                static std::vector<int>      glatest;// 가장 최근 행 인덱스
+                gk.clear(); gcount.clear(); glatest.clear();
+                for(int p = 0; p < (int)vis.size(); p++){
+                    const FFTViewer::DFFix& f = v.df_hist_at(vis[p]);
+                    const uint32_t khz = (uint32_t)(f.cf_mhz * 1000.0f + 0.5f);
+                    size_t gi = 0;
+                    for(; gi < gk.size(); gi++) if(gk[gi] == khz) break;
+                    if(gi == gk.size()){ gk.push_back(khz); gcount.push_back(0); glatest.push_back(vis[p]); }
+                    gcount[gi]++;
+                    if(v.df_hist_at(vis[p]).t_end_ms >= v.df_hist_at(glatest[gi]).t_end_ms)
+                        glatest[gi] = vis[p];
+                }
+                for(size_t gi = 0; gi < gk.size(); gi++){
+                    const FFTViewer::DFFix& f = v.df_hist_at(glatest[gi]);
+                    ImGui::TableNextRow();
+                    char ts[16]; hms(f.t_end_ms, ts, sizeof ts);
+                    const bool ghl = (freq_lock == gk[gi]);
+                    if(modview::row_col0((int)(0x40000000u | gk[gi]), ghl, ts)){
+                        drill_khz = gk[gi];      // 이 주파수 상세로 들어간다
+                        freq_lock = gk[gi];      // 지도도 그 주파수만 보여 준다
+                        sel.clear();
+                    }
+                    char gb[32];
+                    ImGui::TableSetColumnIndex(1);
+                    snprintf(gb, sizeof gb, "%d", gcount[gi]); modview::cell(gb);
+                    ImGui::TableSetColumnIndex(2);
+                    if(f.cf_mhz > 0.f){
+                        snprintf(gb, sizeof gb, "%.4f", f.cf_mhz);
+                        modview::cell(gb, ImGui::ColorConvertU32ToFloat4(
+                                              lob_color_for_freq(f.cf_mhz).glow));
+                    } else modview::cell("-");
+                    const bool gmeas = (f.kind == 0) && !f.manual_lob;
+                    ImGui::TableSetColumnIndex(3);
+                    if(f.kind == 0){
+                        if(gmeas) snprintf(gb, sizeof gb, "%.1f\xC2\xB0 (%.1f\xC2\xB0)",
+                                           f.bearing_deg, df_bearing_sigma_deg(f) * 1.96);
+                        else      snprintf(gb, sizeof gb, "%.1f\xC2\xB0", f.bearing_deg);
+                        modview::cell(gb, f.manual_lob ? ImVec4(0.6f,0.8f,1.f,1.f)
+                                                       : ImVec4(0.3f,0.9f,0.3f,1.f));
+                    } else modview::cell("-");
+                    ImGui::TableSetColumnIndex(4);
+                    if(gmeas){ snprintf(gb, sizeof gb, "%.1f", f.snr_db); modview::cell(gb); }
+                    else modview::cell("-");
+                }
+            }
+
+            for(int p = 0; drill_khz && p < (int)vis.size(); p++){
                 const int hi = vis[p];
                 const FFTViewer::DFFix& f = v.df_hist_at(hi);
+                if((uint32_t)(f.cf_mhz * 1000.0f + 0.5f) != drill_khz) continue;
                 const std::string k = key_of(hi);
                 ImGui::TableNextRow();
 
@@ -569,6 +646,14 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
             // 못박히고, 필터가 없으면 영영 거짓이라 tail-follow 자체가 죽는다.
             modview::tail_follow(at_bottom, (int)vis.size() > last_vis_n && sort_col < 0);
 
+            // 우클릭 = 뒤로가기. 표 안 어디서든 먹는다 (행을 정확히 맞출 필요
+            // 없이 돌아 나올 수 있어야 한다). 목록에서는 할 일이 없으므로 무시.
+            if(drill_khz && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)
+               && ImGui::IsMouseClicked(ImGuiMouseButton_Right)){
+                drill_khz = 0;
+                freq_lock = 0;
+                sel.clear();
+            }
             ImGui::EndTable();
         }
         ImGui::PopStyleColor();
@@ -617,9 +702,13 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 shown.push_back(&f);
         }
     } else {
+        // 상세로 들어가 있으면 그 주파수만 — 지도에 그리는 선과 타원의 근거가
+        // 같아야 한다 (위 LOB 루프도 같은 조건으로 거른다).
         for(int p = 0; p < (int)vis.size(); p++){
             const FFTViewer::DFFix& f = v.df_hist_at(vis[p]);
-            if(f.kind == 0) shown.push_back(&f);
+            if(f.kind != 0) continue;
+            if(drill_khz && (uint32_t)(f.cf_mhz * 1000.0f + 0.5f) != drill_khz) continue;
+            shown.push_back(&f);
         }
     }
 
@@ -701,6 +790,9 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         for(int p = 0; p < (int)vis.size(); p++){
             const FFTViewer::DFFix& f = v.df_hist_at(vis[p]);
             if(f.kind != 0) continue;
+            // 상세로 들어간 동안엔 그 주파수만 그린다. 표가 한 표적만 보여 주는데
+            // 지도에 남의 선이 깔려 있으면 무엇을 보고 있는지가 흐려진다.
+            if(drill_khz && (uint32_t)(f.cf_mhz * 1000.0f + 0.5f) != drill_khz) continue;
             float sla = f.station_lat, slo = f.station_lon;
             if(sla == 0.f && slo == 0.f) continue;
             norm(sla, slo);
@@ -1314,6 +1406,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         }
         if(v.df_hist_erase(kill) > 0){
             freq_lock = 0; v.df_last_valid = false; last_vis_n = 0;
+            drill_khz = 0;   // 상세로 들어가 있었다면 빈 표가 남는다 — 목록으로
         }
     }
 
