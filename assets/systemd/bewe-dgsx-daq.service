@@ -1,0 +1,33 @@
+[Unit]
+Description=KrakenSDR heimdall DAQ chain (BEWE DF)
+# 동글 5개가 열거된 뒤에 떠야 한다. USB 는 udev settle 이 끝나야 안정적이다.
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+Before=shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=simple
+User=raspb2
+WorkingDirectory=/home/raspb2/krakensdr_doa
+# bewe_df_start.sh 는 웹스택 가드 -> 포트 가드 -> eth 오버레이 설치 ->
+# daq_start_sm.sh 순으로 돈다. 체인이 뜨면 :5000(IQ) / :5001(제어) 가 열린다.
+# BEWE 는 그 :5000 의 소비자일 뿐 DAQ 를 직접 띄우지 않는다 (kraken_io.cpp).
+ExecStart=/home/raspb2/krakensdr_doa/bewe_df_run.sh
+ExecStop=/home/raspb2/krakensdr_doa/bewe_df_stop.sh
+# daq_start_sm.sh 는 체인 5개(rtl_daq/rebuffer/decimate/delay_sync/hw_controller)
+# 를 백그라운드로 띄우고 곧바로 반환한다. 그래서 ExecStart 는 그걸 감싸 상주하는
+# bewe_df_run.sh 다 (Type=oneshot 으로 두면 반환 시점에 cgroup 이 정리되면서
+# delay_sync/hw_controller 가 죽고 "Shared memory not exist" 로 체인이 끊긴다).
+# mixed: 정지 시 메인(래퍼)에만 SIGTERM 을 주고, 래퍼의 trap 이 bewe_df_stop.sh
+# 로 체인을 내린다. SIGKILL 단계에서만 cgroup 전체를 정리한다.
+KillMode=mixed
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=300
+TimeoutStopSec=120
+StandardOutput=append:/var/log/bewe-dgsx-daq.log
+StandardError=append:/var/log/bewe-dgsx-daq.log
+
+[Install]
+WantedBy=multi-user.target

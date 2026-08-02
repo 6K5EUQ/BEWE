@@ -1,0 +1,56 @@
+# DGS-X (raspb2, 드론 Pi5) 전용 유닛. 다른 기지와 달리
+# assets/systemd/bewe-station.service.in 템플릿으로 만들지 않는다 — 유닛명이
+# bewe-dgsx.service 이고, KrakenSDR 이라 --sdr kraken 강제 + heimdall DAQ
+# (bewe-dgsx-daq.service) 와 짝을 이룬다.
+#
+# 설치:  sudo cp assets/systemd/bewe-dgsx*.service /etc/systemd/system/
+#        sudo systemctl daemon-reload && sudo systemctl enable --now bewe-dgsx-daq bewe-dgsx
+#
+# 이 파일은 2026-08-02 DGS-X 에서 실제로 검증된 사본이다 (SDR 물리 교체 실증 포함).
+[Unit]
+Description=BEWE HOST CLI - DGS-X (drone Pi5)
+# tailscaled 는 ordering-only. Central 접속은 tailnet 경유지만
+# tailscaled 장애가 기동 자체를 막지 않게 Wants= 는 걸지 않는다.
+After=network-online.target tailscaled.service
+Wants=network-online.target
+# KrakenSDR DF: heimdall DAQ 가 :5000 을 열고 있어야 --sdr kraken 이 붙는다.
+# BEWE 는 DAQ 를 띄우지 않고 소비만 하므로(kraken_io.cpp) 순서가 강제다.
+# Wants= 다 (Requires= 아님). DAQ 를 내려도 BEWE 는 살아 있어야 한다 - 그래야
+# SDR 만 떼어내고 기지(NetServer/Central 룸/채널필터/미션)는 유지할 수 있다.
+# 이때 JOIN 은 하트비트의 sdr_st=2(노랑, /rx start 대기)로 상태를 본다. cli_host 가
+# rx_stopped + sdr_hw_present 로 '의도적 정지'와 '장치 없음'을 이미 구분한다.
+# 정비 순서: /rx stop -> systemctl stop <daq> -> 교체 -> start <daq> -> /rx start
+After=bewe-dgsx-daq.service
+Wants=bewe-dgsx-daq.service
+# 시스템 종료 시 파일시스템이 read-only 로 remount 되기 전에 정지시킨다.
+# cli_host 의 종료 시퀀스가 host_state 저장 + HIST/IQ finalize 를 하므로
+# 그 전에 디스크가 잠기면 마지막 상태를 잃는다.
+Before=shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=simple
+User=raspb2
+PermissionsStartOnly=true
+WorkingDirectory=/home/raspb2/BEWE/build-cli
+# cli_host 는 stdin 으로 로그인 4줄을 받는다: ID / PW / Tier / 위치번호.
+# 위치번호 4 = DGS-X (cli_host.cpp presets[]). 프리셋이 바뀌면 이 숫자도 바뀐다.
+# stdin 은 FIFO 로 연다. 로그인 4줄을 먼저 흘려보낸 뒤 FIFO 를 계속 재개방해
+# 운용 중 명령 주입(/powercycle, /ch, /hist check ...)이 가능하게 한다.
+# screen 기지의 'screen -X stuff' 에 대응하는 systemd 쪽 수단이다.
+ExecStartPre=/bin/bash -c 'rm -f /run/bewe-dgsx.cmd && mkfifo -m 0660 /run/bewe-dgsx.cmd && chown raspb2:raspb2 /run/bewe-dgsx.cmd'
+ExecStart=/bin/bash -c 'exec ./BEWE --sdr kraken < <(printf "DGS-X\n1\n1\n4\n"; while :; do cat /run/bewe-dgsx.cmd; done)'
+# on-failure: 크래시·SDR 오류는 자동 복구하되, 정상 종료(systemctl stop / 시스템
+# shutdown)에는 재기동하지 않는다. always 였을 때는 깨끗이 종료한 직후 10초 뒤
+# 다시 떠서 종료 순서에 의존하는 불확실한 동작이 됐다.
+Restart=on-failure
+RestartSec=10
+# SIGTERM → cli_host 의 g_shutdown 플래그 → 종료 시퀀스(저장·finalize).
+# 90초는 기본값이지만 명시해 둔다 — HIST finalize + Central push 가 들어간다.
+KillSignal=SIGTERM
+TimeoutStopSec=90
+StandardOutput=append:/var/log/bewe-dgsx.log
+StandardError=append:/var/log/bewe-dgsx.log
+
+[Install]
+WantedBy=multi-user.target
