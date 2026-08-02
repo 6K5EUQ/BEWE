@@ -67,8 +67,16 @@ public:
     double freq_hz()  const { return freq_hz_; }
     int    elements() const { return m_; }
 
-    // 지금 주파수·소자수에 이 보정을 써도 되는가. 주파수가 5% 넘게 다르면
-    // 거부한다 — 케이블 위상차만 해도 그 차이에서 이미 수 도가 어긋난다.
+    // 이 측정이 지금 세트와 같은 조건인가 (주파수 5% 이내, 소자 수 일치).
+    // 점 개수는 안 본다 — 두 번째 점을 넣을 때도 참이어야 하기 때문이다.
+    bool same_context(double freq_hz, int elements) const;
+
+    // 지금 주파수·소자수에 이 보정을 **적용**해도 되는가. same_context 에 더해
+    // 보간에 필요한 최소 점수(2)를 요구한다.
+    //
+    // 이 둘을 한 함수로 묶었다가 캘리브가 1 점을 못 넘는 버그가 났다: 두 번째
+    // capture 에서 "적용 불가(=점 1개)" 를 "다른 세트" 로 읽고 기존 점을 지워
+    // 매번 1 점으로 되돌아갔다. 질문이 둘이면 함수도 둘이어야 한다.
     bool usable_at(double freq_hz, int elements) const;
 
     // 방위 b 의 보정을 out[0..m) 에 쓴다. 측정점이 2 개 미만이면 전부 1 (무보정).

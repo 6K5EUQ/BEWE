@@ -150,7 +150,9 @@ bool Engine::cal_add(double bearing_deg, char* err, size_t errn){
     // 캘리브 세트는 한 주파수·한 배열에 묶인다. 그것과 다른 측정이 들어오면
     // 이전 점들은 의미가 없으므로 비우고 새로 시작한다 (조용히 섞으면 보정이
     // 엉뚱해지고 원인을 찾기 어렵다).
-    if(d_->cal.count() > 0 && !d_->cal.usable_at(r.center_hz, r.elements))
+    // 같은 세트인지만 본다. usable_at 은 "적용 가능한가" 라 점이 1 개면 거짓이고,
+    // 그걸 여기서 쓰면 두 번째 점을 넣을 때마다 첫 점을 지워 영원히 1 점이 된다.
+    if(d_->cal.count() > 0 && !d_->cal.same_context(r.center_hz, r.elements))
         d_->cal.clear();
     if(d_->cal.count() == 0) d_->cal.set_context(r.center_hz, r.elements);
 

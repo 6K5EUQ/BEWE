@@ -662,6 +662,21 @@ void test_calib(){
     check(worst_after < 2.0, "calibrated bearing within %.2f deg (was %.1f)",
           worst_after, worst_before);
 
+    // (d-0) 점이 1 개일 때도 "같은 세트" 로 인정돼야 한다. 엔진은 capture 마다
+    // same_context 로 세트 연속성을 판정하는데, 여기에 usable_at(점 2 개 이상을
+    // 요구)을 쓰면 두 번째 점을 넣는 순간 첫 점을 지워 캘리브가 영영 1 점에
+    // 머문다 — 실제로 그 버그가 있었다.
+    {
+        Calib one;
+        one.set_context(F, M);
+        cd x[kMaxElements], a[kMaxElements];
+        observe(0.0, x); mf_bel.steer(0.0, a);
+        one.add(0.0, 30.0, x, a, M);
+        check(one.count() == 1, "one point stored");
+        check(one.same_context(F, M), "a one-point set is still the same context");
+        check(!one.usable_at(F, M),   "but not yet applicable (needs 2)");
+    }
+
     // (d) 주파수가 멀면 거부해야 한다 — 틀린 보정은 무보정보다 나쁘다
     check(!cal.usable_at(F * 1.2, M), "calibration refused 20%% away in frequency");
     check( cal.usable_at(F * 1.01, M), "calibration accepted 1%% away");

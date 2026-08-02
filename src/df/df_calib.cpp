@@ -74,9 +74,13 @@ void Calib::add(double bearing_deg, double snr_db,
     stamp_++;
 }
 
-bool Calib::usable_at(double freq_hz, int elements) const {
-    if(n_ < 2 || m_ != elements || freq_hz_ <= 0.0 || freq_hz <= 0.0) return false;
+bool Calib::same_context(double freq_hz, int elements) const {
+    if(m_ != elements || freq_hz_ <= 0.0 || freq_hz <= 0.0) return false;
     return std::abs(freq_hz - freq_hz_) / freq_hz_ < 0.05;
+}
+
+bool Calib::usable_at(double freq_hz, int elements) const {
+    return n_ >= 2 && same_context(freq_hz, elements);
 }
 
 void Calib::correction(double bearing_deg, std::complex<double>* out, int elements) const {
