@@ -165,6 +165,24 @@ bool bewe_mod_ch_decode_on(bool remote, int ch){
     return false;
 }
 
+// 모듈 워커가 하나라도 돌면 full-rate IQ ring 공급을 켠다.
+//
+// 모듈 워커는 복조 모드와 무관하게 ring 을 직접 탭한다 (mode=NONE 필터에도 붙는다).
+// 그런데 백엔드의 ring 공급 조건은 rec_on / dem_run / mod_wants_ring 셋뿐이라,
+// mode=NONE 채널에 AIS·ADSB·BTLE 를 켜면 세 조건이 전부 거짓이 되어 ring 이 아예
+// 안 채워졌다 — 워커는 lag==0 으로 무한 대기만 하고 진단 로그조차 못 찍는다
+// (2026-08-02 DGS-X: AIS 20분간 복조 0건, 워커 CPU 0.3초).
+//
+// 예전엔 WiFi 모듈만 자기 host_start/stop 에서 이 플래그를 직접 올렸다. 모듈마다
+// 잊어버릴 수 있는 구조라 프레임워크로 옮긴다 — host_mask 가 이미 "어느 채널에서
+// 어느 모듈이 도는가" 를 정확히 들고 있다.
+//
+// 호출측이 g_fw_mtx 를 잡은 상태에서 부른다. 백엔드 hot loop 는 atomic 만 읽는다.
+static void refresh_wants_ring_locked(FFTViewer& v){
+    for(auto& kv : g_fw) if(kv.second.host_mask){ v.mod_wants_ring.store(true, std::memory_order_relaxed); return; }
+    v.mod_wants_ring.store(false, std::memory_order_relaxed);
+}
+
 float bewe_mod_ch_spec_bw(int ch){
     if(ch<0 || ch>=64) return 0.f;
     float best = 0.f;
@@ -183,8 +201,7 @@ void bewe_mod_host_announce(FFTViewer& v){
 }
 
 void bewe_mod_host_mask_clear(FFTViewer& v, const char* id, int ch){
-    (void)v;
-    { std::lock_guard<std::mutex> lk(g_fw_mtx); fw(id).host_mask &= ~(1ull<<ch); }
+    { std::lock_guard<std::mutex> lk(g_fw_mtx); fw(id).host_mask &= ~(1ull<<ch); refresh_wants_ring_locked(v); }
     host_send_state(id);
 }
 
@@ -198,6 +215,7 @@ static void host_apply_set(FFTViewer& v, const BeweModule& m, int ch, bool on){
         std::lock_guard<std::mutex> lk(g_fw_mtx);
         if(on){ fw(m.id).want_mask |= (1ull<<ch); if(ok) fw(m.id).host_mask |= (1ull<<ch); }  // 의도는 시작성공 무관
         else  { fw(m.id).want_mask &= ~(1ull<<ch); fw(m.id).host_mask &= ~(1ull<<ch); }
+        refresh_wants_ring_locked(v);
     }
     if(on && ok) host_decstat_start(m.id, ch);   // decode 시작: 런타임 시각 + 카운트 리셋
     if(!on)      host_decstat_stop(ch);

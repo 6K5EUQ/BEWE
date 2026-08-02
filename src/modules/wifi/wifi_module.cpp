@@ -29,13 +29,11 @@ struct ChWork {
 };
 static ChWork g_w[MAX_CHANNELS];
 static std::mutex g_mgmt;           // start/stop 직렬화 (ACARS 와 동일 race 대비)
-static int        g_active = 0;     // 활성 워커 수 (mod_wants_ring refcount, g_mgmt 보호)
 
 std::atomic<size_t>& worker_rp(int ch){ return g_w[ch].rp; }
 bool worker_stop_req(int ch){ return g_w[ch].stop.load(std::memory_order_relaxed); }
 void worker_natural_exit(FFTViewer& v, int ch){
     g_w[ch].on.store(false);
-    { std::lock_guard<std::mutex> lk(g_mgmt); if(--g_active<=0){ g_active=0; v.mod_wants_ring.store(false); } }
     bewe_mod_host_mask_clear(v, "wifi", ch);
 }
 
@@ -48,7 +46,8 @@ static bool host_start(FFTViewer& v, int ch){
     if(!v.channels[ch].filter_active) return false;      // 복조 모드 무관 — 필터만 있으면 OK
     w.stop.store(false);
     w.on.store(true);
-    if(++g_active==1) v.mod_wants_ring.store(true);       // 첫 워커 → ring 공급 ON
+    // ring 공급(mod_wants_ring)은 프레임워크가 host_mask 로 관리한다 — 모듈이
+    // 각자 refcount 를 들면 WiFi 를 끌 때 AIS 것까지 같이 꺼진다.
     w.thr = std::thread(worker, std::ref(v), ch);
     return true;
 }
@@ -61,7 +60,6 @@ static void host_stop(FFTViewer& v, int ch){
         w.stop.store(true);
         if(w.thr.joinable()) w.thr.join();
         w.on.store(false);
-        if(--g_active<=0){ g_active=0; v.mod_wants_ring.store(false); }   // 마지막 워커 → ring 공급 OFF
     } else if(w.thr.joinable()) w.thr.join();
 }
 
