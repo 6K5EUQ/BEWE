@@ -1026,7 +1026,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                     while(off <= -180.f) off += 360.f;
                     while(off >   180.f) off -= 360.f;
                     ImGui::SameLine();
-                    ImGui::Text("#%d  peak %6.1f  real %6.1f  offset %+6.1f",
+                    ImGui::Text("#%d  peak %6.1f\xC2\xB0  real %6.1f\xC2\xB0  offset %+6.1f\xC2\xB0",
                                 i+1, ci.measured[i], ci.bearing[i], off);
                 }
             }
@@ -1065,7 +1065,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                     vline(f.bearing_deg, IM_COL32(255,220,80,255), "peak");
                     vline(cal_bearing,   IM_COL32(90,255,140,220), "target");
                     ImGui::Dummy(ImVec2(w, h));
-                    ImGui::Text("peak %.1f  target %.1f  SNR %.1f dB",
+                    ImGui::Text("peak %.1f\xC2\xB0  target %.1f\xC2\xB0  SNR %.1f dB",
                                 f.bearing_deg, cal_bearing, f.snr_db);
                 }
             }
