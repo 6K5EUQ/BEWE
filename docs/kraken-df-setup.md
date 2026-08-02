@@ -354,6 +354,38 @@ sudo rm -f /dev/shm/decimator_* /dev/shm/delay_sync_*
 `Requires=` 로 묶어 뒀으므로 `systemctl restart bewe-<station>-daq` 하면
 BEWE 도 함께 재기동되어 순서가 맞는다.
 
+### 2-8. BEWE 만 재시작하면 :5000 에 못 붙는다
+
+**`iq_server` 는 한 번에 클라이언트를 하나만 받는다** (`heimdall_client.hpp`).
+BEWE 를 내리면 그 소켓이 곧바로 정리되지 않고 `CLOSE_WAIT` 로 남는 경우가 있어,
+새로 뜬 BEWE 의 접속이 `SYN_SENT` 에서 영영 대기한다. 로그에는 이렇게 보인다:
+
+```
+[Kraken] no DAQ on 127.0.0.1:5000 (connect 127.0.0.1:5000: Operation now in progress)
+```
+
+DAQ 는 멀쩡히 `active` 이고 체인 5개도 다 돌고 있어 "DAQ 가 죽었나" 로 오진하기
+쉽다. 소켓 상태를 보면 바로 갈린다:
+
+```bash
+sudo lsof -nP -i:5000
+#   iq_server ... 127.0.0.1:5000->127.0.0.1:44608 (CLOSE_WAIT)   <- 구 세션 잔재
+#   BEWE      ... 127.0.0.1:56508->127.0.0.1:5000 (SYN_SENT)     <- 새 BEWE 가 못 붙는다
+```
+
+**그래서 Kraken 기지는 BEWE 단독 재시작을 쓰지 않는다.** DAQ 를 재시작하면
+`Requires=` 로 BEWE 도 같이 내려갔다 올라오고, iq_server 가 새로 뜨면서 소켓도
+정리된다:
+
+```bash
+sudo systemctl restart bewe-<station>-daq     # BEWE 도 함께 재기동된다
+#   sudo systemctl restart bewe-<station>     <- 이것만 하면 위 증상이 난다
+```
+
+정상 복귀는 `ESTABLISHED` 두 줄로 확인한다 (리스너 + 연결된 쌍).
+
+(2026-08-02 v15.2.0 배포 중 실측. 배포 자체는 정상이었고 재시작 순서만 문제였다.)
+
 ---
 
 ## 3. 다른 기지로 확장할 때
@@ -403,14 +435,28 @@ systemctl is-active bewe-<station>-daq bewe-<station>
 tail -20 /var/log/bewe-<station>-daq.log
 grep -a "Kraken\|SDR=" /var/log/bewe-<station>.log | tail -5
 
-# 재기동 (DAQ 를 내리면 Requires= 로 BEWE 도 같이 내려갔다 올라온다)
+# 재기동 — 항상 DAQ 쪽을 친다. Requires= 로 BEWE 도 같이 내려갔다 올라오고,
+# iq_server 가 새로 뜨면서 구 세션 소켓도 정리된다 (§2-8)
 sudo systemctl restart bewe-<station>-daq
+
+# :5000 연결 확인 (ESTABLISHED 두 줄이 정상)
+sudo lsof -nP -i:5000
 
 # DAQ 만 수동으로
 cd ~/krakensdr_doa && ./bewe_df_stop.sh && ./bewe_df_start.sh
 
 # 진단: heimdall 로그 켜기 (끝나면 반드시 되돌릴 것 — §2-2)
 ```
+
+### 새 버전 배포
+
+```bash
+cd ~/BEWE && git pull --ff-only && cmake --build build-cli -j$(nproc)
+./build-cli/BEWE --df-selftest            # DF DSP 회귀 (60/60)
+sudo systemctl restart bewe-<station>-daq  # BEWE 단독 재시작이 아니다 (§2-8)
+```
+
+와이어 포맷이 바뀐 배포는 **Central 을 먼저** 올린다.
 
 DGS-X 실측값 (2026-08-02, 정상 상태):
 
