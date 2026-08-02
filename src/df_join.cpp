@@ -220,6 +220,24 @@ void df_preset_coords(PktDfConfig& p){
     }
 }
 
+// ── 매니폴드 캘리브레이션 (JOIN) ─────────────────────────────────────────
+// 설정과 같은 규약이다: 요약은 HOST 방송본을 그대로 보여주고, 명령은 요청만 보낸다.
+void FFTViewer::df_cal_get(PktDfCalib& out) const {
+    out = PktDfCalib{};
+    if(!net_cli) return;
+    std::lock_guard<std::mutex> lk(net_cli->df_cal_mtx);
+    if(net_cli->df_cal_valid.load()) out = net_cli->df_cal;
+}
+
+void FFTViewer::df_cal_cmd(const PktDfCalib& c){
+    if(net_cli) net_cli->send_df_calib(c);
+}
+
+void FFTViewer::df_broadcast_cal() const {}   // JOIN 은 방송하지 않는다
+// 캘리브 파일은 측정을 하는 쪽(HOST)에만 있다.
+bool FFTViewer::df_cal_save(const char*) const { return false; }
+bool FFTViewer::df_cal_load(const char*)       { return false; }
+
 // HOST 방송을 아직 못 받았을 때 보여줄 기본값. df::Config 의 기본값과 같은 값을
 // 손으로 옮겨 적은 것이다 — GUI 는 df/df_config.hpp 를 include 하지 않기 때문.
 // 이 값은 "첫 방송 전 빈 화면" 을 막는 용도뿐이고, HOST 가 한 번 방송하면 즉시

@@ -649,6 +649,13 @@ void NetClient::handle_packet(PacketType type,
         df_cfg_valid.store(true);
         break;
     }
+    case PacketType::DF_CALIB: {
+        if(len < (int)sizeof(PktDfCalib)) break;
+        std::lock_guard<std::mutex> lk(df_cal_mtx);
+        df_cal = *reinterpret_cast<const PktDfCalib*>(payload);
+        df_cal_valid.store(true);
+        break;
+    }
     case PacketType::DF_RESULT: {
         if(len < (int)sizeof(PktDfResult)) break;
         auto* r = reinterpret_cast<const PktDfResult*>(payload);
@@ -921,6 +928,9 @@ bool NetClient::cmd_set_autoscale(){
 }
 bool NetClient::send_df_config(const PktDfConfig& c){
     return raw_send(PacketType::DF_CONFIG, &c, sizeof(c));
+}
+bool NetClient::send_df_calib(const PktDfCalib& c){
+    return raw_send(PacketType::DF_CALIB, &c, sizeof(c));
 }
 bool NetClient::cmd_df_measure(int dnum, bool from_auto){
     PktCmd c{}; c.cmd=(uint8_t)CmdType::DF_MEASURE;

@@ -576,6 +576,115 @@ void test_xspec(){
 
 } // namespace
 
+// ── 7. 매니폴드 캘리브레이션 ──────────────────────────────────────────────
+// 실제로 고쳐야 하는 상황을 그대로 만든다: 설정에 적힌 좌표와 물리 배열이
+// 다르고, 채널마다 케이블 위상차가 있다. 계산 매니폴드로는 방위가 틀리고,
+// 몇 방위를 실측해 보정을 넣으면 맞아야 한다.
+void test_calib(){
+    printf("[7] manifold calibration\n");
+    const int    M = 5;
+    const double F = 438e6, R_M = 0.20;
+
+    // 설정에 적힌 (믿고 있는) 배열
+    const ArrayGeom believed = make_geom(ArrayType::Uca, M, R_M, Sense::CW);
+
+    // 실제 배열: 반경이 3 cm 크고 소자 두 개가 각도로 어긋나 있다. 줄자로 재고
+    // 손으로 단 배열에서 흔한 정도의 오차다.
+    ArrayGeom truth = make_geom(ArrayType::Uca, M, R_M + 0.03, Sense::CW);
+    { const double a = 8.0 * kPi / 180.0;   // 소자 2 를 8 도 돌린다
+      const double x = truth.x[2], y = truth.y[2];
+      truth.x[2] = x*std::cos(a) - y*std::sin(a);
+      truth.y[2] = x*std::sin(a) + y*std::cos(a); }
+    { const double a = -5.0 * kPi / 180.0;
+      const double x = truth.x[4], y = truth.y[4];
+      truth.x[4] = x*std::cos(a) - y*std::sin(a);
+      truth.y[4] = x*std::sin(a) + y*std::cos(a); }
+
+    // 채널별 고정 위상/이득 오차 (동축 길이차 + LNA 편차)
+    const cd hw[5] = { cd(1,0), std::polar(1.05, 0.55), std::polar(0.92, -0.9),
+                       std::polar(1.11, 1.7), std::polar(0.97, -2.2) };
+
+    Manifold mf_true; mf_true.ensure(F, truth);
+    Manifold mf_bel;  mf_bel .ensure(F, believed);
+
+    // 방위 b 에서 배열이 실제로 보는 벡터 (소자 0 위상 0 으로 정규화)
+    auto observe = [&](double b, cd* out){
+        cd a[kMaxElements];
+        mf_true.steer(b, a);
+        for(int m = 0; m < M; m++) out[m] = a[m] * hw[m];
+        const cd r = std::conj(out[0]) / std::abs(out[0]);
+        for(int m = 0; m < M; m++) out[m] *= r;
+    };
+    // 그 벡터 하나짜리 공분산 (잡음 없는 이상적 관측 — 기하 오차만 보려는 것)
+    auto make_R = [&](const cd* x, cd* R){
+        for(int i = 0; i < M; i++)
+            for(int j = 0; j < M; j++) R[i*M+j] = x[i] * std::conj(x[j]);
+    };
+
+    const double probes[] = { 17.0, 73.0, 128.0, 194.0, 251.0, 310.0 };
+
+    // (a) 보정 전: 믿고 있는 매니폴드로는 방위가 틀린다
+    double worst_before = 0.0;
+    for(double b : probes){
+        cd x[kMaxElements], R[kMaxElements*kMaxElements];
+        observe(b, x); make_R(x, R);
+        Estimate e = estimate_doa(R, M, mf_bel, Algo::Bartlett, 1, 4000, 30.0, -99.0);
+        worst_before = std::max(worst_before, ang_err(e.bearing_deg, b));
+    }
+    check(worst_before > 3.0,
+          "uncalibrated array is off by %.1f deg (the error this exists to fix)", worst_before);
+
+    // (b) 12 방위를 30 도 간격으로 실측해 보정을 만든다
+    Calib cal;
+    cal.set_context(F, M);
+    for(int i = 0; i < 12; i++){
+        const double b = i * 30.0;
+        cd x[kMaxElements], a[kMaxElements];
+        observe(b, x);
+        mf_bel.steer(b, a);
+        const cd r = std::conj(a[0]) / std::abs(a[0]);
+        for(int m = 0; m < M; m++) a[m] *= r;
+        cal.add(b, 30.0, x, a, M);
+    }
+    check(cal.count() == 12, "collected %d calibration points", cal.count());
+
+    // (c) 보정 후: 측정점 사이의 방위에서도 맞아야 한다 (probes 는 30 의 배수가
+    //     아니므로 전부 보간 구간이다 — 표를 그대로 되읽는 게 아니다)
+    Manifold mf_cal; mf_cal.ensure(F, believed, &cal);
+    check(mf_cal.calibrated(), "calibration is applied to the manifold");
+    double worst_after = 0.0;
+    for(double b : probes){
+        cd x[kMaxElements], R[kMaxElements*kMaxElements];
+        observe(b, x); make_R(x, R);
+        Estimate e = estimate_doa(R, M, mf_cal, Algo::Bartlett, 1, 4000, 30.0, -99.0);
+        worst_after = std::max(worst_after, ang_err(e.bearing_deg, b));
+    }
+    check(worst_after < 2.0, "calibrated bearing within %.2f deg (was %.1f)",
+          worst_after, worst_before);
+
+    // (d) 주파수가 멀면 거부해야 한다 — 틀린 보정은 무보정보다 나쁘다
+    check(!cal.usable_at(F * 1.2, M), "calibration refused 20%% away in frequency");
+    check( cal.usable_at(F * 1.01, M), "calibration accepted 1%% away");
+    check(!cal.usable_at(F, M-1),      "calibration refused on a different element count");
+
+    // (e) 저장/복원 왕복
+    {
+        const char* path = "/tmp/bewe_df_calib_selftest.txt";
+        check(cal.save(path), "calibration saved");
+        Calib rd;
+        check(rd.load(path), "calibration loaded");
+        cd c0[kMaxElements], c1[kMaxElements];
+        double worst = 0.0;
+        for(double b = 0; b < 360; b += 7){
+            cal.correction(b, c0, M);
+            rd .correction(b, c1, M);
+            for(int m = 0; m < M; m++) worst = std::max(worst, std::abs(c0[m]-c1[m]));
+        }
+        check(worst < 1e-6, "round-trip preserves the correction (max dev %.2e)", worst);
+        remove(path);
+    }
+}
+
 int run_selftest(int verbosity){
     g_fail = g_run = 0; g_verb = verbosity;
     printf("=== DF selftest ===\n");
@@ -585,6 +694,7 @@ int run_selftest(int verbosity){
     test_resolution();
     test_accept();
     test_xspec();
+    test_calib();
     printf("=== %d/%d checks passed ===\n", g_run - g_fail, g_run);
     return g_fail;
 }

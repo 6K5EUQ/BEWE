@@ -66,6 +66,9 @@ public:
         double snr_db[kMaxCalPoints]  = {};
     };
     CalInfo cal_info() const;
+    // 파일로 남기고 되읽는다. 경로는 호출측(스테이션별 파일)이 정한다.
+    bool cal_save(const char* path) const;
+    bool cal_load(const char* path);
 
     // ── ch0 탭 (BEWE 스펙트럼용) ─────────────────────────────────────────
     // DAQ 스레드에서 프레임마다 호출된다. 블로킹 금지 — 필요한 만큼 복사하고

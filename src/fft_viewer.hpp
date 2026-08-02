@@ -1010,6 +1010,20 @@ public:
     bool df_set_gain_index(int idx, char* err, size_t errn);
     // 설정이 바뀌었을 때 HOST 가 정본을 뿌린다 (JOIN 접속 시에도).
     void df_broadcast_cfg() const;
+
+    // ── 매니폴드 캘리브레이션 ────────────────────────────────────────────
+    // df_cal_get : 현재 요약 (HOST 는 엔진에서, JOIN 은 HOST 방송본에서)
+    // df_cal_cmd : capture/clear/remove. HOST 는 즉시 실행 + 방송, JOIN 은 요청만
+    void df_cal_get(PktDfCalib& out) const;
+    void df_cal_cmd(const PktDfCalib& c);
+    void df_broadcast_cal() const;
+    // 캘리브 세트 영속화. host_state 와 수명이 달라(이륙 전 1회 vs 상시) 파일을
+    // 따로 쓴다. 경로는 호출측(cli_host)이 스테이션 이름으로 만들어 여기 박아두고,
+    // 이후 캘리브가 바뀔 때마다 df_cal_cmd 가 알아서 저장한다 — 운용자가 저장을
+    // 따로 눌러야 한다면 언젠가 잊는다.
+    bool df_cal_save(const char* path) const;
+    bool df_cal_load(const char* path);
+    std::string df_cal_path;
     double df_snr_threshold() const;   // 편의 접근 (수락 규칙 표시용)
     // 설정 패널 실시간 판독. 문자열 하나 + 스칼라 몇 개로 끝낸다.
     struct DFLive {

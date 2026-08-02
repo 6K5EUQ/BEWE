@@ -835,4 +835,61 @@ double FFTViewer::df_snr_threshold() const {
     return p.snr_thr_db;
 }
 
+// ── 매니폴드 캘리브레이션 (HOST) ─────────────────────────────────────────
+void FFTViewer::df_cal_get(PktDfCalib& out) const {
+    out = PktDfCalib{};
+    auto& K = kst();
+    if(!K.engine) return;
+    const df::Engine::CalInfo ci = K.engine->cal_info();
+    out.cmd          = 0;
+    out.n            = (uint8_t)std::min(ci.n, 36);
+    out.elements     = (uint8_t)ci.elements;
+    out.active       = ci.active ? 1 : 0;
+    out.freq_hz      = ci.freq_hz;
+    out.worst_dev_db = (float)ci.worst_dev_db;
+    for(int i = 0; i < out.n; i++){
+        out.bearing[i] = (float)ci.bearing[i];
+        out.snr_db[i]  = (float)ci.snr_db[i];
+    }
+}
+
+void FFTViewer::df_cal_cmd(const PktDfCalib& c){
+    auto& K = kst();
+    if(!K.engine) return;
+    char err[64] = {};
+    switch(c.cmd){
+    case 1: K.engine->cal_add((double)c.arg_deg, err, sizeof err); break;
+    case 2: K.engine->cal_clear(); break;
+    case 3: K.engine->cal_remove((int)c.arg_deg); break;
+    default: return;                       // 0 은 요약이라 HOST 가 받을 일이 없다
+    }
+    // 결과를 즉시 정본으로 뿌린다. 실패 사유도 같이 실어 JOIN 이 왜 안 됐는지
+    // 알 수 있게 한다 (성공이면 빈 문자열).
+    if(net_srv){
+        PktDfCalib p{}; df_cal_get(p);
+        snprintf(p.err, sizeof p.err, "%s", err);
+        net_srv->broadcast_df_calib(p);
+    }
+    // 바뀌었으면 곧바로 파일로 남긴다. 캘리브는 이륙 전에 한 번 잡는 값이라
+    // 저장을 따로 누르게 하면 언젠가 잊고 재부팅한다.
+    if(!df_cal_path.empty() && err[0] == 0) df_cal_save(df_cal_path.c_str());
+}
+
+bool FFTViewer::df_cal_save(const char* path) const {
+    auto& K = kst();
+    return K.engine ? K.engine->cal_save(path) : false;
+}
+
+bool FFTViewer::df_cal_load(const char* path){
+    auto& K = kst();
+    return K.engine ? K.engine->cal_load(path) : false;
+}
+
+void FFTViewer::df_broadcast_cal() const {
+    if(!net_srv) return;
+    PktDfCalib p{};
+    df_cal_get(p);
+    net_srv->broadcast_df_calib(p);
+}
+
 

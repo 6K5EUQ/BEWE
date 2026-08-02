@@ -182,6 +182,16 @@ void Engine::cal_remove(int idx){
     d_->cal.remove_at(idx);
 }
 
+bool Engine::cal_save(const char* path) const {
+    std::lock_guard<std::mutex> lk(d_->cal_mtx);
+    return d_->cal.save(path);
+}
+
+bool Engine::cal_load(const char* path){
+    std::lock_guard<std::mutex> lk(d_->cal_mtx);
+    return d_->cal.load(path);
+}
+
 Engine::CalInfo Engine::cal_info() const {
     CalInfo o;
     std::lock_guard<std::mutex> lk(d_->cal_mtx);

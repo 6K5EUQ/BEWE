@@ -322,6 +322,12 @@ public:
     PktDfConfig  df_cfg{};
     std::atomic<bool> df_cfg_valid{false};
 
+    // 캘리브레이션. 명령은 JOIN -> HOST, 요약은 HOST -> JOIN 정본이다.
+    bool send_df_calib(const PktDfCalib& c);
+    std::mutex   df_cal_mtx;
+    PktDfCalib   df_cal{};
+    std::atomic<bool> df_cal_valid{false};
+
     // ── HOST 가 방송한 DF 측정 결과 (DF_RESULT 0x60) ──────────────────────
     // 한 칸 슬롯 + 세대 카운터. UI 는 seq 변화를 보고 소비한다 — 큐를 두면
     // 패널이 닫혀 있는 동안 쌓였다가 열 때 한꺼번에 쏟아진다.

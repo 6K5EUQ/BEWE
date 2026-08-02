@@ -157,6 +157,8 @@ struct ServerCallbacks {
     std::function<void(int dnum, bool from_auto)>   on_df_measure;
     std::function<void(int snr_db)>                 on_df_set_snr;
     std::function<void(const PktDfConfig&)>         on_df_set_config;
+        // 캘리브 명령 (capture/clear/remove). HOST 가 실행하고 요약을 되쏜다.
+        std::function<void(const PktDfCalib&)> on_df_calib_cmd;
     std::function<void(int ch_idx, uint8_t op_idx, bool enable)> on_toggle_recv;
     std::function<void(int idx, float s, float e)>   on_update_ch_range;
     std::function<void()>                            on_toggle_tm_iq;
@@ -343,6 +345,7 @@ public:
 
     // HW status → all clients
     void broadcast_df_config(const PktDfConfig& c);
+    void broadcast_df_calib(const PktDfCalib& c);
     // spec360 이 null 이 아니면 payload 말미에 360 B 를 이어붙인다.
     void broadcast_df_result(const PktDfResult& r, const uint8_t* spec360);
     void broadcast_df_status(const PktDfStatus& s);

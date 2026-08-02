@@ -360,7 +360,9 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
     // 배열 에디터에서 끌고 있는 소자(-1=없음). 캔버스는 ImGui 아이템이 아니라
     // IsAnyItemActive() 에 안 잡힌다 — 이걸 같이 보지 않으면 끄는 도중 매 프레임
     // ui 가 canon 으로 덮여 소자가 제자리로 튕겨 돌아간다.
-    static int arr_drag = -1;
+    static int   arr_drag = -1;
+    static float arr_px_per_m = 0.f;   // 배열 에디터 축척 (0=아직 안 잡힘)
+    static float cal_bearing  = 0.f;   // 캘리브: 지금 쏘고 있는 송신기의 참 방위
     const double now = ImGui::GetTime();
     if(just_opened){ ui = canon; hold_until = 0.0; arr_drag = -1; }
     if(!(ImGui::IsAnyItemActive() || arr_drag >= 0 || now < hold_until)) ui = canon;
@@ -1013,6 +1015,83 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         ImGui::SetNextItemWidth(150);
         ImGui::SliderFloat("LOB length (km)", &lob_km, 10.f, 500.f, "%.0f");
 
+        // ── 매니폴드 캘리브레이션 ─────────────────────────────────────────
+        // 아는 방위에서 실제로 쏴 보고, 그때 배열이 본 조향벡터를 이론값과
+        // 비교해 보정을 만든다. 좌표 오차·케이블 편차·상호결합·기체 산란이
+        // 전부 이 한 표에 흡수된다 (계산으로는 어느 것도 못 잡는다).
+        ImGui::Dummy(ImVec2(0,6)); ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.8f,0.8f,1.f,1.f), "CALIBRATION");
+        {
+            PktDfCalib ci{}; v.df_cal_get(ci);
+
+            ImGui::SetNextItemWidth(90);
+            ImGui::InputFloat("##cal_brg", &cal_bearing, 0.f, 0.f, "%.1f");
+            ImGui::SameLine();
+            if(ImGui::Button("capture")){
+                PktDfCalib cmd{}; cmd.cmd = 1; cmd.arg_deg = cal_bearing;
+                v.df_cal_cmd(cmd);
+            }
+            ImGui::SameLine(); ImGui::TextDisabled("deg");
+            ImGui::SameLine();
+            if(ImGui::SmallButton("clear")){ PktDfCalib cmd{}; cmd.cmd = 2; v.df_cal_cmd(cmd); }
+
+            if(ci.err[0])
+                ImGui::TextColored(ImVec4(1.f,0.5f,0.4f,1.f), "%s", ci.err);
+
+            if(ci.n > 0){
+                ImGui::Text("%d pts  %.4f MHz  dev %.1f dB",
+                            (int)ci.n, ci.freq_hz/1e6, ci.worst_dev_db);
+                ImGui::TextColored(ci.active ? ImVec4(0.4f,0.9f,0.5f,1.f)
+                                             : ImVec4(0.7f,0.7f,0.4f,1.f),
+                                   ci.active ? "applied" : "not applied at this frequency");
+                // 측정된 방위들. 어디가 비었는지 한눈에 보이는 게 목적이라
+                // 표가 아니라 나열이다.
+                char line[256] = {}; int used = 0;
+                for(int i = 0; i < ci.n && used < (int)sizeof(line)-8; i++)
+                    used += snprintf(line+used, sizeof(line)-used, "%.0f ", ci.bearing[i]);
+                ImGui::TextWrapped("%s", line);
+                for(int i = 0; i < ci.n; i++){
+                    char bid[24]; snprintf(bid, sizeof bid, "x##cal%d", i);
+                    if(i) ImGui::SameLine();
+                    if(ImGui::SmallButton(bid)){
+                        PktDfCalib cmd{}; cmd.cmd = 3; cmd.arg_deg = (float)i;
+                        v.df_cal_cmd(cmd);
+                    }
+                }
+            }
+
+            // 직전 측정의 의사스펙트럼. 캘리브 중에는 "지금 쏜 게 제대로
+            // 잡히는가" 를 이걸로 판단한다 — 주엽이 입력한 방위에 서 있고
+            // 부엽이 충분히 낮아야 그 점을 표에 넣을 값어치가 있다.
+            if(v.df_hist_n > 0){
+                const FFTViewer::DFFix& f = v.df_hist_at(v.df_hist_n - 1);
+                if(f.has_spec){
+                    const float w = ImGui::GetContentRegionAvail().x - 4.f;
+                    const float h = 70.f;
+                    const ImVec2 o = ImGui::GetCursorScreenPos();
+                    ImDrawList* d = ImGui::GetWindowDrawList();
+                    d->AddRectFilled(o, ImVec2(o.x+w, o.y+h), IM_COL32(10,12,18,255));
+                    // spec_q 는 0..255 로 양자화된 0..-51 dB (0.2 dB/LSB 규약).
+                    for(int x = 0; x < (int)w; x++){
+                        const int b  = (int)((float)x / w * 360.f) % 360;
+                        const float q = f.spec_q[b] / 255.f;
+                        d->AddLine(ImVec2(o.x+x, o.y+h), ImVec2(o.x+x, o.y+h - q*h),
+                                   IM_COL32(70,150,220,255));
+                    }
+                    // 보고된 방위(주엽)와 지금 입력한 방위를 같이 긋는다.
+                    auto vline = [&](float deg, ImU32 col){
+                        const float x = o.x + std::fmod(deg+360.f, 360.f) / 360.f * w;
+                        d->AddLine(ImVec2(x, o.y), ImVec2(x, o.y+h), col);
+                    };
+                    vline(f.bearing_deg, IM_COL32(255,220,80,255));
+                    vline(cal_bearing,   IM_COL32(90,255,140,160));
+                    ImGui::Dummy(ImVec2(w, h));
+                    ImGui::Text("peak %.1f  target %.1f  SNR %.1f dB",
+                                f.bearing_deg, cal_bearing, f.snr_db);
+                }
+            }
+        }
+
         // ── 배열 에디터 ───────────────────────────────────────────────────
         // 위에서 내려다본 배치. 소자를 끌어 옮기면 array 가 Custom 으로 바뀌고
         // 좌표가 정본이 된다. 프리셋으로 되돌리려면 위 콤보에서 다시 고르면 된다.
@@ -1033,15 +1112,25 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
 
             const int nel = (c.elements < 1) ? 1 : ((c.elements > 8) ? 8 : c.elements);
 
-            // 스케일: 배열이 항상 화면의 70% 를 채우게. lambda/2 원도 들어오면
-            // 같이 담아 격자엽 한계를 눈으로 비교할 수 있게 한다. 가로/세로 중
-            // 좁은 쪽을 기준으로 잡아야 어느 축으로도 안 잘린다.
-            float ext = 0.05f;
-            for(int m = 0; m < nel; m++)
-                ext = std::max(ext, std::max(std::fabs(c.elem_x[m]), std::fabs(c.elem_y[m])));
+            // 축척은 운용자가 잡는다. 자동으로 맞추면 소자를 끌 때마다 배경이
+            // 같이 움직여 어디로 가고 있는지 알 수 없다. 처음 한 번만 배열이
+            // 화면에 들어오게 맞추고, 그 뒤로는 휠로만 바뀐다.
             const float half_lam = (L.lambda_m > 0.0) ? (float)(L.lambda_m * 0.5) : 0.f;
-            if(half_lam > 0.f) ext = std::max(ext, half_lam * 0.55f);
-            const float px_per_m = (std::min(cw, ch_) * 0.35f) / ext;   // 반쪽이 70%/2
+            if(arr_px_per_m <= 0.f){
+                float ext = 0.05f;
+                for(int m = 0; m < nel; m++)
+                    ext = std::max(ext, std::max(std::fabs(c.elem_x[m]), std::fabs(c.elem_y[m])));
+                if(half_lam > 0.f) ext = std::max(ext, half_lam * 0.55f);
+                arr_px_per_m = (std::min(cw, ch_) * 0.35f) / ext;
+            }
+            if(ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(org, ImVec2(org.x+cw, org.y+ch_))){
+                const float wheel = ImGui::GetIO().MouseWheel;
+                if(wheel != 0.f){
+                    arr_px_per_m *= std::pow(1.15f, wheel);
+                    arr_px_per_m = std::max(20.f, std::min(20000.f, arr_px_per_m));
+                }
+            }
+            const float px_per_m = arr_px_per_m;
 
             dl->AddRectFilled(org, ImVec2(org.x+cw, org.y+ch_), IM_COL32(12,14,20,255));
 
@@ -1114,8 +1203,7 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
                 const bool on = (arr_drag == m);
                 dl->AddCircleFilled(p, on ? 8.f : 6.f,
                                     on ? IM_COL32(255,200,60,255) : IM_COL32(90,170,255,255));
-                char id[40];
-                snprintf(id, sizeof id, "%d  %.1f,%.1f", m, c.elem_x[m]*100.f, c.elem_y[m]*100.f);
+                char id[8]; snprintf(id, sizeof id, "%d", m);
                 dl->AddText(ImVec2(p.x+9, p.y-7),
                             on ? IM_COL32(255,230,150,255) : IM_COL32(210,220,240,255), id);
             }

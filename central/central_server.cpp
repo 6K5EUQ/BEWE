@@ -1177,7 +1177,8 @@ void CentralServer::dispatch_to_joins(std::shared_ptr<HostRoom> room,
                     // 소형 패킷이라 ctrl 큐에 부담이 안 된다.
                     bewe_type == 0x5F ||                 // DF_CONFIG (정본 설정)
                     bewe_type == 0x60 ||                 // DF_RESULT (측정 결과)
-                    bewe_type == 0x61);                  // DF_STATUS (DAQ 판독, 2s)
+                    bewe_type == 0x61 ||                 // DF_STATUS (DAQ 판독, 2s)
+                    bewe_type == 0x62);                  // DF_CALIB (캘리브 명령/요약)
     // joins 스냅샷 후 lock 해제 — enqueue_file이 BLOCK 될 수 있어 joins_mtx 잡고 있으면 안 됨
     static thread_local std::vector<std::shared_ptr<JoinEntry>> targets;
     targets.clear();

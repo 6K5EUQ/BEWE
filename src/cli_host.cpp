@@ -871,7 +871,19 @@ void run_cli_host(){
     // ── SDR init ─────────────────────────────────────────────────────────
     // 부팅 직후 USB 재열거/느린 부팅과 겹칠 수 있어 5회(2초 간격)까지 재시도 후 포기.
     std::thread cap;
+    // 캘리브 세트 경로. 엔진이 뜬 뒤에 읽어야 하므로 initialize 다음에 로드한다.
+    {
+        std::string s = station_str.empty() ? "default" : station_str;
+        for(char& ch : s) if(ch=='/' || ch=='\\') ch='_';
+        v.df_cal_path = BEWEPaths::data_dir() + "/df_calib_" + s + ".txt";
+    }
+
     bool sdr_ok = v.initialize(cf, init_sr);
+    if(sdr_ok && v.df_cal_load(v.df_cal_path.c_str())){
+        PktDfCalib ci{}; v.df_cal_get(ci);
+        bewe_log_push(0,"[BEWE CLI] restored DF calibration: %d points at %.4f MHz\n",
+                      (int)ci.n, ci.freq_hz/1e6);
+    }
     for(int retry = 2; retry <= 5 && !sdr_ok; retry++){
         bewe_log_push(0,"[BEWE CLI] SDR init failed, retry %d/5 in 2s ...\n", retry);
         std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -960,6 +972,7 @@ void run_cli_host(){
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             v.mission_broadcast_sync(); // AUTH_ACK 이후 전송 — pre-auth skip 방지
             v.df_broadcast_cfg();       // LAN 직결 JOIN 은 Central conn_open 훅을 안 탄다
+            v.df_broadcast_cal();       // 캘리브 요약도 정본이다 (설정과 같은 이유)
         }).detach();
         bewe_log_push(0,"[CLI] Client authenticated: idx=%d\n", idx);
         return true;
@@ -1052,6 +1065,9 @@ void run_cli_host(){
             }
         }
         v.df_set_cfg(c);          // 적용 + 정본 재방송
+    };
+    srv->cb.on_df_calib_cmd = [&](const PktDfCalib& c){
+        v.df_cal_cmd(c);          // 실행 + 요약 재방송 (실패 사유 포함)
     };
     srv->cb.on_df_set_snr = [&](int snr_db){
         PktDfConfig c{}; v.df_get_cfg(c);
@@ -1986,6 +2002,7 @@ void run_cli_host(){
                     // 기본값을 들고 있다가 첫 조작에서 HOST 의 실제 설정을 덮어쓴다
                     // (host_state 에 영속화까지 되어 재시작해도 살아남는다).
                     v.df_broadcast_cfg();
+                    v.df_broadcast_cal();
                     // LIVE_START는 JOIN이 STREAM 버튼으로 명시 요청(LWF_LIVE_REQ)할 때만 unicast.
                     // mission_sync는 on_auth 200ms 스레드에서 AUTH_ACK 이후에 전송 (pre-auth 전송 시 JOIN이 skip함)
                 });

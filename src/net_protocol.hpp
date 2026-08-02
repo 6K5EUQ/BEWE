@@ -153,6 +153,11 @@ enum class PacketType : uint8_t {
                                     // 여러 JOIN 이 동시에 만져도 한 값으로 수렴한다.
     DF_RESULT              = 0x60,  // host → join: PktDfResult (+ 말미 360 B 스펙트럼)
     DF_STATUS              = 0x61,  // host → join: PktDfStatus. Kraken HOST 만 2초 주기
+    DF_CALIB               = 0x62,  // 양방향: PktDfCalib.
+                                    //   JOIN -> HOST : 캘리브 명령 (capture/clear/remove)
+                                    //   HOST -> JOIN : 현재 캘리브 요약 (정본)
+                                    // 보정 계수 자체는 HOST 에만 있다 — 36점 x 8소자
+                                    // 복소수라 실어 나를 이유가 없고, 쓰는 쪽도 HOST 다.
 };
 
 // ── Packet header (9 bytes, packed) ──────────────────────────────────────
@@ -697,6 +702,25 @@ struct __attribute__((packed)) PktDfConfig {
     float    elem_y[8];              // m, (북쪽 +)
 };
 static_assert(sizeof(PktDfConfig) == 104, "PktDfConfig wire size changed - bump protocol");
+
+// ── DF_CALIB (양방향) ─────────────────────────────────────────────────────
+// 매니폴드 캘리브레이션의 제어 채널. 보정 계수는 HOST 소유이고 여기 싣지 않는다
+// — JOIN 이 알아야 하는 건 "몇 점이 어느 방위에 잡혀 있고, 지금 걸려 있는가" 뿐이다.
+//
+// JOIN -> HOST 는 cmd 와 그 인자만 의미가 있고, HOST -> JOIN 은 cmd=0(요약)으로
+// 나머지 필드를 채워 방송한다. DF_CONFIG 와 같은 정본 규약이다.
+struct __attribute__((packed)) PktDfCalib {
+    uint8_t  cmd;             // 0=요약(HOST->JOIN) 1=capture 2=clear 3=remove
+    uint8_t  n;               // 측정점 수 (요약)
+    uint8_t  elements;        // 그 세트의 소자 수 (요약)
+    uint8_t  active;          // 지금 매니폴드에 실제로 걸려 있나 (요약)
+    float    arg_deg;         // capture: 송신기 방위. remove: 인덱스를 실수로
+    double   freq_hz;         // 세트가 묶인 주파수 (요약)
+    float    worst_dev_db;    // 보정 크기 최댓값 — 배열이 모델과 얼마나 다른가
+    float    bearing[36];     // 측정된 방위들 (요약)
+    float    snr_db[36];      // 각 측정의 eig SNR (요약)
+    char     err[64];         // capture 실패 사유 (HOST->JOIN, 비면 성공)
+};
 
 // ── DF_RESULT (HOST → JOIN) ───────────────────────────────────────────────
 // GUI 는 JOIN 전용이라 DF 엔진을 링크하지 않는다. 그래서 v13.20 의 역할 분리

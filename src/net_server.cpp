@@ -475,6 +475,11 @@ void NetServer::handle_packet(std::shared_ptr<ClientConn> c,
         if(cb.on_df_set_config) cb.on_df_set_config(*reinterpret_cast<const PktDfConfig*>(payload));
         break;
     }
+    case PacketType::DF_CALIB: {
+        if(!c->authed || len < sizeof(PktDfCalib)) break;
+        if(cb.on_df_calib_cmd) cb.on_df_calib_cmd(*reinterpret_cast<const PktDfCalib*>(payload));
+        break;
+    }
     case PacketType::BAND_ADD: {
         if(!c->authed || len < sizeof(PktBandEntry)) break;
         if(cb.on_band_add) cb.on_band_add(*reinterpret_cast<const PktBandEntry*>(payload));
@@ -891,6 +896,13 @@ void NetServer::broadcast_disk_stat(uint64_t free_bytes, uint64_t total_bytes, c
 // HOST 가 적용한 설정을 정본으로 뿌린다. 변경 시 + JOIN 접속 시 보낸다.
 void NetServer::broadcast_df_config(const PktDfConfig& c){
     auto pkt = make_packet(PacketType::DF_CONFIG, &c, sizeof(c));
+    if(cb.on_relay_broadcast)
+        cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
+}
+
+// 캘리브 요약도 정본이다 — 설정과 같은 이유로 드롭 불가 큐를 탄다.
+void NetServer::broadcast_df_calib(const PktDfCalib& c){
+    auto pkt = make_packet(PacketType::DF_CALIB, &c, sizeof(c));
     if(cb.on_relay_broadcast)
         cb.on_relay_broadcast(pkt.data(), pkt.size(), false);
 }

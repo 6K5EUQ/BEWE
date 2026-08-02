@@ -82,6 +82,14 @@ public:
     // 다시 잡아도 다음 ensure 가 테이블을 새로 만들어야 한다).
     uint32_t stamp() const { return stamp_; }
 
+    // ── 영속화 ───────────────────────────────────────────────────────────
+    // host_state.json 이 아니라 별도 파일이다. 36 점 x 8 소자 x 복소수면
+    // host_state 가 통째로 캘리브 계수로 뒤덮이고, 그 파일은 채널·주파수 복원
+    // 때문에 자주 다시 쓰인다. 캘리브는 이륙 전에 한 번 잡고 마는 값이라
+    // 수명이 전혀 다르다.
+    bool save(const char* path) const;
+    bool load(const char* path);
+
 private:
     CalPoint pts_[kMaxCalPoints];
     int      n_ = 0;

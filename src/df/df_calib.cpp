@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace df {
 
@@ -116,6 +117,53 @@ void Calib::correction(double bearing_deg, std::complex<double>* out, int elemen
         const double p = p0 + dp * t;
         out[m] = std::polar(r, p);
     }
+}
+
+// ── 영속화 ───────────────────────────────────────────────────────────────
+// 한 줄에 한 측정점인 평문이다. 사람이 열어 확인·수정할 수 있어야 하고 (현장에서
+// "3번 점이 이상하다" 를 눈으로 찾는다), 파서를 따로 들일 만큼 복잡하지도 않다.
+//
+//   ver freq_hz elements n
+//   bearing snr re0 im0 re1 im1 ...
+bool Calib::save(const char* path) const {
+    FILE* f = fopen(path, "w");
+    if(!f) return false;
+    fprintf(f, "1 %.6f %d %d\n", freq_hz_, m_, n_);
+    for(int i = 0; i < n_; i++){
+        fprintf(f, "%.4f %.2f", pts_[i].bearing_deg, pts_[i].snr_db);
+        for(int m = 0; m < m_; m++)
+            fprintf(f, " %.9g %.9g", pts_[i].corr[m].real(), pts_[i].corr[m].imag());
+        fputc('\n', f);
+    }
+    fclose(f);
+    return true;
+}
+
+bool Calib::load(const char* path){
+    FILE* f = fopen(path, "r");
+    if(!f) return false;
+    int ver = 0, m = 0, n = 0; double fz = 0;
+    if(fscanf(f, "%d %lf %d %d", &ver, &fz, &m, &n) != 4 || ver != 1
+       || m < 1 || m > kMaxElements || n < 0 || n > kMaxCalPoints){
+        fclose(f); return false;
+    }
+    clear();
+    freq_hz_ = fz; m_ = m;
+    for(int i = 0; i < n; i++){
+        CalPoint p;
+        if(fscanf(f, "%lf %lf", &p.bearing_deg, &p.snr_db) != 2){ break; }
+        bool bad = false;
+        for(int k = 0; k < m; k++){
+            double re = 0, im = 0;
+            if(fscanf(f, "%lf %lf", &re, &im) != 2){ bad = true; break; }
+            p.corr[k] = std::complex<double>(re, im);
+        }
+        if(bad) break;
+        pts_[n_++] = p;
+    }
+    fclose(f);
+    stamp_++;
+    return n_ > 0;
 }
 
 double Calib::worst_dev_db() const {
