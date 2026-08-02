@@ -196,8 +196,11 @@ The 2-month HOST retention exists to bound storage at forward and low-cost sites
 | Document | Audience |
 |---|---|
 | `README.md` | Program officers, procurement, operations leadership |
-| [`INSTALL.md`](INSTALL.md) | Systems administrators provisioning sites and the Central Server |
-| [`OPERATOR.md`](OPERATOR.md) | Analysts and shift operators (key bindings, daily workflows, troubleshooting) |
+| [`docs/INSTALL.md`](docs/INSTALL.md) | Systems administrators provisioning sites and the Central Server |
+| [`docs/OPERATOR.md`](docs/OPERATOR.md) | Analysts and shift operators (key bindings, daily workflows, troubleshooting) |
+| [`docs/CENTRAL_SETUP.md`](docs/CENTRAL_SETUP.md) | Detailed Central Server runbook |
+| [`docs/OPERATOR_PI5_TUNING.md`](docs/OPERATOR_PI5_TUNING.md) | Raspberry Pi 5 power and thermal tuning |
+| [`docs/kraken-df-setup.md`](docs/kraken-df-setup.md) | KrakenSDR direction-finding site setup and troubleshooting |
 
 ---
 
