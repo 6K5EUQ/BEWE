@@ -191,7 +191,8 @@ void worker(FFTViewer& v, int ch_idx){
             int cls=-1, cls2=-1; float conf=0.f, conf2=0.f;
             if(amc_ai_infer(ch_idx, m.t_ms, (uint32_t)llround(fs_out), (uint32_t)llround(bw_hz),
                             cap_trig, cap.data(), AMC_CAP,
-                            cls, conf, cls2, conf2, m.model, sizeof(m.model))){
+                            cls, conf, cls2, conf2, m.model, sizeof(m.model),
+                            m.p, AMC_NCLASS)){
                 m.cls=cls; m.conf=conf; m.cls2=cls2; m.conf2=conf2;
                 host_emit(v, m);
             }

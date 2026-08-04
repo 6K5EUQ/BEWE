@@ -5772,6 +5772,24 @@ void run_streaming_viewer(){
                                 if(det_on) ImGui::PopStyleColor();
                             }
 
+                            // 모듈이 요청한 채널 버튼 (ch_btn). 코어는 어느 모듈인지 모른다 —
+                            // 등록된 것을 훑어 그릴 뿐이라 모듈 폴더를 지우면 버튼도 같이 사라진다.
+                            // 색 규약은 AUTO DF 와 동일: 불가=빨강, 가능·꺼짐=기본, 켜짐=초록.
+                            {
+                                const char* stn = bewe_mod_my_station();
+                                for(const auto& mm : bewe_modules()){
+                                    if(!mm.ch_btn) continue;
+                                    ImGui::SameLine(0,6);
+                                    bool avail = bewe_mod_avail(mm.id, stn);
+                                    bool on    = avail && bewe_mod_ch_on(mm.id, stn, ci);
+                                    if(!avail)  ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(0.6f,0.1f,0.1f,1.f));
+                                    else if(on) ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(0.1f,0.55f,0.1f,1.f));
+                                    if(ImGui::SmallButton(mm.ch_btn) && avail)
+                                        bewe_mod_set_target(v, mm.id, stn, ci, !on);
+                                    if(!avail || on) ImGui::PopStyleColor();
+                                }
+                            }
+
                             ImGui::PopID();
                     }; // end render_channel_row
 
@@ -6194,6 +6212,20 @@ void run_streaming_viewer(){
                             ImGui::Unindent(8.f);
                         }
                         ImGui::Spacing();
+
+                        // ── 모듈이 요청한 STATUS 섹션 (panel/draw_panel) ──────
+                        // Record 와 같은 접이식 헤더를 그대로 쓴다. 코어는 제목도
+                        // 내용도 모르고 모듈이 준 것을 그릴 뿐이라, 모듈을 지우면
+                        // 이 섹션 자체가 사라진다.
+                        for(const auto& mm : bewe_modules()){
+                            if(!mm.panel || !mm.draw_panel) continue;
+                            if(ImGui::CollapsingHeader(mm.panel)){
+                                ImGui::Indent(8.f);
+                                mm.draw_panel(v);
+                                ImGui::Unindent(8.f);
+                            }
+                            ImGui::Spacing();
+                        }
 
                     }
                     ImGui::Spacing();

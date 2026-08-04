@@ -79,20 +79,14 @@ static void on_ch_stop(FFTViewer& v, int ch){
     }
 }
 
-// ── 자동 무장/해제 (HOST, ~1Hz) ────────────────────────────────────────────
-// "채널을 detect 필터로 두면 AMC 가 자동으로 붙는다" 는 요구가 여기 한 곳에 있다.
-// 상태가 바뀔 때만 set_target 을 부른다 — 매 틱 부르면 host_send_state 가 1초마다
-// JOIN 전체로 나간다.
-static bool g_armed[MAX_CHANNELS] = {};
+// ── HOST 주기 훅 (~1Hz) ────────────────────────────────────────────────────
+// 무장은 운용자가 채널 행의 AMC 버튼으로 한다 (기본 꺼짐). 여기서는 이 기지가
+// 실제로 분류를 할 수 있는지(venv/모델 설치 여부)만 알린다 — JOIN 이 그걸 받아
+// 버튼을 파랑(가능)/빨강(불가)으로 그린다. 안 그러면 눌러도 아무 일이 없는데
+// 이유를 알 수 없다.
 static void host_poll(FFTViewer& v){
-    const char* st = bewe_mod_my_station();
-    for(int ch=0; ch<MAX_CHANNELS; ch++){
-        bool want = v.channels[ch].filter_active
-                 && v.channels[ch].det_on.load(std::memory_order_relaxed);
-        if(want == g_armed[ch]) continue;
-        g_armed[ch] = want;
-        bewe_mod_set_target(v, "amc", st, ch, want);
-    }
+    (void)v;
+    bewe_mod_set_avail("amc", amc_ai_enabled());   // 변화 있을 때만 방송된다
 }
 
 // ── 수동 실행 ('a' 키) ─────────────────────────────────────────────────────
@@ -259,6 +253,9 @@ static bool s_reg = [](){
     m.spec_bw_hz   = 0.0f;
 #ifndef BEWE_HEADLESS
     m.draw_content = &draw_content;
+    m.ch_btn       = "AMC";      // 채널 행 DET 오른쪽 버튼
+    m.panel        = "Automatic Modulation Classification";
+    m.draw_panel   = &draw_panel;
 #endif
     m.host_poll  = &host_poll;
     m.host_start = &host_start;

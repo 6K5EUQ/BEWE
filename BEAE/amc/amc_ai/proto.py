@@ -25,8 +25,11 @@ TYPE_INFER = 1
 # after the len prefix: magic..trig = 28 bytes
 REQ_HDR = struct.Struct("<IHHIqIHBB")
 assert REQ_HDR.size == 28
-RSP = struct.Struct("<IIHHBBBBHHH")
-assert RSP.size == 22
+NCLASS = 12          # amc_meta.hpp 의 AMC_NCLASS 와 같아야 한다
+# u32 len | u32 magic | u16 ver | u16 type | u8 status | u8 cls | u8 cls2 | u8 ncls
+# | u16 conf | u16 conf2 | u16 model_ver | u16 p[NCLASS]
+RSP = struct.Struct("<IIHHBBBBHHH" + "H" * NCLASS)
+assert RSP.size == 22 + 2 * NCLASS
 
 MAX_FRAME = 65536
 
@@ -59,11 +62,15 @@ def _permille(p: float) -> int:
     return max(0, min(1000, int(round(p * 1000.0))))
 
 
-def build_reply(status: int, cls: int, conf: float, cls2: int, conf2: float, model_ver: int) -> bytes:
-    return RSP.pack(18, MAGIC_RSP, VER, TYPE_INFER,
+def build_reply(status: int, cls: int, conf: float, cls2: int, conf2: float,
+                model_ver: int, probs=None) -> bytes:
+    p = list(probs or ())[:NCLASS]
+    p += [0.0] * (NCLASS - len(p))
+    return RSP.pack(RSP.size - 4, MAGIC_RSP, VER, TYPE_INFER,
                     status & 0xFF,
                     (cls if 0 <= cls < 255 else NO_CLASS),
                     (cls2 if 0 <= cls2 < 255 else NO_CLASS),
-                    0,
+                    len(probs or ()) & 0xFF,
                     _permille(conf), _permille(conf2),
-                    model_ver & 0xFFFF)
+                    model_ver & 0xFFFF,
+                    *[_permille(x) for x in p])

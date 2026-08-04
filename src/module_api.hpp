@@ -46,6 +46,12 @@ struct BeweModule {
     // 모른 채 전 모듈에 돌린다 — 그래야 모듈을 지웠을 때 코어에 흔적이 안 남는다.
     // net/UI 스레드에서 불리므로 **여기서 무거운 일을 하지 말 것** (플래그만 세우고 워커가 처리).
     void (*on_manual)(FFTViewer& v, int ch_idx);
+    // ── 코어 STATUS 패널에 얹히는 것들 (GUI). 전부 nullptr 가능 ──
+    // 코어는 모듈 id 를 모른 채 등록된 모듈을 훑어 그린다 — 그래야 모듈 폴더를
+    // 지웠을 때 코어 바이너리에 그 이름이 안 남는다.
+    const char* ch_btn;    // 채널 행 버튼 라벨 ("AMC"). nullptr = 버튼 없음
+    const char* panel;     // STATUS 접이식 섹션 제목. nullptr = 섹션 없음
+    void (*draw_panel)(FFTViewer& v);   // 그 섹션 내용 (GUI 전용)
     // ── 데이터 수신 (JOIN/뷰어): 라이브 + 히스토리 레코드 공용 ──
     // station = 복조한 기지 station_id ("DGS-2_DGS-2" / "LOCAL")
     void (*on_data)(FFTViewer& v, const char* station, const uint8_t* d, size_t n);
@@ -87,6 +93,15 @@ void bewe_mod_want_clear_ch(int ch);                             // 채널 진�
 // 운용자 수동 실행 (GUI 'a' 키) → on_manual 을 가진 전 모듈에 전달. 반환 = 처리한 모듈 유무.
 // 코어가 모듈 id 를 모르게 하는 게 목적 — 모듈 폴더를 지우면 이 호출은 그냥 false 가 된다.
 bool bewe_mod_manual(FFTViewer& v, int ch);
+// ── 모듈 가용성 (그 기지에서 이 모듈이 실제로 동작 가능한가) ────────────────
+// HOST 가 선언하고 STATE 로 전파된다. AMC 처럼 외부 의존(venv/모델)이 있는 모듈은
+// 설치 안 된 기지에서 버튼을 눌러 봐야 아무 일도 안 나므로, 그걸 미리 보여준다.
+// 전송은 MpState.mask 의 상위 비트를 쓴다 — MAX_CHANNELS(50) 위는 비어 있어서
+// 와이어 크기도 Central 도 안 건드린다.
+void bewe_mod_set_avail(const char* id, bool ok);                     // HOST 선언
+bool bewe_mod_avail(const char* id, const char* station);             // 조회 (""=로컬)
+// 그 기지 그 채널에서 이 모듈이 돌고 있나 (버튼 점등용). station "" = 로컬 host_mask.
+bool bewe_mod_ch_on(const char* id, const char* station, int ch);
 void bewe_mod_rec_request(const char* id, const char* station, int ch, uint64_t rec_id);            // JOIN→HOST: 녹음 WAV 요청
 void bewe_mod_rec_send(const char* id, uint64_t rec_id, uint32_t total, uint32_t off, const void* b, uint32_t n); // HOST→JOIN: WAV 청크 회신
 // HOST 워커 → 디코드 1건 방출: Central 전송(+로컬 뷰 반영). payload = 모듈 정의 레코드

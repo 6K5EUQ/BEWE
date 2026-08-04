@@ -82,12 +82,12 @@ class ModelRegistry:
         return iq[:n]
 
     def predict(self, iq: np.ndarray, out_sr: int):
-        """Returns (status, cls, conf, cls2, conf2, model_ver)."""
+        """Returns (status, cls, conf, cls2, conf2, model_ver, probs)."""
         with self.lock:
             m, ver, classes = self.model, self.version, self.classes
         if m is None:
             from .proto import ST_NO_MODEL, NO_CLASS
-            return ST_NO_MODEL, NO_CLASS, 0.0, NO_CLASS, 0.0, 0
+            return ST_NO_MODEL, NO_CLASS, 0.0, NO_CLASS, 0.0, 0, []
         from .proto import ST_OK, NO_CLASS
         x = to_tensor_layout(self._crop(iq.astype(np.complex64)))
         t = torch.from_numpy(x).unsqueeze(0).to(self.dev)
@@ -99,6 +99,6 @@ class ModelRegistry:
         # Guard against a checkpoint whose class list is longer than the one the
         # C++ side knows — an out-of-range index would render as "?" forever.
         if c1 >= len(classes):
-            return ST_OK, NO_CLASS, 0.0, NO_CLASS, 0.0, ver
+            return ST_OK, NO_CLASS, 0.0, NO_CLASS, 0.0, ver, []
         return ST_OK, c1, float(p[c1]), (c2 if c2 >= 0 else NO_CLASS), \
-            (float(p[c2]) if c2 >= 0 else 0.0), ver
+            (float(p[c2]) if c2 >= 0 else 0.0), ver, [float(x) for x in p]

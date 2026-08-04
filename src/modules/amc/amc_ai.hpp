@@ -16,15 +16,18 @@ void amc_ai_stop_daemon();
 
 // 버스트 1건 분류. iq = interleaved float32 I/Q, n_complex 개.
 // 반환 false = 판정 못 함(데몬 없음/타임아웃/타 채널 점유). 그 경우 out_* 는 안 건드림.
+// p_out = 전 클래스 확률(0~1) 배열, np 개 자리. 상위 2개만으론 막대그래프를 못 그린다.
 bool amc_ai_infer(int ch, int64_t t_ms, uint32_t out_sr, uint32_t bw_hz, uint8_t trig,
                   const float* iq, int n_complex,
-                  int& cls, float& conf, int& cls2, float& conf2, char* model, size_t model_cap);
+                  int& cls, float& conf, int& cls2, float& conf2, char* model, size_t model_cap,
+                  float* p_out, int np);
 
 #else
 inline bool amc_ai_enabled(){ return false; }
 inline void amc_ai_ensure_daemon(){}
 inline void amc_ai_stop_daemon(){}
 inline bool amc_ai_infer(int, int64_t, uint32_t, uint32_t, uint8_t,
-                         const float*, int, int&, float&, int&, float&, char*, size_t){ return false; }
+                         const float*, int, int&, float&, int&, float&, char*, size_t,
+                         float*, int){ return false; }
 #endif
 } // namespace amc_mod

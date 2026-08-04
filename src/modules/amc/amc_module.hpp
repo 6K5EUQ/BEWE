@@ -37,6 +37,7 @@ void store_parse_jsonl(const char* data, size_t n, std::vector<AmcRecord>& out);
 
 #ifndef BEWE_HEADLESS
 void draw_content(FFTViewer& v, bool just_opened);
+void draw_panel(FFTViewer& v);          // 코어 STATUS 접이식 섹션 내용
 void local_load_today(FFTViewer& v);
 #endif
 

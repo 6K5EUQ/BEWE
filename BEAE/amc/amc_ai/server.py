@@ -109,7 +109,7 @@ class Server:
             try:
                 bw_hz, t_ms, out_sr, n, ch, trig, iq_b = parse_request(frame)
                 iq = np.frombuffer(iq_b, dtype=np.float32).copy().view(np.complex64)
-                st, c1, p1, c2, p2, mver = self.reg.predict(iq, out_sr)
+                st, c1, p1, c2, p2, mver, probs = self.reg.predict(iq, out_sr)
             except FrameError as e:
                 self._drop(conn, bufs, f"frame error: {e}")
                 return False
@@ -117,11 +117,11 @@ class Server:
                 # Never let one bad burst kill the loop — that is exactly how the
                 # AIS daemon died silently in 2026-07.
                 log.exception("request handling failed")
-                st, c1, p1, c2, p2, mver = ST_ERROR, NO_CLASS, 0.0, NO_CLASS, 0.0, 0
+                st, c1, p1, c2, p2, mver, probs = ST_ERROR, NO_CLASS, 0.0, NO_CLASS, 0.0, 0, []
             ms = (time.perf_counter() - t0) * 1000.0
             self.stats.note(ms, c1)
             try:
-                conn.sendall(build_reply(st, c1, p1, c2, p2, mver))
+                conn.sendall(build_reply(st, c1, p1, c2, p2, mver, probs))
             except OSError:
                 self._drop(conn, bufs, "send failed")
                 return False

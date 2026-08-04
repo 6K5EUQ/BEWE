@@ -61,10 +61,13 @@ struct __attribute__((packed)) AmcResp {     // 총 22B (len 포함)
     // 반드시 클램프할 것 — AIS 는 백분율*1000 이 u16 을 넘겨 struct.pack 이 죽고
     // 데몬 select 루프 전체가 내려앉은 적이 있다 (2026-07-07).
     uint32_t len; uint32_t magic; uint16_t ver; uint16_t type;
-    uint8_t status; uint8_t cls; uint8_t cls2; uint8_t pad;
+    uint8_t status; uint8_t cls; uint8_t cls2; uint8_t ncls;
     uint16_t conf_permille; uint16_t conf2_permille; uint16_t model_ver;
+    // 전 클래스 확률. ncls = 데몬이 실제로 채운 개수 — 모델이 클래스를 늘려도
+    // 앞쪽만 읽으면 되므로 C++ 을 다시 컴파일하지 않아도 된다.
+    uint16_t p_permille[AMC_NCLASS];
 };
-static_assert(sizeof(AmcResp)==22, "AmcResp must be 22 bytes");
+static_assert(sizeof(AmcResp)==22+2*AMC_NCLASS, "AmcResp size changed - update proto.py NCLASS");
 
 static constexpr int     AI_IO_BUDGET_MS = 60;    // connect+send+recv 총 예산
 static constexpr int64_t AI_RETRY_MS     = 5000;  // 실패 후 재시도 금지 래치
@@ -166,9 +169,30 @@ static bool sock_connect(int64_t deadline){
     g_fd=fd; return true;
 }
 
+// ── 실측 IQ 덤프 (기본 꺼짐, BEWE_AMC_CAP=1 로 켠다) ────────────────────────
+// 합성으로만 학습한 모델이 실제 전파에서 무너질 때, 추측 대신 그 입력을 그대로
+// 들여다보기 위한 것이다 (BEAE/amc/amc_ai/realcap.py 가 읽는다). 파일 포맷은
+// 요청 헤더와 같은 28B + f32 IQ[2n] — 소켓으로 보낸 것과 바이트 동일하다.
+static std::mutex g_cap_mtx;
+static void cap_append(const AmcReqHdr& h, const float* iq, int n){
+    const char* e = getenv("BEWE_AMC_CAP");
+    if(!e || e[0] != '1') return;
+    std::lock_guard<std::mutex> lk(g_cap_mtx);
+    std::string dir = BEWEPaths::data_dir()+"/BEAE/amc/data";
+    mkdir((BEWEPaths::data_dir()+"/BEAE").c_str(),0755);
+    mkdir((BEWEPaths::data_dir()+"/BEAE/amc").c_str(),0755);
+    mkdir(dir.c_str(),0755);
+    time_t t=(time_t)(h.t_ms/1000); struct tm lt{}; localtime_r(&t,&lt);
+    char d[16]; strftime(d,sizeof(d),"%Y%m%d",&lt);
+    FILE* f=fopen((dir+"/amccap_"+d+".bin").c_str(),"ab"); if(!f) return;
+    fwrite(&h,sizeof(h),1,f); fwrite(iq,sizeof(float),(size_t)n*2,f);
+    fclose(f);
+}
+
 bool amc_ai_infer(int ch, int64_t t_ms, uint32_t out_sr, uint32_t bw_hz, uint8_t trig,
                   const float* iq, int n_complex,
-                  int& cls, float& conf, int& cls2, float& conf2, char* model, size_t model_cap){
+                  int& cls, float& conf, int& cls2, float& conf2, char* model, size_t model_cap,
+                  float* p_out, int np){
     if(!amc_ai_enabled() || !iq || n_complex<=0) return false;
     if(mono_ms() < g_retry_at_ms) return false;
     // try_lock: 다른 채널이 트랜잭션 중이면 이 버스트는 포기한다. 기다리면 워커가
@@ -184,11 +208,13 @@ bool amc_ai_infer(int ch, int64_t t_ms, uint32_t out_sr, uint32_t bw_hz, uint8_t
     AmcReqHdr h{}; h.magic=AMRQ_MAGIC; h.ver=1; h.type=1;
     h.bw_hz=bw_hz; h.t_ms=t_ms; h.out_sr=out_sr;
     h.n=(uint16_t)n_complex; h.ch=(uint8_t)ch; h.trig=trig;
+    cap_append(h, iq, n_complex);             // 켜져 있을 때만 (BEWE_AMC_CAP=1)
     if(!send_all(g_fd,&len,4,deadline) || !send_all(g_fd,&h,sizeof(h),deadline)
        || !send_all(g_fd,iq,(size_t)n_complex*8,deadline)){ sock_drop(); return false; }
 
     AmcResp r{};
-    if(!recv_all(g_fd,&r,sizeof(r),deadline) || r.magic!=AMRP_MAGIC || r.len!=18){ sock_drop(); return false; }
+    if(!recv_all(g_fd,&r,sizeof(r),deadline) || r.magic!=AMRP_MAGIC
+       || r.len!=(uint32_t)(sizeof(AmcResp)-4)){ sock_drop(); return false; }
     if(r.status!=1) return false;             // 0=NO_MODEL, 3=ERROR → 판정 없음
     if(r.cls==0xFF) return false;             // 데몬이 판정불가로 회신
 
@@ -197,6 +223,10 @@ bool amc_ai_infer(int ch, int64_t t_ms, uint32_t out_sr, uint32_t bw_hz, uint8_t
     cls2  = (r.cls2==0xFF) ? -1 : (int)r.cls2;
     conf2 = (float)r.conf2_permille / 1000.f;
     if(model && model_cap) snprintf(model, model_cap, "BEAEv%u", (unsigned)r.model_ver);
+    if(p_out && np>0){
+        int k = (int)r.ncls; if(k>np) k=np; if(k>AMC_NCLASS) k=AMC_NCLASS;
+        for(int i=0;i<np;i++) p_out[i] = (i<k) ? r.p_permille[i]/1000.f : 0.f;
+    }
     return true;
 }
 

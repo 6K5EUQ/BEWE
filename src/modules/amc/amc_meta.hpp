@@ -52,6 +52,9 @@ struct AmcRecord {
     int      cls2  = -1;
     float    conf2 = 0.f;
     char     model[16] = {};  // 판정에 쓴 모델 버전 ("BEAEv6") — 사후 추적용
+    // 전 클래스 확률 (0~1). 상위 2개만으론 막대그래프를 못 그린다 — STATUS 패널이
+    // 12개를 다 보여줘야 운용자가 "얼마나 아슬아슬한 판정인지"를 눈으로 안다.
+    float    p[AMC_NCLASS] = {};
     // 표시 전용. wire 로 안 나간다 — station 은 MpData 봉투가 운반하고 수신측이 채운다.
     char     station[16] = {};
 };
@@ -67,6 +70,9 @@ struct AmcWire {
     float    conf, conf2, snr_db;
     uint8_t  trig;
     char     model[16];
+    // 전 클래스 확률을 permille(0~1000) 로. float 12개(48B) 대신 u16 12개(24B) —
+    // 표시용이라 0.1% 해상도면 충분하고, 레코드가 커지면 Central .dat 가 그만큼 부푼다.
+    uint16_t p_permille[AMC_NCLASS];
 };
 #pragma pack(pop)
 
@@ -77,6 +83,10 @@ inline void amc_to_wire(const AmcRecord& r, AmcWire& w){
     w.conf = r.conf; w.conf2 = r.conf2; w.snr_db = r.snr_db;
     w.trig = r.trig;
     memcpy(w.model, r.model, sizeof(w.model));
+    for(int i=0;i<AMC_NCLASS;i++){
+        float v = r.p[i]*1000.f + 0.5f;
+        w.p_permille[i] = (uint16_t)(v < 0.f ? 0.f : (v > 1000.f ? 1000.f : v));
+    }
 }
 
 inline void amc_from_wire(const AmcWire& w, AmcRecord& r){
@@ -87,4 +97,5 @@ inline void amc_from_wire(const AmcWire& w, AmcRecord& r){
     r.trig = w.trig;
     memcpy(r.model, w.model, sizeof(r.model));
     r.model[sizeof(r.model)-1] = 0;
+    for(int i=0;i<AMC_NCLASS;i++) r.p[i] = w.p_permille[i]/1000.f;
 }

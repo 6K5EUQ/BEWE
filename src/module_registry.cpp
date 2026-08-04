@@ -58,6 +58,8 @@ const char* bewe_mod_my_station(){ return g_my_station; }
 // ── 모듈별 framework 상태 ──
 struct ModFw {
     uint64_t host_mask = 0;                  // HOST: 자기 워커 mask (ch 0~63 비트)
+    bool     avail = true;                   // HOST: 이 기지에서 실제 동작 가능한가
+                                             //   (venv/모델 등 외부 의존이 있는 모듈용)
     uint64_t want_mask = 0;                  // HOST: 사용자가 켠 복조 의도 — 필터 깜빡임/SDR에러로
                                              //   워커가 죽어 host_mask 가 비어도 유지 → reconcile 자동 재장전
     std::vector<MpChEntry> targets;          // JOIN: CH_LIST 미러
@@ -139,10 +141,50 @@ static bool bcast(const char* id, uint8_t kind, const void* d, size_t n){
 }
 
 // ── HOST framework ──────────────────────────────────────────────────────────
+// mask 최상위 비트를 "이 기지에서 이 모듈이 동작 가능" 플래그로 쓴다. MAX_CHANNELS
+// 가 50 이라 비트 50~63 은 채널로 안 쓰이고, 구버전 JOIN 은 ch<MAX_CHANNELS 로만
+// 훑으므로 이 비트를 봐도 아무 일도 안 일어난다 (와이어·Central 무변경).
+static constexpr int MOD_AVAIL_BIT = 63;
+
 static void host_send_state(const char* id){
     MpState st{}; strncpy(st.station, g_my_station, sizeof(st.station)-1);
-    { std::lock_guard<std::mutex> lk(g_fw_mtx); st.mask = fw(id).host_mask; }
+    { std::lock_guard<std::mutex> lk(g_fw_mtx);
+      ModFw& f = fw(id);
+      st.mask = f.host_mask;
+      if(f.avail) st.mask |= (1ull<<MOD_AVAIL_BIT);
+    }
     bcast(id, BEWE_MK_STATE, &st, sizeof(st));
+}
+
+void bewe_mod_set_avail(const char* id, bool ok){
+    bool changed;
+    { std::lock_guard<std::mutex> lk(g_fw_mtx);
+      ModFw& f = fw(id); changed = (f.avail != ok); f.avail = ok; }
+    if(changed) host_send_state(id);          // 상태가 바뀔 때만 방송
+}
+
+bool bewe_mod_avail(const char* id, const char* station){
+    std::lock_guard<std::mutex> lk(g_fw_mtx);
+    ModFw& f = fw(id);
+    if(!station || !station[0]) return f.avail;             // 로컬/HOST 자기 자신
+    auto it = f.masks.find(station);
+    if(it == f.masks.end()) return f.avail;                 // 아직 STATE 못 받음
+    return ((it->second>>MOD_AVAIL_BIT)&1) != 0;
+}
+
+bool bewe_mod_ch_on(const char* id, const char* station, int ch){
+    if(ch<0 || ch>=MAX_CHANNELS) return false;
+    std::lock_guard<std::mutex> lk(g_fw_mtx);
+    ModFw& f = fw(id);
+    // JOIN 이 방금 누른 건 STATE 왕복 전까지 낙관적으로 보여준다 (버튼 깜빡임 방지).
+    if(station && station[0]){
+        auto pit = f.pending.find({std::string(station), ch});
+        if(pit != f.pending.end()) return pit->second.first != 0;
+        auto it = f.masks.find(station);
+        if(it != f.masks.end()) return ((it->second>>ch)&1) != 0;
+        return false;
+    }
+    return ((f.host_mask>>ch)&1) != 0;
 }
 
 uint64_t bewe_mod_host_mask(const char* id){
