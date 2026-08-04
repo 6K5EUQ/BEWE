@@ -336,6 +336,10 @@ void FFTViewer::capture_and_process_rtl(){
             // IQ Ring write: 전체 청크
             bool need_ring = rec_on.load(std::memory_order_relaxed);
             if(!need_ring) for(int i=0;i<MAX_CHANNELS;i++) if(channels[i].dem_run.load()){need_ring=true;break;}
+            // 모듈 워커(AIS/BTLE/ADSB/WiFi/AMC)는 복조 모드와 무관하게 ring 을 직접 탭한다.
+            // 이 줄이 없으면 mode=NONE 채널에서 디코더를 켜도 ring 이 안 차서 워커가
+            // lag==0 으로 영원히 대기한다 (BladeRF/Kraken 엔 이미 있었고 여기만 빠져 있었다).
+            if(!need_ring) need_ring = mod_wants_ring.load(std::memory_order_relaxed);
             bool need_tm = tm_iq_on.load(std::memory_order_relaxed) && (warmup_cnt>=WARMUP_FFTS);
             if(need_ring || need_tm){
                 // uint8 > int16 변환 (ring/TM IQ 소비자만 씀 — FFT 는 raw 직접 읽음)

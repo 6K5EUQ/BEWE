@@ -78,6 +78,8 @@ void worker(FFTViewer& v, int ch_idx){
     int64_t cap_t_ms = 0;
     float   cap_snr  = 0.f;
     int64_t last_infer_ms = 0;
+    int64_t last_diag_ms  = 0;
+    size_t  last_diag_wp  = 0;
 
     const size_t MAX_LAG = ring_max_lag(msr, v.hw.burst_samples);
     const size_t BATCH   = std::max<size_t>(4096, msr/50);
@@ -130,16 +132,16 @@ void worker(FFTViewer& v, int ch_idx){
         // Channel::sq_gate_prev 는 GUI 페이드용이라 건드리면 안 된다 — 로컬 변수로 엣지를 만든다.
         bool gate = ch.sq_gate.load(std::memory_order_relaxed);
         int64_t tnow = now_ms();
-        // 주기 측정은 **스퀄치와 무관하게** 돈다. 예전엔 sq_gate 가 열릴 때만 쟀는데,
-        // 스퀄치 임계는 캘리브레이션으로 정해지는 값이라 연속 신호가 임계 바로 아래에
-        // 걸리면 게이트가 영영 안 열리고 AMC 가 한 번도 안 돌았다 (2026-08-04 DGS-1:
-        // 신호 -54~-57 dBFS, 임계 -53.94 dB → 레코드 0건). AMC 버튼은 "이 채널을 계속
-        // 분류해 달라" 는 뜻이지 "스퀄치가 열리면" 이 아니다.
-        // 스퀄치 상승엣지는 그대로 두되 **즉시 트리거**로만 쓴다 — 짧은 버스트를
-        // 다음 주기까지 기다리지 않고 바로 잡기 위해서다.
+        // 트리거는 오직 스퀄치다 (detect 여부와 무관).
+        //   버스트   : 스퀄치를 넘는 순간마다 1회 — 짧아도 놓치지 않는다.
+        //   연속신호 : 넘고 있는 동안 AMC_PERIOD_MS(1초) 주기로 계속.
+        // 신호가 없으면(게이트 닫힘) 아무것도 안 한다 — 잡음을 분류해 봐야 표만 더럽다.
+        // **캡처 중이면 절대 재무장하지 않는다.** 이걸 빠뜨리면 periodic 조건이 매
+        // 루프마다 참이 되어(완료 전이라 last_infer_ms 가 안 갱신됨) 매 반복이 캡처를
+        // 리셋한다 — 영원히 have=0 이고 한 건도 못 잰다 (2026-08-04 실측).
         const bool rising  = gate && !gate_prev;
-        const bool periodic= (tnow - last_infer_ms >= AMC_PERIOD_MS);
-        if((rising || periodic) && tnow - last_infer_ms > AMC_MIN_GAP_MS){
+        const bool periodic= gate && (tnow - last_infer_ms >= AMC_PERIOD_MS);
+        if(!cap_arm && (rising || periodic) && tnow - last_infer_ms > AMC_MIN_GAP_MS){
             cap_have = 0; cap_arm = true;
             cap_trig = AMC_TRIG_SQUELCH;
             cap_t_ms = tnow;
@@ -152,6 +154,24 @@ void worker(FFTViewer& v, int ch_idx){
             cap_arm = true;   // reset_dsp 가 껐으므로 다시 켠다
         }
         gate_prev = gate;
+
+        // 왜 안 재는지 알 수 없으면 운용자가 안테나·게인·모델을 차례로 의심하며
+        // 시간을 버린다. 30초 넘게 한 건도 못 쟀을 때만 그 이유를 한 줄 남긴다.
+        if(tnow - last_diag_ms >= 30000){
+            last_diag_ms = tnow;
+            if(last_infer_ms == 0 || tnow - last_infer_ms > 30000){
+                size_t wp_d=v.ring_wp.load(std::memory_order_acquire);
+                size_t adv=(wp_d-last_diag_wp)&IQ_RING_MASK;   // 30초 동안 ring 이 얼마나 돌았나
+                bewe_log_push(2,"AMC[%d] idle: gate=%d sig=%.1f thr=%.1f dB  ring_adv=%zu  armed=%d have=%d/%d%s\n",
+                    ch_idx, gate?1:0,
+                    ch.sq_sig.load(std::memory_order_relaxed),
+                    ch.sq_threshold.load(std::memory_order_relaxed),
+                    adv, cap_arm?1:0, cap_have, AMC_CAP,
+                    adv==0 ? "  (IQ ring not being filled)"
+                           : (gate ? "" : "  (squelch closed)"));
+                last_diag_wp = wp_d;
+            }
+        }
 
         size_t wp=v.ring_wp.load(std::memory_order_acquire);
         size_t rp=my_rp.load(std::memory_order_relaxed);
