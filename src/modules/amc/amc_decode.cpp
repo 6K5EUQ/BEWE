@@ -124,11 +124,10 @@ void worker(FFTViewer& v, int ch_idx){
         // detect 채널에서 sq_gate 는 det_locked 일 때만 열린다 = 버스트 시작 시점.
         // Channel::sq_gate_prev 는 GUI 페이드용이라 건드리면 안 된다 — 로컬 변수로 엣지를 만든다.
         bool gate = ch.sq_gate.load(std::memory_order_relaxed);
-        bool manual = worker_take_manual(ch_idx);
         int64_t tnow = now_ms();
-        if((manual || (gate && !gate_prev)) && tnow - last_infer_ms > AMC_MIN_GAP_MS){
+        if(gate && !gate_prev && tnow - last_infer_ms > AMC_MIN_GAP_MS){
             cap_have = 0; cap_arm = true;
-            cap_trig = manual ? AMC_TRIG_MANUAL : AMC_TRIG_SQUELCH;
+            cap_trig = AMC_TRIG_SQUELCH;
             cap_t_ms = tnow;
             cap_snr  = ch.sq_sig.load(std::memory_order_relaxed)
                      - ch.sq_nf.load(std::memory_order_relaxed);

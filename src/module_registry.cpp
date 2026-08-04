@@ -340,14 +340,6 @@ void bewe_mod_reconcile(FFTViewer& v){
         }
     }
 }
-// 운용자 수동 실행 ('a' 키). 코어는 모듈 id 를 모른 채 전 모듈에 돌린다.
-bool bewe_mod_manual(FFTViewer& v, int ch){
-    if(ch < 0 || ch >= MAX_CHANNELS) return false;
-    bool any = false;
-    for(auto& m : reg()) if(m.on_manual){ m.on_manual(v, ch); any = true; }
-    return any;
-}
-
 // 채널 진짜 삭제/정지(stop_dem stop_decoders) 시 그 ch 의 모든 모듈 want 해제 — 깜빡임과 구분.
 void bewe_mod_want_clear_ch(int ch){
     if(ch<0 || ch>=MAX_CHANNELS) return;

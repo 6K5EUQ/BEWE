@@ -24,18 +24,11 @@ inline const char* amc_class_name(int i){
     return (i >= 0 && i < AMC_NCLASS) ? AMC_CLASSES[i] : "?";
 }
 
-// 트리거 종류. 운용자가 "왜 이 값이 떴나"를 알아야 신뢰 판단이 된다 —
-// 스퀄치가 열려 자동으로 잰 것과 사람이 a 키로 시킨 것은 의미가 다르다.
+// 트리거 종류. 지금은 스퀄치 하나뿐이지만 필드는 남겨 둔다 — 레코드/아카이브
+// 포맷이라 나중에 트리거가 늘어도 기존 이력을 다시 파싱할 필요가 없다.
 enum : uint8_t {
     AMC_TRIG_SQUELCH = 0,   // sq_gate 상승엣지 (버스트 시작)
-    AMC_TRIG_MANUAL  = 1,   // 운용자가 a 키
 };
-
-// 수동 실행 요청 센티넬. JOIN→HOST 는 기존 BEWE_MK_REC_REQ(0xFB) 를 재사용한다 —
-// station+ch+u64 를 이미 나르고 Central 라우팅도 이미 있어서 **와이어를 안 건드린다**.
-// rec_id 가 이 값이면 "녹음 요청"이 아니라 "지금 한 번 분류해 달라"는 뜻이다.
-// mod_id 로 이미 격리되므로 다른 모듈의 rec_id 와 충돌하지 않는다.
-static constexpr uint64_t AMC_MANUAL_MAGIC = 0xA3C0000000000001ull;
 
 struct AmcRecord {
     int64_t  t_ms  = 0;     // 호스트 스탬프 (epoch ms)

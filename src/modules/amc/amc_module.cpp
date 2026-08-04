@@ -22,14 +22,12 @@ namespace amc_mod {
 
 std::mutex             mtx;
 std::vector<AmcRecord> log;
-char                   filter[64] = {};
 
 // ── 워커 슬롯 ──────────────────────────────────────────────────────────────
 struct ChWork {
     std::atomic<bool>   on{false};
     std::atomic<bool>   stop{false};
     std::atomic<size_t> rp{0};
-    std::atomic<bool>   manual{false};   // 'a' 키 요청 (워커가 소비)
     std::thread         thr;
 };
 static ChWork g_w[MAX_CHANNELS];
@@ -37,10 +35,6 @@ static std::mutex g_mgmt;
 
 std::atomic<size_t>& worker_rp(int ch){ return g_w[ch].rp; }
 bool worker_stop_req(int ch){ return g_w[ch].stop.load(std::memory_order_relaxed); }
-bool worker_take_manual(int ch){ return g_w[ch].manual.exchange(false, std::memory_order_acq_rel); }
-void worker_post_manual(int ch){
-    if(ch>=0 && ch<MAX_CHANNELS) g_w[ch].manual.store(true, std::memory_order_release);
-}
 void worker_natural_exit(FFTViewer& v, int ch){
     g_w[ch].on.store(false);
     bewe_mod_host_mask_clear(v, "amc", ch);
@@ -87,27 +81,6 @@ static void on_ch_stop(FFTViewer& v, int ch){
 static void host_poll(FFTViewer& v){
     (void)v;
     bewe_mod_set_avail("amc", amc_ai_enabled());   // 변화 있을 때만 방송된다
-}
-
-// ── 수동 실행 ('a' 키) ─────────────────────────────────────────────────────
-// JOIN 이면 HOST 로 요청을 보내고, HOST/LOCAL 이면 워커 플래그를 직접 세운다.
-// 어느 쪽이든 여기서 추론하지 않는다 — UI/net 스레드다.
-static void on_manual(FFTViewer& v, int ch){
-    if(ch<0 || ch>=MAX_CHANNELS) return;
-    if(!v.channels[ch].filter_active) return;
-    // 무장 안 된 채널(=detect 아님)에서 눌러도 재 볼 수 있게 한다. 운용자가 굳이
-    // 지목한 것이므로 detect 여부로 막지 않는다 — 다만 워커가 없으면 의미가 없다.
-    if(v.remote_mode){
-        bewe_mod_rec_request("amc", bewe_mod_my_station(), ch, AMC_MANUAL_MAGIC);
-        return;
-    }
-    worker_post_manual(ch);
-}
-// HOST: JOIN 이 보낸 수동 요청 수신 (net 스레드 — 플래그만).
-static void on_rec_req(FFTViewer& v, int ch, uint64_t rec_id){
-    (void)v;
-    if(rec_id != AMC_MANUAL_MAGIC) return;
-    worker_post_manual(ch);
 }
 
 // station_id("DGS-2_DGS-2") → 표시명("DGS-2"). 빈 문자열이면 LOCAL.
@@ -252,7 +225,6 @@ static bool s_reg = [](){
     // "검출된 실제 폭"(AmcRecord.bw_khz)이 의미를 잃는다.
     m.spec_bw_hz   = 0.0f;
 #ifndef BEWE_HEADLESS
-    m.draw_content = &draw_content;
     m.ch_btn       = "AMC";      // 채널 행 DET 오른쪽 버튼
     m.panel        = "Automatic Modulation Classification";
     m.draw_panel   = &draw_panel;
@@ -261,8 +233,6 @@ static bool s_reg = [](){
     m.host_start = &host_start;
     m.host_stop  = &host_stop;
     m.on_ch_stop = &on_ch_stop;
-    m.on_manual  = &on_manual;
-    m.on_rec_req = &on_rec_req;
     m.on_data    = &on_data;
     m.log_stash    = &log_stash;
     m.log_restore  = &log_restore;

@@ -42,10 +42,6 @@ struct BeweModule {
     // 여기서 bewe_mod_set_target() 을 부르면 host_start/host_mask/ring공급/JOIN 표시가
     // 전부 기존 경로를 그대로 탄다. nullptr = 미사용.
     void (*host_poll)(FFTViewer& v);
-    // 운용자가 채널을 고르고 수동 실행을 요청했을 때 (GUI 'a' 키). 코어는 어느 모듈인지
-    // 모른 채 전 모듈에 돌린다 — 그래야 모듈을 지웠을 때 코어에 흔적이 안 남는다.
-    // net/UI 스레드에서 불리므로 **여기서 무거운 일을 하지 말 것** (플래그만 세우고 워커가 처리).
-    void (*on_manual)(FFTViewer& v, int ch_idx);
     // ── 코어 STATUS 패널에 얹히는 것들 (GUI). 전부 nullptr 가능 ──
     // 코어는 모듈 id 를 모른 채 등록된 모듈을 훑어 그린다 — 그래야 모듈 폴더를
     // 지웠을 때 코어 바이너리에 그 이름이 안 남는다.
@@ -90,9 +86,6 @@ bool bewe_mod_ch_decode_on(bool remote, int ch);                 // decode 활�
 float bewe_mod_ch_spec_bw(int ch);
 void bewe_mod_reconcile(FFTViewer& v);                           // want↔host_mask 재조정 (HOST 주기 호출)
 void bewe_mod_want_clear_ch(int ch);                             // 채널 진짜 삭제 시 그 ch want 해제
-// 운용자 수동 실행 (GUI 'a' 키) → on_manual 을 가진 전 모듈에 전달. 반환 = 처리한 모듈 유무.
-// 코어가 모듈 id 를 모르게 하는 게 목적 — 모듈 폴더를 지우면 이 호출은 그냥 false 가 된다.
-bool bewe_mod_manual(FFTViewer& v, int ch);
 // ── 모듈 가용성 (그 기지에서 이 모듈이 실제로 동작 가능한가) ────────────────
 // HOST 가 선언하고 STATE 로 전파된다. AMC 처럼 외부 의존(venv/모델)이 있는 모듈은
 // 설치 안 된 기지에서 버튼을 눌러 봐야 아무 일도 안 나므로, 그걸 미리 보여준다.
