@@ -872,6 +872,52 @@ void run_cli_host(){
     // 부팅 직후 USB 재열거/느린 부팅과 겹칠 수 있어 5회(2초 간격)까지 재시도 후 포기.
     std::thread cap;
 
+    // ── SDR 종류 판별 + Kraken DAQ 유닛 제어 ─────────────────────────────
+    // 명령의 몸통은 하나지만 하드웨어마다 "장치를 놓아 준다"의 뜻이 다르다.
+    // BladeRF/RTL/Pluto 는 BEWE 가 USB 장치를 직접 소유하므로 핸들만 닫으면 끝이다.
+    // Kraken 은 그렇지 않다 — heimdall DAQ 가 동글 5개를 소유하고 BEWE 는 :5000 의
+    // TCP 소비자일 뿐이라, 소켓을 닫아도 동글은 여전히 DAQ 손에 있다. 그 상태로
+    // 뽑으면 DAQ 가 옛 핸들을 붙든 채 rtl_daq 가 -4(NO_DEVICE)로 무한 실패하고
+    // 프로세스 재시작으로는 절대 안 고쳐진다 (2026-08-04 DGS-X 실측: /rx stop 후
+    // 교체 → /rx start 3연속 실패).
+    //
+    // 그래서 Kraken 기지에서는 /rx stop 이 DAQ 유닛까지 내리고 /rx start 가 다시
+    // 올린다. 이 판별을 명령마다 흩어 놓지 않고 여기 한 곳에 모은다.
+    //
+    // hw.type 은 DAQ 연결에 성공했을 때만 KRAKEN 이 된다 — 정작 DAQ 를 살려야 할
+    // 상황(부팅 시 DAQ 사망)에서 NONE 으로 남아 판별이 막힌다. Kraken 은
+    // --sdr kraken 명시 지정으로만 뜨므로(hw_detect.cpp) 그 플래그가 "이 기지는
+    // Kraken 기지" 의 정확한 신호다 — 초기화 성공 여부와 무관하다.
+    auto is_kraken_station = [&](){
+        return v.hw.type == HWType::KRAKEN || g_sdr_force == "kraken";
+    };
+    // 유닛명은 station 에서 만든다: "DGS-X" -> bewe-dgsx-daq (FIFO 명명과 동일
+    // 규칙 — 하이픈/언더바 제거 + 소문자). 유닛이 없는 기지면 빈 문자열.
+    auto kraken_daq_unit = [&]() -> std::string {
+        if(!is_kraken_station()) return "";
+        std::string s;
+        for(char c : station_str) if(c != '-' && c != '_') s += (char)tolower((unsigned char)c);
+        if(s.empty()) return "";
+        const std::string unit = "bewe-" + s + "-daq";
+        if(system(("systemctl cat " + unit + " >/dev/null 2>&1").c_str()) != 0) return "";
+        return unit;
+    };
+    // action = "stop" | "start" | "restart". -n: 비번을 물으면 그냥 실패한다.
+    // 무인 기지라 물어볼 사람이 없다.
+    auto kraken_daq_ctl = [&](const char* action, const char* tag){
+        const std::string unit = kraken_daq_unit();
+        if(unit.empty()) return false;
+        bewe_log_push(0,"[CLI] %s: %s heimdall DAQ (%s) ...\n", tag, action, unit.c_str());
+        int rc = system(("sudo -n systemctl " + std::string(action) + " " + unit
+                         + " >/dev/null 2>&1").c_str());
+        if(rc != 0){
+            bewe_log_push(2,"[CLI] %s: DAQ %s FAILED (rc=%d) - need NOPASSWD sudo "
+                            "for 'systemctl %s %s'\n", tag, action, rc, action, unit.c_str());
+            return false;
+        }
+        return true;
+    };
+
     // ── /rx stop · /rx start 공용 몸통 ────────────────────────────────────
     // stdin 과 원격(CMD RX_STOP/RX_START) 이 같은 몸을 쓴다. 예전엔 두 벌로 복사돼
     // 있었고 그 사이가 벌어져 있었다 — 원격만 HIST/미션 워커를 내렸다 올리고 stdin 은
@@ -908,10 +954,19 @@ void run_cli_host(){
         if(v.dev_rtl){ rtlsdr_close(v.dev_rtl); v.dev_rtl=nullptr; }
         v.df_stop_engine();     // Kraken: Heimdall DAQ 연결 해제 (다른 SDR 이면 no-op)
         v.pluto_release();      // Pluto: iio buffer/context 해제 (idempotent)
+        // Kraken 은 소켓을 닫아도 동글이 DAQ 손에 남는다 — 유닛까지 내려야 진짜로
+        // 뽑을 수 있다. 다른 SDR 은 위 close 로 이미 놓았으므로 여기 안 들어온다.
+        const bool kraken_daq_down = is_kraken_station() && kraken_daq_ctl("stop", "RX stop");
         v.rx_stopped.store(true);
         v.sdr_stream_error.store(false);
         v.spectrum_pause.store(false);
-        bewe_log_push(0,"[CLI] RX stopped - safe to unplug the SDR.\n");
+        if(is_kraken_station() && !kraken_daq_down)
+            bewe_log_push(2,"[CLI] RX stopped, but the DAQ still owns the dongles - "
+                            "do NOT unplug (run: sudo systemctl stop %s)\n",
+                          kraken_daq_unit().empty() ? "bewe-<station>-daq"
+                                                    : kraken_daq_unit().c_str());
+        else
+            bewe_log_push(0,"[CLI] RX stopped - safe to unplug the SDR.\n");
         return true;
     };
     auto sdr_up = [&](const char* why){
@@ -923,9 +978,25 @@ void run_cli_host(){
         float cur_sr = v.header.sample_rate / 1e6f;
         if(cur_sr < 0.1f) cur_sr = 61.44f;
         v.is_running = true;
+        // Kraken 은 /rx stop 이 DAQ 유닛까지 내렸으므로 여기서 다시 올린다. 이미
+        // 떠 있으면 systemctl start 는 no-op 이라 그냥 불러도 안전하다.
+        const bool kraken = is_kraken_station();
+        if(kraken) kraken_daq_ctl("start", "RX start");
         // initialize() 가 장치를 새로 감지하므로 RTL->Pluto 교체처럼 sr/fft 가 바뀌는
         // 경우도 그대로 반영된다. HIST 는 rotate 로 현재 파일을 닫아 새 헤더로 만든다.
-        if(!v.initialize(cur_cf, cur_sr)){
+        //
+        // Kraken 은 DAQ 가 캘리브를 마쳐야 IQ 가 나온다. initialize() 안의 링크 대기가
+        // 이미 100ms×60(최대 6초) 폴링이고 Calibrating 도 성공으로 치지만, 방금 올린
+        // 유닛은 프로세스가 뜨기 전이라 그 6초를 통째로 헛돌 수 있다. 그래서 바깥에서
+        // 몇 번 더 돌린다 — 고정 대기가 아니라 폴링이므로 준비되는 즉시 빠져나온다
+        // (실측 3초 이내). 다른 SDR 은 종전대로 1회만 시도한다.
+        const int tries = kraken ? 6 : 1;
+        bool ok = false;
+        for(int i = 0; i < tries && !ok; i++){
+            if(i) std::this_thread::sleep_for(std::chrono::seconds(2));
+            ok = v.initialize(cur_cf, cur_sr);
+        }
+        if(!ok){
             v.is_running = false;
             v.rx_stopped.store(true);
             bewe_log_push(0,"[CLI] RX start failed - no SDR found.\n");
@@ -2282,6 +2353,7 @@ void run_cli_host(){
     float    sdr_retry_timer = 0.f;
     float    chassis_unpause_timer = -1.f;
     float    kraken_rx_up_timer = -1.f;
+    int      kraken_rx_up_tries = 0;
 
     bewe_log_push(0,"[BEWE CLI] Ready. Type /help for commands.\n");
     fflush(stdout);
@@ -2633,43 +2705,21 @@ void run_cli_host(){
         // 재열거되면 DAQ 가 옛 핸들을 붙든 채 rtl_daq 가 무한 실패하고 BEWE 재시작
         // 으로는 절대 안 고쳐진다 (2026-08-02 DGS-X: 무전기 송신에 허브가 리셋됨).
         //
-        // 유닛명은 station 에서 만든다: "DGS-X" -> bewe-dgsx-daq (FIFO 명명과 동일
-        // 규칙 — 하이픈 제거 + 소문자). 그 유닛이 없는 기지면 조용히 건너뛴다.
+        // 판별·유닛명·sudo 는 sdr_down/sdr_up 과 같은 helper 를 쓴다 (위 정의 참조) —
+        // 여기 한 벌 더 두면 두 경로가 벌어진다.
         auto kraken_restart_daq = [&](const char* tag){
-            // hw.type 은 DAQ 연결에 성공했을 때만 KRAKEN 이 된다 — make_kraken_config()
-            // 가 kraken_io.cpp 의 성공 경로에만 있고, 실패하면 그 앞에서 return false
-            // 한다. 그래서 부팅 시점에 이미 DAQ 가 죽어 있으면 initialize() 가 5회 다
-            // 실패하고 hw.type 이 NONE 으로 남는다 — 정작 DAQ 를 살려야 할 바로 그
-            // 상황에서 이 복구 경로가 막히는 것이다. 그러면 아래 일반 USB 경로로
-            // 떨어지는데 Kraken 은 vid==0 이라 usb_deep_powercycle 이 아예 실행되지
-            // 않아 rc 초기값 1 그대로 "FAILED (rc=1)" 만 찍고 끝난다.
-            // (2026-08-03 DGS-X: DAQ 가 14:50 에 죽고 BEWE 가 14:52 에 떠서 이 상태로
-            //  묶였다. /chassis 1 reset 을 쳐도 8시간 내내 못 살렸다.)
-            // Kraken 은 --sdr kraken 명시 지정으로만 뜨므로(hw_detect.cpp) 그 플래그가
-            // "이 기지는 Kraken 기지" 의 정확한 신호다 — 초기화 성공 여부와 무관하다.
-            if(v.hw.type != HWType::KRAKEN && g_sdr_force != "kraken") return false;
-            std::string s;
-            for(char c : station_str) if(c != '-' && c != '_') s += (char)tolower((unsigned char)c);
-            if(s.empty()) return false;
-            const std::string unit = "bewe-" + s + "-daq";
-            // 유닛이 실제로 있는지 먼저 본다 — 없는 기지에서 sudo 를 부르지 않는다.
-            if(system(("systemctl cat " + unit + " >/dev/null 2>&1").c_str()) != 0){
-                bewe_log_push(2,"[CLI] %s: %s not installed - skipping DAQ restart\n",
-                              tag, unit.c_str());
+            if(!is_kraken_station()) return false;
+            if(kraken_daq_unit().empty()){
+                bewe_log_push(2,"[CLI] %s: DAQ unit not installed - skipping DAQ restart\n", tag);
                 return false;
             }
-            bewe_log_push(0,"[CLI] %s: restarting heimdall DAQ (%s) ...\n", tag, unit.c_str());
             if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM", "Chassis 1 reset: restarting DAQ ...");
-            // -n: 비번을 물으면 그냥 실패한다. 무인 기지라 물어볼 사람이 없다.
-            int rc = system(("sudo -n systemctl restart " + unit + " >/dev/null 2>&1").c_str());
-            if(rc != 0){
-                bewe_log_push(2,"[CLI] %s: DAQ restart FAILED (rc=%d) - need NOPASSWD sudo "
-                                "for 'systemctl restart %s'\n", tag, rc, unit.c_str());
+            if(!kraken_daq_ctl("restart", tag)){
                 if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM",
                     "Chassis 1 reset: DAQ restart failed - check station log");
                 return false;
             }
-            bewe_log_push(0,"[CLI] %s: DAQ restarted - it calibrates for ~40s\n", tag);
+            bewe_log_push(0,"[CLI] %s: DAQ restarted - waiting for calibration\n", tag);
             return true;
         };
 
@@ -2745,9 +2795,14 @@ void run_cli_host(){
                 usb_reset_done    = true;
                 // rx_stopped 면 아래 reconnect 로직이 통째로 게이트돼 있어(그 조건에
                 // !rx_stopped 가 있다) DAQ 만 살아나고 기지는 계속 멈춰 있다. 무인
-                // 기지에는 /rx start 를 쳐 줄 사람이 없으므로 캘리브가 끝날 때쯤
-                // 스스로 올린다. DAQ 캘리브가 ~40초라 여유를 둔다.
-                if(v.rx_stopped.load()) kraken_rx_up_timer = 50.f;
+                // 기지에는 /rx start 를 쳐 줄 사람이 없으므로 스스로 올린다.
+                //
+                // 예전엔 여기서 50초를 고정으로 기다렸다. 근거 없는 상수였다 — 실측
+                // 캘리브는 3초 안에 끝나고, sdr_up 의 initialize() 는 이미 폴링이라
+                // 준비되는 즉시 반환한다. 고정 대기는 기지를 47초 더 세워둘 뿐이고,
+                // 운용자가 못 기다려 /powercycle 을 치게 만든다 (2026-08-04 DGS-X:
+                // 14초 만에 /powercycle partial). 짧게 걸고 실패하면 재시도한다.
+                if(v.rx_stopped.load()) kraken_rx_up_timer = 3.f;
                 continue;
             }
 
@@ -2895,12 +2950,27 @@ void run_cli_host(){
 
         // ── Kraken: DAQ 재시작 후 RX 자동 기동 ────────────────────────────
         // 부팅 때 DAQ 가 죽어 있었던 기지는 rx_stopped 로 대기 중이고, 그 상태에선
-        // reconnect 로직이 안 돈다. DAQ 를 살렸으니 여기서 한 번 올려 준다.
+        // reconnect 로직이 안 돈다. DAQ 를 살렸으니 여기서 올려 준다.
+        //
+        // 한 번만 시도하고 포기하면 안 된다 — 캘리브가 예상보다 길어진 그 한 번에
+        // 걸리면 무인 기지가 영영 멈춘 채 남는다. 실패하면 다시 걸어 재시도한다.
         if(kraken_rx_up_timer > 0.f){
             kraken_rx_up_timer -= dt;
             if(kraken_rx_up_timer <= 0.f){
                 kraken_rx_up_timer = -1.f;
-                if(v.rx_stopped.load()) sdr_up("DAQ restarted");
+                if(v.rx_stopped.load() && !sdr_up("DAQ restarted")){
+                    if(++kraken_rx_up_tries < 10){
+                        kraken_rx_up_timer = 5.f;
+                        bewe_log_push(2,"[CLI] DAQ not ready yet - retrying RX start in 5s "
+                                        "(%d/10)\n", kraken_rx_up_tries);
+                    } else {
+                        kraken_rx_up_tries = 0;
+                        bewe_log_push(2,"[CLI] RX auto-start gave up after 10 tries - "
+                                        "run /rx start once the DAQ is up\n");
+                    }
+                } else {
+                    kraken_rx_up_tries = 0;
+                }
             }
         }
 
