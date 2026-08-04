@@ -4586,6 +4586,15 @@ void run_streaming_viewer(){
             }
         }
 
+        // A키: 선택 채널에 대해 모듈 수동 실행 요청. 코어는 어느 모듈인지 모른다 —
+        // on_manual 을 가진 모듈이 하나도 없으면 그냥 아무 일도 안 일어난다
+        // (모듈 폴더를 지웠을 때 코어에 흔적이 남지 않게 하려는 것).
+        if(main_kbd_active && !fs_overlay_active
+           && ImGui::IsKeyPressed(ImGuiKey_A, false) && !ImGui::GetIO().WantTextInput
+           && !ImGui::IsAnyItemActive() && v.selected_ch >= 0){
+            bewe_mod_manual(v, v.selected_ch);
+        }
+
         // (v4.0: 1/2/3 키로 STATUS/ARCHIVE/SCHED 전환 기능 제거 —
         // ARCHIVE/SCHED가 mission 창에 흡수되어 STATUS만 남음)
 

@@ -282,6 +282,9 @@ static void host_arch_push_check(){
 
 void bewe_mod_reconcile(FFTViewer& v){
     host_arch_push_check();                            // 00시 롤오버/미push 회수 (SDR 에러와 무관)
+    // 자기무장 모듈(host_poll)은 SDR 에러 중에도 돌린다 — 채널이 사라지거나 detect 가
+    // 꺼진 걸 반영해 **해제**하는 일도 여기서 하기 때문이다. 아래 재장전만 에러 시 건너뛴다.
+    for(auto& m : reg()) if(m.host_poll) m.host_poll(v);
     if(v.sdr_stream_error.load()) return;
     for(auto& m : reg()){
         if(!m.target_modes) continue;
@@ -295,6 +298,14 @@ void bewe_mod_reconcile(FFTViewer& v){
         }
     }
 }
+// 운용자 수동 실행 ('a' 키). 코어는 모듈 id 를 모른 채 전 모듈에 돌린다.
+bool bewe_mod_manual(FFTViewer& v, int ch){
+    if(ch < 0 || ch >= MAX_CHANNELS) return false;
+    bool any = false;
+    for(auto& m : reg()) if(m.on_manual){ m.on_manual(v, ch); any = true; }
+    return any;
+}
+
 // 채널 진짜 삭제/정지(stop_dem stop_decoders) 시 그 ch 의 모든 모듈 want 해제 — 깜빡임과 구분.
 void bewe_mod_want_clear_ch(int ch){
     if(ch<0 || ch>=MAX_CHANNELS) return;

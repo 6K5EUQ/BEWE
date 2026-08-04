@@ -23,6 +23,13 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/src/modules/ais/ais_ai.cpp)
     add_compile_definitions(BEWE_MODULE_AIS_AI)
 endif()
 
+# ── BEAE AMC AI (자동 변조분류) — 독립 판매/제거 가능 ────────────────────────
+# amc_ai.cpp 있을 때만 define 주입. 파일 삭제 = 추론 호출부가 #ifdef 로 빠지고
+# 모듈은 캡처만 하는 껍데기가 된다 (폴더째 지우면 흔적 zero).
+if(EXISTS ${CMAKE_SOURCE_DIR}/src/modules/amc/amc_ai.cpp)
+    add_compile_definitions(BEWE_MODULE_AMC_AI)
+endif()
+
 # ── GUARD (차세대 해양관제 플랫폼: 경보/의사결정지원) — 모듈 존재 시만 define ──
 # ais_view 오버레이·ais_module 데몬 연결부가 #ifdef 로 빠짐 → 폴더 제거 = 무영향.
 if(EXISTS ${CMAKE_SOURCE_DIR}/src/modules/guard/guard_module.cpp)

@@ -37,6 +37,15 @@ struct BeweModule {
     bool (*host_start)(FFTViewer& v, int ch_idx);          // 워커 시작 (성공 여부)
     void (*host_stop)(FFTViewer& v, int ch_idx);           // 워커 정지
     void (*on_ch_stop)(FFTViewer& v, int ch_idx);          // 채널 demod 종료/모드변경 → 정리
+    // HOST: 주기 호출(~1Hz, bewe_mod_reconcile 안). 운용자가 켜 주는 게 아니라 **채널 상태를
+    // 보고 스스로 무장/해제**하는 모듈용 — 예: detect 채널이 생기면 자동으로 붙는 분류기.
+    // 여기서 bewe_mod_set_target() 을 부르면 host_start/host_mask/ring공급/JOIN 표시가
+    // 전부 기존 경로를 그대로 탄다. nullptr = 미사용.
+    void (*host_poll)(FFTViewer& v);
+    // 운용자가 채널을 고르고 수동 실행을 요청했을 때 (GUI 'a' 키). 코어는 어느 모듈인지
+    // 모른 채 전 모듈에 돌린다 — 그래야 모듈을 지웠을 때 코어에 흔적이 안 남는다.
+    // net/UI 스레드에서 불리므로 **여기서 무거운 일을 하지 말 것** (플래그만 세우고 워커가 처리).
+    void (*on_manual)(FFTViewer& v, int ch_idx);
     // ── 데이터 수신 (JOIN/뷰어): 라이브 + 히스토리 레코드 공용 ──
     // station = 복조한 기지 station_id ("DGS-2_DGS-2" / "LOCAL")
     void (*on_data)(FFTViewer& v, const char* station, const uint8_t* d, size_t n);
@@ -75,6 +84,9 @@ bool bewe_mod_ch_decode_on(bool remote, int ch);                 // decode 활�
 float bewe_mod_ch_spec_bw(int ch);
 void bewe_mod_reconcile(FFTViewer& v);                           // want↔host_mask 재조정 (HOST 주기 호출)
 void bewe_mod_want_clear_ch(int ch);                             // 채널 진짜 삭제 시 그 ch want 해제
+// 운용자 수동 실행 (GUI 'a' 키) → on_manual 을 가진 전 모듈에 전달. 반환 = 처리한 모듈 유무.
+// 코어가 모듈 id 를 모르게 하는 게 목적 — 모듈 폴더를 지우면 이 호출은 그냥 false 가 된다.
+bool bewe_mod_manual(FFTViewer& v, int ch);
 void bewe_mod_rec_request(const char* id, const char* station, int ch, uint64_t rec_id);            // JOIN→HOST: 녹음 WAV 요청
 void bewe_mod_rec_send(const char* id, uint64_t rec_id, uint32_t total, uint32_t off, const void* b, uint32_t n); // HOST→JOIN: WAV 청크 회신
 // HOST 워커 → 디코드 1건 방출: Central 전송(+로컬 뷰 반영). payload = 모듈 정의 레코드

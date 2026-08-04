@@ -1,0 +1,4 @@
+# AMC inference daemon. torch is the heavy one; CPU wheels are enough for
+# per-burst classification (a 2048-sample forward pass is ~1 ms on a Pi5 core).
+numpy>=1.24
+torch>=2.0
