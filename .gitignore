@@ -112,3 +112,7 @@ BEAE/stt/*.log
 BEAE/amc/.venv/
 BEAE/amc/**/__pycache__/
 BEAE/amc/data/
+# BEAE UAV (ExpressLRS 2.4GHz 역산/해독) — 코드만 추적, venv/IQ녹음 로컬 전용
+BEAE/uav/.venv/
+BEAE/uav/**/__pycache__/
+BEAE/uav/data/
