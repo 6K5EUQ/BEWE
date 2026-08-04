@@ -8,17 +8,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 import threading
 
 import numpy as np
 import torch
 
-# ais_ai.model holds the shared IQResNet1D architecture (train.py does the same).
-sys.path.insert(0, os.path.join(os.path.expanduser("~"), "BEWE", "BEAE", "ais"))
-from ais_ai.model import IQResNet1D  # noqa: E402
-
 from .config import Config
+from .model import IQResNet1D
 from .synth import CLASSES, to_tensor_layout
 
 log = logging.getLogger("amc_ai.infer")
