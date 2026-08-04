@@ -408,8 +408,8 @@ static void preload_full_v4(){
 }
 
 // 열린 파일의 dB 색 윈도를 파일 데이터 자체에서 구한다.
-// 실시간 autoscale (rtlsdr_io.cpp 등) 과 같은 공식: 노이즈플로어 = 하위 15% 분위수,
-// pmin = noise - 5dB, pmax = peak + 20dB, 최소 스팬 20dB.
+// 실시간 autoscale 과 같은 공식: 노이즈플로어 = 하위 15% 분위수 →
+// autoscale_db_window() (fft_viewer.hpp) 에 그대로 넘긴다.
 // 바이트 히스토그램(256칸)만 누적하므로 분위수·최대값이 O(1) 로 나온다.
 //
 // 대형 파일 로딩 지연 방지 — 서브샘플 스캔:
@@ -479,9 +479,7 @@ static void scan_file_db_range(){
     const float fmin = g_open.hdr.db_min, fmax = g_open.hdr.db_max;
     float noise = LongWaterfall::byte_to_db((uint8_t)noise_b, fmin, fmax);
     float peak  = LongWaterfall::byte_to_db((uint8_t)peak_b,  fmin, fmax);
-    g_file_db_min = noise - 5.0f;
-    g_file_db_max = peak + 20.0f;
-    if(g_file_db_max - g_file_db_min < 20.f) g_file_db_max = g_file_db_min + 20.f;
+    autoscale_db_window(noise, peak, g_file_db_min, g_file_db_max);
 }
 
 void rebuild_texture(float view_db_min, float view_db_max){

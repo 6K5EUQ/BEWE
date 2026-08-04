@@ -4275,10 +4275,8 @@ void run_streaming_viewer(){
                             // 피크: 실제 max (99% 분위수는 신호 bin이 너무 적어 노이즈권에 머무름)
                             float _peak = *std::max_element(v.autoscale_accum.begin(),
                                 v.autoscale_accum.end());
-                            v.display_power_min = _noise - 5.f;
-                            v.display_power_max = _peak + 20.f;
-                            if(v.display_power_max - v.display_power_min < 20.f)
-                                v.display_power_max = v.display_power_min + 20.f;
+                            autoscale_db_window(_noise, _peak,
+                                v.display_power_min, v.display_power_max);
                             v.join_manual_scale = true; // 수신 frm.pmin 덮어쓰기 차단
                             v.autoscale_accum.clear();
                             v.autoscale_active = false;
@@ -4288,7 +4286,9 @@ void run_streaming_viewer(){
                         }
                     }
                     else {
-                        // 10초마다: 현재 프레임 peak 가 천장(display_power_max=직전 peak+20) 초과면 autoscale 재실행
+                        // 10초마다: 현재 프레임 peak 가 천장(display_power_max) 초과면 autoscale 재실행.
+                        // 헤드룸이 좁아진 빈 대역에서는 이 재실행이 더 자주 걸린다 — 의도된 것이다.
+                        // 스퍼 하나뿐이던 대역에 진짜 신호가 뜨면 곧바로 창을 다시 잡아야 한다.
                         if(v.autoscale_check_last.time_since_epoch().count()==0)
                             v.autoscale_check_last = std::chrono::steady_clock::now();
                         float _cel = std::chrono::duration<float>(

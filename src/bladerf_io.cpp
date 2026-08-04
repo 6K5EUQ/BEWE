@@ -643,10 +643,7 @@ void FFTViewer::commit_fft_row(const std::vector<float>& pacc, int fcnt){
              std::nth_element(tmp.begin(),tmp.begin()+(ptrdiff_t)idx_lo,tmp.end());
              float noise=tmp[idx_lo];
              float peak=*std::max_element(tmp.begin(),tmp.end());
-             display_power_min=noise-5.0f;
-             display_power_max=peak+20.0f;
-             if(display_power_max-display_power_min<20.f)
-                 display_power_max=display_power_min+20.f;
+             autoscale_db_window(noise,peak,display_power_min,display_power_max);
              header.power_min=display_power_min;
              header.power_max=display_power_max;
              bewe_log_push(0,"[autoscale]%s noise=%.1f peak=%.1f → pmin=%.1f pmax=%.1f\n",

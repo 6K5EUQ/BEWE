@@ -48,6 +48,23 @@
 #include <utility>
 #include <sys/types.h>
 
+// ── autoscale dB 창 (HOST 실시간 / JOIN 실시간 / HIST 파일 공용) ─────────────
+// 천장 헤드룸을 피크 높이에 비례시킨다. 예전엔 무조건 peak+20 이었는데, 빈 대역에서
+// 유일한 피크가 잡음보다 10 dB 남짓 위인 스퍼 하나뿐이면 범위가 35 dB 넘게 벌어져
+// 실제 내용물이 컬러맵 아래쪽 1/3 에 눌려 워터폴이 통짜 파랑으로 보였다 (915 MHz).
+// (peak-noise)*0.5 를 5~20 dB 로 자르면 붐비는 대역(스팬 40 dB 이상)은 종전과 똑같이
+// 20 dB 헤드룸을 받고, 빈 대역만 천장이 내려와 대비가 산다.
+// 세 경로가 반드시 같은 창을 써야 한다 — 어긋나면 같은 신호가 HOST·JOIN·HIST 에서
+// 다른 색으로 보인다.
+inline void autoscale_db_window(float noise, float peak, float& out_min, float& out_max){
+    float headroom = (peak - noise) * 0.5f;
+    if(headroom <  5.f) headroom =  5.f;
+    if(headroom > 20.f) headroom = 20.f;
+    out_min = noise - 5.f;
+    out_max = peak + headroom;
+    if(out_max - out_min < 20.f) out_max = out_min + 20.f;   // 최소 스팬
+}
+
 // ── Global log helper (ui.cpp에서 정의, 모든 .cpp에서 사용 가능) ─────────
 extern std::string g_sdr_force; // "" = 자동, "bladerf"|"rtlsdr"|"pluto"
 extern bool scan_sdr_present_quiet();  // 상태표시 전용 저빈도 체크 (로그 스팸 없음, hw_detect.cpp 참고)
