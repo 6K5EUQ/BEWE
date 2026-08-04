@@ -36,6 +36,15 @@ ImVec4 conf_col(float c){
 void draw_panel(FFTViewer& v){
     const char* stn = bewe_mod_my_station();
 
+    // 모듈 데이터는 Recv 를 켠 JOIN 에게만 흐른다. 예전엔 DEMOD 탭 헤더바의 Recv
+    // 버튼이 그 역할을 했지만 이 패널이 유일한 소비자가 됐으므로, 섹션을 펼치는
+    // 것 자체를 구독 의사로 본다. 안 그러면 HOST 는 멀쩡히 분류하는데 화면은
+    // 영원히 "waiting for a burst" 다.
+    // 접으면 draw_panel 이 안 불리니 구독은 그대로 유지된다 — 레코드가 버스트당
+    // 1건뿐이라 트래픽이 무시할 수준이고, 껐다 켤 때마다 오늘 이력을 다시 받는
+    // 편이 더 비싸다.
+    if(!bewe_mod_recv("amc")) bewe_mod_set_recv(v, "amc", true);
+
     // 채널별 최신 레코드 1건 (log 은 시간순 append 라 뒤에서부터 찾는다).
     // 락을 짧게 잡고 값만 복사한다 — ImGui 호출을 락 안에서 하면 안 된다.
     AmcRecord last[MAX_CHANNELS];
@@ -80,7 +89,11 @@ void draw_panel(FFTViewer& v){
             }
         } else {
             ImGui::Text("[%2d] %9.4f MHz", v.freq_sorted_display_num(ci), cf);
-            ImGui::SameLine(); ImGui::TextDisabled("waiting for a burst");
+            ImGui::SameLine();
+            // 구독 직후엔 오늘 이력을 받아오는 중이다. 그걸 "신호 대기"로 적으면
+            // 운용자가 안테나나 스퀄치를 의심하게 된다 — 다른 상태다.
+            if(bewe_mod_hist_loading("amc")) ImGui::TextDisabled("loading ...");
+            else                             ImGui::TextDisabled("waiting for a burst");
         }
         ImGui::Spacing();
         ImGui::PopID();
