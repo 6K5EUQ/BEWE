@@ -2281,6 +2281,7 @@ void run_cli_host(){
     std::atomic<bool> usb_reset_in_progress{false};
     float    sdr_retry_timer = 0.f;
     float    chassis_unpause_timer = -1.f;
+    float    kraken_rx_up_timer = -1.f;
 
     bewe_log_push(0,"[BEWE CLI] Ready. Type /help for commands.\n");
     fflush(stdout);
@@ -2635,7 +2636,18 @@ void run_cli_host(){
         // 유닛명은 station 에서 만든다: "DGS-X" -> bewe-dgsx-daq (FIFO 명명과 동일
         // 규칙 — 하이픈 제거 + 소문자). 그 유닛이 없는 기지면 조용히 건너뛴다.
         auto kraken_restart_daq = [&](const char* tag){
-            if(v.hw.type != HWType::KRAKEN) return false;
+            // hw.type 은 DAQ 연결에 성공했을 때만 KRAKEN 이 된다 — make_kraken_config()
+            // 가 kraken_io.cpp 의 성공 경로에만 있고, 실패하면 그 앞에서 return false
+            // 한다. 그래서 부팅 시점에 이미 DAQ 가 죽어 있으면 initialize() 가 5회 다
+            // 실패하고 hw.type 이 NONE 으로 남는다 — 정작 DAQ 를 살려야 할 바로 그
+            // 상황에서 이 복구 경로가 막히는 것이다. 그러면 아래 일반 USB 경로로
+            // 떨어지는데 Kraken 은 vid==0 이라 usb_deep_powercycle 이 아예 실행되지
+            // 않아 rc 초기값 1 그대로 "FAILED (rc=1)" 만 찍고 끝난다.
+            // (2026-08-03 DGS-X: DAQ 가 14:50 에 죽고 BEWE 가 14:52 에 떠서 이 상태로
+            //  묶였다. /chassis 1 reset 을 쳐도 8시간 내내 못 살렸다.)
+            // Kraken 은 --sdr kraken 명시 지정으로만 뜨므로(hw_detect.cpp) 그 플래그가
+            // "이 기지는 Kraken 기지" 의 정확한 신호다 — 초기화 성공 여부와 무관하다.
+            if(v.hw.type != HWType::KRAKEN && g_sdr_force != "kraken") return false;
             std::string s;
             for(char c : station_str) if(c != '-' && c != '_') s += (char)tolower((unsigned char)c);
             if(s.empty()) return false;
@@ -2731,6 +2743,11 @@ void run_cli_host(){
                 cap_joined.store(true);
                 usb_reset_pending = false;
                 usb_reset_done    = true;
+                // rx_stopped 면 아래 reconnect 로직이 통째로 게이트돼 있어(그 조건에
+                // !rx_stopped 가 있다) DAQ 만 살아나고 기지는 계속 멈춰 있다. 무인
+                // 기지에는 /rx start 를 쳐 줄 사람이 없으므로 캘리브가 끝날 때쯤
+                // 스스로 올린다. DAQ 캘리브가 ~40초라 여유를 둔다.
+                if(v.rx_stopped.load()) kraken_rx_up_timer = 50.f;
                 continue;
             }
 
@@ -2873,6 +2890,17 @@ void run_cli_host(){
                 v.spectrum_pause.store(false);
                 if(v.net_srv) v.net_srv->broadcast_heartbeat(0, 0, 0);
                 bewe_log_push(0,"[CLI] chassis 1 reset: spectrum_pause released\n");
+            }
+        }
+
+        // ── Kraken: DAQ 재시작 후 RX 자동 기동 ────────────────────────────
+        // 부팅 때 DAQ 가 죽어 있었던 기지는 rx_stopped 로 대기 중이고, 그 상태에선
+        // reconnect 로직이 안 돈다. DAQ 를 살렸으니 여기서 한 번 올려 준다.
+        if(kraken_rx_up_timer > 0.f){
+            kraken_rx_up_timer -= dt;
+            if(kraken_rx_up_timer <= 0.f){
+                kraken_rx_up_timer = -1.f;
+                if(v.rx_stopped.load()) sdr_up("DAQ restarted");
             }
         }
 
