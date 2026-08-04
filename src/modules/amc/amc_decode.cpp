@@ -130,11 +130,15 @@ void worker(FFTViewer& v, int ch_idx){
         // Channel::sq_gate_prev 는 GUI 페이드용이라 건드리면 안 된다 — 로컬 변수로 엣지를 만든다.
         bool gate = ch.sq_gate.load(std::memory_order_relaxed);
         int64_t tnow = now_ms();
-        // 버스트: 상승엣지마다. 연속신호: 열려 있는 동안 AMC_PERIOD_MS 주기로.
-        // 두 경우를 한 조건으로 다룬다 — 스퀄치가 열려 있고, 마지막 측정에서
-        // 충분히 지났으면 잰다.
+        // 주기 측정은 **스퀄치와 무관하게** 돈다. 예전엔 sq_gate 가 열릴 때만 쟀는데,
+        // 스퀄치 임계는 캘리브레이션으로 정해지는 값이라 연속 신호가 임계 바로 아래에
+        // 걸리면 게이트가 영영 안 열리고 AMC 가 한 번도 안 돌았다 (2026-08-04 DGS-1:
+        // 신호 -54~-57 dBFS, 임계 -53.94 dB → 레코드 0건). AMC 버튼은 "이 채널을 계속
+        // 분류해 달라" 는 뜻이지 "스퀄치가 열리면" 이 아니다.
+        // 스퀄치 상승엣지는 그대로 두되 **즉시 트리거**로만 쓴다 — 짧은 버스트를
+        // 다음 주기까지 기다리지 않고 바로 잡기 위해서다.
         const bool rising  = gate && !gate_prev;
-        const bool periodic= gate && (tnow - last_infer_ms >= AMC_PERIOD_MS);
+        const bool periodic= (tnow - last_infer_ms >= AMC_PERIOD_MS);
         if((rising || periodic) && tnow - last_infer_ms > AMC_MIN_GAP_MS){
             cap_have = 0; cap_arm = true;
             cap_trig = AMC_TRIG_SQUELCH;

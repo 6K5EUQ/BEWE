@@ -29,6 +29,7 @@ void host_emit(FFTViewer& v, AmcRecord m);
 // 내 화면에 뜨면 안 되기 때문이다.
 bool  local_on(int ch);
 void  set_local_on(FFTViewer& v, int ch, bool on);
+int64_t local_on_since(int ch);   // 켠 시각(epoch ms). 0 = 꺼짐. 집계 시작점.
 
 // 공통 (amc_module.cpp)
 void append_log(const AmcRecord& m);

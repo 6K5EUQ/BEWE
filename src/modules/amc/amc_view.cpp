@@ -68,6 +68,9 @@ void draw_panel(FFTViewer& v){
         for(int i=(int)log.size()-1; i>=0 && scanned<4000; i--, scanned++){
             const AmcRecord& m = log[i];
             if(m.ch < 0 || m.ch >= MAX_CHANNELS) continue;
+            // AMC 를 켠 시점 이후 것만 — 껐다 켜면 평균이 리셋된다.
+            const int64_t since = local_on_since(m.ch);
+            if(since && m.t_ms < since) continue;
             Agg& a = agg[m.ch];
             if(!has[m.ch]){                         // 이 채널의 최신 = 기준
                 has[m.ch]=true; a.freq=m.freq; a.bw=m.bw_khz; a.t_ms=m.t_ms;

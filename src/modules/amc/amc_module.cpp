@@ -89,11 +89,18 @@ static void host_poll(FFTViewer& v){
 // HOST 가 방송하는 host_mask 로 판단하지 않는다 — 그걸 쓰면 남이 켠 채널이 내
 // 화면에도 켜진 것으로 보인다. HOST 는 켠 사람들의 합집합으로 워커를 돌리고,
 // 화면은 각자 자기가 켠 것만 본다.
-static bool g_local_on[MAX_CHANNELS] = {};
+static bool    g_local_on[MAX_CHANNELS] = {};
+static int64_t g_on_since[MAX_CHANNELS] = {};   // 켠 시각 — 확률 평균의 시작점
 bool local_on(int ch){ return (ch>=0 && ch<MAX_CHANNELS) ? g_local_on[ch] : false; }
+int64_t local_on_since(int ch){ return (ch>=0 && ch<MAX_CHANNELS) ? g_on_since[ch] : 0; }
 void set_local_on(FFTViewer& v, int ch, bool on){
     if(ch<0 || ch>=MAX_CHANNELS) return;
     g_local_on[ch] = on;
+    // 껐다 켜면 평균을 처음부터 다시 모은다 — 운용자가 "지금부터 다시 보자" 는
+    // 뜻으로 누르는데 옛 측정이 계속 섞이면 그 의도가 안 먹는다.
+    g_on_since[ch] = on ? (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::system_clock::now().time_since_epoch()).count()
+                        : 0;
     bewe_mod_set_target_owned(v, "amc", bewe_mod_my_station(), ch, on, login_get_id());
 }
 
