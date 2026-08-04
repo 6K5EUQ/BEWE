@@ -46,6 +46,10 @@ struct BeweModule {
     // 코어는 모듈 id 를 모른 채 등록된 모듈을 훑어 그린다 — 그래야 모듈 폴더를
     // 지웠을 때 코어 바이너리에 그 이름이 안 남는다.
     const char* ch_btn;    // 채널 행 버튼 라벨 ("AMC"). nullptr = 버튼 없음
+    // 그 버튼의 상태/토글. nullptr 이면 코어가 공유 host_mask(bewe_mod_ch_on)로 판단한다.
+    // 운용자마다 다른 모듈은 이 둘을 채워 자기 로컬 상태를 쓴다.
+    bool (*ch_btn_on)(int ch_idx);
+    void (*ch_btn_set)(FFTViewer& v, int ch_idx, bool on);
     const char* panel;     // STATUS 접이식 섹션 제목. nullptr = 섹션 없음
     void (*draw_panel)(FFTViewer& v);   // 그 섹션 내용 (GUI 전용)
     // ── 데이터 수신 (JOIN/뷰어): 라이브 + 히스토리 레코드 공용 ──
@@ -133,6 +137,14 @@ bool bewe_mod_hist_fetching(const char* id);                     // 과거 데�
 void bewe_mod_req_ch_list(const char* id);                       // 타깃 목록 요청 (런처 폴링)
 std::vector<MpChEntry> bewe_mod_targets(FFTViewer& v, const char* id); // 타깃 목록 (LOCAL 이면 로컬 채널)
 void bewe_mod_set_target(FFTViewer& v, const char* id, const char* station, int ch, bool on); // 디코드 on/off
+// 운용자별 on/off. ACARS/AIS 처럼 "한 번 복조해 모두가 같은 걸 본다" 가 맞는 모듈은
+// 위 공유 버전을 쓰고, AMC 처럼 **각자 보고 싶은 채널이 다른** 모듈은 이쪽을 쓴다.
+// HOST 는 채널마다 켠 운용자 집합을 들고 있다가 마지막 한 명이 끌 때만 워커를 내린다
+// — 남이 껐다고 내 분류가 멈추면 안 되기 때문이다.
+// 와이어는 MpSet 뒤에 owner[24] 를 덧붙일 뿐이라 구조체 크기·Central 무변경이고,
+// 구/신 혼용도 안전하다 (구 HOST 는 뒤를 무시, 신 HOST 는 owner 없으면 공유로 취급).
+void bewe_mod_set_target_owned(FFTViewer& v, const char* id, const char* station,
+                               int ch, bool on, const char* owner);
 // 채널필터 geometry/mode 변경 (어느 기지든): center/bw → lo/hi, mode=0/1/2. 원격은 Central
 // 경유 해당 HOST 적용 + CHANNEL_SYNC 로 전 유저 동기화. LOCAL/HOST 는 즉시 적용.
 void bewe_mod_edit_ch(FFTViewer& v, const char* station, int ch, int mode, float lo, float hi);

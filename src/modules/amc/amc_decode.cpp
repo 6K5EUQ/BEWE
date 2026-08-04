@@ -27,6 +27,11 @@ static constexpr int AMC_CAP = 4096;
 // 같은 채널에서 이 간격 안에는 다시 재지 않는다. detect 는 hold 창(360ms) 경계에서
 // lock↔release 가 튈 수 있어, 없으면 한 교신에 추론이 수십 번 돈다.
 static constexpr int64_t AMC_MIN_GAP_MS = 500;
+// 스퀄치가 계속 열려 있는 연속 신호(방송 등)에서 다시 재는 주기. 버스트는 상승엣지가
+// 매번 트리거하므로 이 주기와 무관하다. 1초로 잡은 이유: 추론 1회가 DDC ~4096 표본 +
+// UDS 왕복 10 ms 라 채널당 1 Hz 면 코어 1개의 1 % 수준이고, 그 대신 판정이 한 번의
+// 2.4 ms 스냅샷에 걸리지 않고 여러 표본으로 평균된다 (분산 감소).
+static constexpr int64_t AMC_PERIOD_MS = 1000;
 // 데시메이션 하한. 출력 48 kHz 이상을 보장해 4096 표본이 항상 ≤85 ms 안에 차게 한다 —
 // detect hold 창(360 ms)보다 넉넉히 짧아야 lock 이 풀리기 전에 캡처가 끝난다.
 static constexpr double AMC_MIN_OUT_SR = 48000.0;
@@ -125,7 +130,12 @@ void worker(FFTViewer& v, int ch_idx){
         // Channel::sq_gate_prev 는 GUI 페이드용이라 건드리면 안 된다 — 로컬 변수로 엣지를 만든다.
         bool gate = ch.sq_gate.load(std::memory_order_relaxed);
         int64_t tnow = now_ms();
-        if(gate && !gate_prev && tnow - last_infer_ms > AMC_MIN_GAP_MS){
+        // 버스트: 상승엣지마다. 연속신호: 열려 있는 동안 AMC_PERIOD_MS 주기로.
+        // 두 경우를 한 조건으로 다룬다 — 스퀄치가 열려 있고, 마지막 측정에서
+        // 충분히 지났으면 잰다.
+        const bool rising  = gate && !gate_prev;
+        const bool periodic= gate && (tnow - last_infer_ms >= AMC_PERIOD_MS);
+        if((rising || periodic) && tnow - last_infer_ms > AMC_MIN_GAP_MS){
             cap_have = 0; cap_arm = true;
             cap_trig = AMC_TRIG_SQUELCH;
             cap_t_ms = tnow;

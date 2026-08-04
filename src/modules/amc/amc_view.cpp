@@ -6,6 +6,7 @@
 #include <imgui.h>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <string>
 #include <vector>
 #include <ctime>
@@ -45,17 +46,43 @@ void draw_panel(FFTViewer& v){
     // 편이 더 비싸다.
     if(!bewe_mod_recv("amc")) bewe_mod_set_recv(v, "amc", true);
 
-    // 채널별 최신 레코드 1건 (log 은 시간순 append 라 뒤에서부터 찾는다).
-    // 락을 짧게 잡고 값만 복사한다 — ImGui 호출을 락 안에서 하면 안 된다.
-    AmcRecord last[MAX_CHANNELS];
+    // 채널별 집계. 한 번의 측정은 2.4 ms 스냅샷이라 값이 크게 흔들린다 — 같은
+    // 주파수·대역폭으로 잰 것들을 평균해 그 분산을 줄인다 (독립 표본의 확률 평균).
+    // 원본 레코드와 아카이브는 건드리지 않는다: 여기서만 모아 보여줄 뿐이다.
+    // 주파수나 폭이 바뀌면 다른 신호이므로 거기서 끊는다.
+    struct Agg {
+        float   p[AMC_NCLASS] = {};
+        int     n = 0;
+        int64_t t_ms = 0;          // 가장 최근 측정 시각
+        float   freq = 0, bw = 0;
+        char    model[16] = {};
+    };
+    Agg agg[MAX_CHANNELS];
     bool has[MAX_CHANNELS] = {};
     {
         std::lock_guard<std::mutex> lk(mtx);
-        for(int i=(int)log.size()-1; i>=0; i--){
+        // 최근 것부터 거슬러 올라가되, 채널당 상한을 둔다 — log 가 10만 건까지
+        // 자라므로 매 프레임 전부 훑으면 안 된다.
+        const int MAX_AGG = 32;
+        int scanned = 0;
+        for(int i=(int)log.size()-1; i>=0 && scanned<4000; i--, scanned++){
             const AmcRecord& m = log[i];
-            if(m.ch < 0 || m.ch >= MAX_CHANNELS || has[m.ch]) continue;
-            last[m.ch] = m; has[m.ch] = true;
+            if(m.ch < 0 || m.ch >= MAX_CHANNELS) continue;
+            Agg& a = agg[m.ch];
+            if(!has[m.ch]){                         // 이 채널의 최신 = 기준
+                has[m.ch]=true; a.freq=m.freq; a.bw=m.bw_khz; a.t_ms=m.t_ms;
+                memcpy(a.model, m.model, sizeof(a.model));
+            } else {
+                if(a.n >= MAX_AGG) continue;
+                // 같은 신호인지: 중심주파수 1 kHz, 폭 2 % 이내
+                if(fabsf(m.freq - a.freq) > 0.001f) continue;
+                if(a.bw > 0 && fabsf(m.bw_khz - a.bw) > a.bw*0.02f) continue;
+            }
+            for(int k=0;k<AMC_NCLASS;k++) a.p[k] += m.p[k];
+            a.n++;
         }
+        for(int c=0;c<MAX_CHANNELS;c++)
+            if(agg[c].n>0) for(int k=0;k<AMC_NCLASS;k++) agg[c].p[k] /= (float)agg[c].n;
     }
 
     // 표시 순서는 Active Channels 와 같게 — 표시번호(주파수 정렬) 오름차순.
@@ -63,7 +90,7 @@ void draw_panel(FFTViewer& v){
     int order[MAX_CHANNELS], n_ord = 0;
     for(int ci=0; ci<MAX_CHANNELS; ci++){
         if(!v.channels[ci].filter_active) continue;
-        if(!bewe_mod_ch_on("amc", stn, ci)) continue;
+        if(!local_on(ci)) continue;              // 내가 켠 것만 (운용자별)
         order[n_ord++] = ci;
     }
     for(int a=1; a<n_ord; a++){                       // 삽입정렬 (n 이 작다)
@@ -77,30 +104,30 @@ void draw_panel(FFTViewer& v){
         float cf = (v.channels[ci].s + v.channels[ci].e) * 0.5f;
         ImGui::PushID(ci);
         if(has[ci]){
-            const AmcRecord& m = last[ci];
-            char ts[12]; hms(m.t_ms, ts);
+            const Agg& a = agg[ci];
+            char ts[12]; hms(a.t_ms, ts);
             // 헤더는 "어느 채널의 언제 측정인가"만. 판정 결과는 바로 아래 막대가
             // 이미 말하고 있어서 같은 값을 두 번 쓰면 줄만 시끄러워진다.
             ImGui::Text("[%2d] %9.4f MHz", v.freq_sorted_display_num(ci), cf);
-            ImGui::SameLine(); ImGui::TextDisabled("%s", ts);
+            ImGui::SameLine(); ImGui::TextDisabled("%s  n=%d", ts, a.n);
 
             // 막대는 확률 내림차순 — 가장 유력한 후보가 항상 맨 위에 온다.
             int idx[AMC_NCLASS];
             for(int k=0;k<AMC_NCLASS;k++) idx[k]=k;
-            for(int a=1;a<AMC_NCLASS;a++){
-                int k=idx[a]; float pv=m.p[k]; int b=a-1;
-                while(b>=0 && m.p[idx[b]] < pv){ idx[b+1]=idx[b]; b--; }
+            for(int x=1;x<AMC_NCLASS;x++){
+                int k=idx[x]; float pv=a.p[k]; int b=x-1;
+                while(b>=0 && a.p[idx[b]] < pv){ idx[b+1]=idx[b]; b--; }
                 idx[b+1]=k;
             }
             for(int r=0;r<AMC_NCLASS;r++){
                 const int k = idx[r];
-                if(m.p[k] < 0.005f && r>0) continue;   // 0에 가까운 건 줄만 낭비
+                if(a.p[k] < 0.005f && r>0) continue;   // 0에 가까운 건 줄만 낭비
                 ImGui::Text("  %-6s", amc_class_name(k));
                 ImGui::SameLine(88.f);
-                ImVec4 c = (r==0) ? conf_col(m.p[k]) : ImVec4(0.45f,0.45f,0.5f,1.f);
+                ImVec4 c = (r==0) ? conf_col(a.p[k]) : ImVec4(0.45f,0.45f,0.5f,1.f);
                 ImGui::PushStyleColor(ImGuiCol_PlotHistogram, c);
-                char ov[16]; snprintf(ov,sizeof(ov),"%.0f%%", m.p[k]*100.f);
-                ImGui::ProgressBar(m.p[k], ImVec2(-1.f, 12.f), ov);
+                char ov[16]; snprintf(ov,sizeof(ov),"%.0f%%", a.p[k]*100.f);
+                ImGui::ProgressBar(a.p[k], ImVec2(-1.f, 12.f), ov);
                 ImGui::PopStyleColor();
             }
         } else {

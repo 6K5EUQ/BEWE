@@ -19,6 +19,13 @@ from .synth import CLASSES, to_tensor_layout
 
 log = logging.getLogger("amc_ai.infer")
 
+# 스레드 1개로 묶는다. 모델이 0.65M 파라미터로 작아서 병렬화 이득보다 스레드 동기화
+# 비용이 훨씬 크다 — 실측(DGS-1, 10코어): 10스레드 96.5 ms CPU/회, 1스레드 7.0 ms.
+# 14배 차이다. 지연은 9.6 → 7.0 ms 로 오히려 줄었다.
+# 채널마다 초당 1회 도는 구조라 총 CPU 가 그대로 기지 부하가 되고, Pi5 기지에서는
+# 이 차이가 결정적이다.
+torch.set_num_threads(1)
+
 
 class ModelRegistry:
     def __init__(self, cfg: Config):

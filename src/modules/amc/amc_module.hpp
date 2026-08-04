@@ -25,6 +25,11 @@ void worker(FFTViewer& v, int ch_idx);
 // 워커 → 스탬프 + 호스트 아카이브 + framework emit
 void host_emit(FFTViewer& v, AmcRecord m);
 
+// JOIN 로컬 on/off (운용자별). HOST 의 host_mask 를 안 본다 — 남이 켠 채널이
+// 내 화면에 뜨면 안 되기 때문이다.
+bool  local_on(int ch);
+void  set_local_on(FFTViewer& v, int ch, bool on);
+
 // 공통 (amc_module.cpp)
 void append_log(const AmcRecord& m);
 void store_append(const AmcRecord& m);          // ~/BEWE/modules/amc/amc_YYYYMMDD.jsonl

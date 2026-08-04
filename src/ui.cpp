@@ -5772,11 +5772,14 @@ void run_streaming_viewer(){
                                     if(!mm.ch_btn) continue;
                                     ImGui::SameLine(0,6);
                                     bool avail = bewe_mod_avail(mm.id, stn);
-                                    bool on    = avail && bewe_mod_ch_on(mm.id, stn, ci);
+                                    bool on    = avail && (mm.ch_btn_on ? mm.ch_btn_on(ci)
+                                                                        : bewe_mod_ch_on(mm.id, stn, ci));
                                     if(!avail)  ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(0.6f,0.1f,0.1f,1.f));
                                     else if(on) ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(0.1f,0.55f,0.1f,1.f));
-                                    if(ImGui::SmallButton(mm.ch_btn) && avail)
-                                        bewe_mod_set_target(v, mm.id, stn, ci, !on);
+                                    if(ImGui::SmallButton(mm.ch_btn) && avail){
+                                        if(mm.ch_btn_set) mm.ch_btn_set(v, ci, !on);
+                                        else              bewe_mod_set_target(v, mm.id, stn, ci, !on);
+                                    }
                                     if(!avail || on) ImGui::PopStyleColor();
                                 }
                             }

@@ -4,7 +4,8 @@
 #include "net_server.hpp"   // CH_EDIT 적용 시 broadcast_channel_sync (HOST 만)
 #endif
 #include "kst_time.hpp"     // 오늘 누적 디코드수 시드 (저장 JSONL = KST 일자)
-#include "login.hpp"        // CH_ADD owner = login_get_id()
+#include "login.hpp"
+#include <set>        // CH_ADD owner = login_get_id()
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -248,6 +249,25 @@ void bewe_mod_host_mask_clear(FFTViewer& v, const char* id, int ch){
 }
 
 // HOST 가 SET 적용 (Central 라우팅 수신 / LOCAL 직접)
+// ── 운용자별 소유권 (AMC 처럼 각자 다른 채널을 보는 모듈) ───────────────────
+// HOST 만 쓴다. key = (mod_id, ch) → 켠 운용자 id 집합. 집합이 빌 때만 워커를 내린다.
+static std::map<std::pair<std::string,int>, std::set<std::string>> g_owners;  // g_fw_mtx 보호
+
+// 소유자 집합을 갱신하고, 0→1 일 때만 켜고 1→0 일 때만 끈다.
+static void host_apply_set(FFTViewer& v, const BeweModule& m, int ch, bool on);
+static void host_apply_set_owned(FFTViewer& v, const BeweModule& m, int ch, bool on, const char* owner){
+    if(!owner || !owner[0]){ host_apply_set(v, m, ch, on); return; }   // 구버전/LOCAL → 공유
+    bool now_on;
+    {
+        std::lock_guard<std::mutex> lk(g_fw_mtx);
+        auto& s = g_owners[{std::string(m.id), ch}];
+        if(on) s.insert(owner); else s.erase(owner);
+        now_on = !s.empty();
+    }
+    bool was_on = ((bewe_mod_host_mask(m.id)>>ch)&1) != 0;
+    if(now_on != was_on) host_apply_set(v, m, ch, now_on);
+}
+
 static void host_apply_set(FFTViewer& v, const BeweModule& m, int ch, bool on){
     if(ch<0 || ch>=MAX_CHANNELS) return;
     bool ok = false;
@@ -730,6 +750,24 @@ std::vector<MpChEntry> bewe_mod_targets(FFTViewer& v, const char* id){
     return out;
 }
 
+void bewe_mod_set_target_owned(FFTViewer& v, const char* id, const char* station,
+                               int ch, bool on, const char* owner){
+    const BeweModule* m = find_mod(id);
+    if(!m) return;
+    if(g_send_up && v.remote_mode){
+        // MpSet 뒤에 owner[24] 를 덧붙인다. 구 HOST 는 앞 26바이트만 읽고 무시하므로
+        // 그쪽에선 종전대로 공유 동작이 된다 (조용히 깨지지 않는다).
+        uint8_t buf[sizeof(MpSet)+24] = {};
+        MpSet* st = reinterpret_cast<MpSet*>(buf);
+        strncpy(st->station, station, sizeof(st->station)-1);
+        st->ch = (uint8_t)ch; st->on = on?1:0;
+        strncpy((char*)(buf+sizeof(MpSet)), owner?owner:"", 23);
+        send_up(id, BEWE_MK_SET, buf, sizeof(buf));
+        return;   // 버튼 상태는 JOIN 이 자기 로컬로 들고 있다 (STATE 반영 안 기다림)
+    }
+    host_apply_set_owned(v, *m, ch, on, owner);
+}
+
 void bewe_mod_set_target(FFTViewer& v, const char* id, const char* station, int ch, bool on){
     const BeweModule* m = find_mod(id);
     if(!m) return;
@@ -877,7 +915,14 @@ void bewe_mod_route(FFTViewer& v, bool host_side, const uint8_t* payload, size_t
             auto* st = reinterpret_cast<const MpSet*>(d);
             char stn[25]={}; memcpy(stn, st->station, 24);
             if(g_my_station[0] && strncmp(stn, g_my_station, 24)!=0) return; // 다른 기지 명령
-            host_apply_set(v, *m, st->ch, st->on!=0);
+            // payload 가 더 길면 뒤에 owner[24] 가 붙어 온 것 (운용자별 모듈).
+            // 없으면 종전대로 공유 — 구버전 JOIN 과 다른 모듈이 그대로 동작한다.
+            if(n >= sizeof(MpSet)+24){
+                char ow[25]={}; memcpy(ow, d+sizeof(MpSet), 24);
+                host_apply_set_owned(v, *m, st->ch, st->on!=0, ow);
+            } else {
+                host_apply_set(v, *m, st->ch, st->on!=0);
+            }
         } else if(h->kind == BEWE_MK_REC_REQ && n >= sizeof(MpRecReq)){     // 녹음 WAV 요청
             auto* r = reinterpret_cast<const MpRecReq*>(d);
             char stn[25]={}; memcpy(stn, r->station, 24);

@@ -11,6 +11,7 @@
 #include "module_api.hpp"
 #include "bewe_paths.hpp"
 #include "kst_time.hpp"
+#include "login.hpp"
 #include <sys/stat.h>
 #include <chrono>
 #include <cstdio>
@@ -81,6 +82,19 @@ static void on_ch_stop(FFTViewer& v, int ch){
 static void host_poll(FFTViewer& v){
     (void)v;
     bewe_mod_set_avail("amc", amc_ai_enabled());   // 변화 있을 때만 방송된다
+}
+
+// ── JOIN 로컬 on/off ───────────────────────────────────────────────────────
+// AMC 는 "누가 무엇을 보고 싶은가" 라서 운용자마다 다르다. 그래서 버튼 상태를
+// HOST 가 방송하는 host_mask 로 판단하지 않는다 — 그걸 쓰면 남이 켠 채널이 내
+// 화면에도 켜진 것으로 보인다. HOST 는 켠 사람들의 합집합으로 워커를 돌리고,
+// 화면은 각자 자기가 켠 것만 본다.
+static bool g_local_on[MAX_CHANNELS] = {};
+bool local_on(int ch){ return (ch>=0 && ch<MAX_CHANNELS) ? g_local_on[ch] : false; }
+void set_local_on(FFTViewer& v, int ch, bool on){
+    if(ch<0 || ch>=MAX_CHANNELS) return;
+    g_local_on[ch] = on;
+    bewe_mod_set_target_owned(v, "amc", bewe_mod_my_station(), ch, on, login_get_id());
 }
 
 // station_id("DGS-2_DGS-2") → 표시명("DGS-2"). 빈 문자열이면 LOCAL.
@@ -225,7 +239,9 @@ static bool s_reg = [](){
     // "검출된 실제 폭"(AmcRecord.bw_khz)이 의미를 잃는다.
     m.spec_bw_hz   = 0.0f;
 #ifndef BEWE_HEADLESS
-    m.ch_btn       = "AMC";      // 채널 행 DET 오른쪽 버튼
+    m.ch_btn       = "AMC";              // 채널 행 DET 오른쪽 버튼
+    m.ch_btn_on    = &local_on;
+    m.ch_btn_set   = &set_local_on;
     m.panel        = "Automatic Modulation Classification";
     m.draw_panel   = &draw_panel;
 #endif
