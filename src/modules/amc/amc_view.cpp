@@ -58,30 +58,46 @@ void draw_panel(FFTViewer& v){
         }
     }
 
-    int shown = 0;
+    // 표시 순서는 Active Channels 와 같게 — 표시번호(주파수 정렬) 오름차순.
+    // 슬롯 인덱스 순으로 두면 위 목록과 줄 순서가 어긋나 눈이 두 번 찾는다.
+    int order[MAX_CHANNELS], n_ord = 0;
     for(int ci=0; ci<MAX_CHANNELS; ci++){
         if(!v.channels[ci].filter_active) continue;
         if(!bewe_mod_ch_on("amc", stn, ci)) continue;
-        shown++;
+        order[n_ord++] = ci;
+    }
+    for(int a=1; a<n_ord; a++){                       // 삽입정렬 (n 이 작다)
+        int k = order[a], d = v.freq_sorted_display_num(k), b = a-1;
+        while(b>=0 && v.freq_sorted_display_num(order[b]) > d){ order[b+1]=order[b]; b--; }
+        order[b+1] = k;
+    }
 
+    for(int oi=0; oi<n_ord; oi++){
+        const int ci = order[oi];
         float cf = (v.channels[ci].s + v.channels[ci].e) * 0.5f;
         ImGui::PushID(ci);
         if(has[ci]){
             const AmcRecord& m = last[ci];
             char ts[12]; hms(m.t_ms, ts);
+            // 헤더는 "어느 채널의 언제 측정인가"만. 판정 결과는 바로 아래 막대가
+            // 이미 말하고 있어서 같은 값을 두 번 쓰면 줄만 시끄러워진다.
             ImGui::Text("[%2d] %9.4f MHz", v.freq_sorted_display_num(ci), cf);
-            ImGui::SameLine();
-            ImGui::TextColored(conf_col(m.conf), "%s %.0f%%", amc_class_name(m.cls), m.conf*100.f);
             ImGui::SameLine(); ImGui::TextDisabled("%s", ts);
 
-            // 막대: 클래스 이름 + 비율. 1위만 색을 준다.
-            int top = 0;
-            for(int k=1;k<AMC_NCLASS;k++) if(m.p[k] > m.p[top]) top = k;
-            for(int k=0;k<AMC_NCLASS;k++){
-                if(m.p[k] < 0.005f && k != top) continue;   // 0에 가까운 건 줄만 낭비
+            // 막대는 확률 내림차순 — 가장 유력한 후보가 항상 맨 위에 온다.
+            int idx[AMC_NCLASS];
+            for(int k=0;k<AMC_NCLASS;k++) idx[k]=k;
+            for(int a=1;a<AMC_NCLASS;a++){
+                int k=idx[a]; float pv=m.p[k]; int b=a-1;
+                while(b>=0 && m.p[idx[b]] < pv){ idx[b+1]=idx[b]; b--; }
+                idx[b+1]=k;
+            }
+            for(int r=0;r<AMC_NCLASS;r++){
+                const int k = idx[r];
+                if(m.p[k] < 0.005f && r>0) continue;   // 0에 가까운 건 줄만 낭비
                 ImGui::Text("  %-6s", amc_class_name(k));
                 ImGui::SameLine(88.f);
-                ImVec4 c = (k==top) ? conf_col(m.p[k]) : ImVec4(0.45f,0.45f,0.5f,1.f);
+                ImVec4 c = (r==0) ? conf_col(m.p[k]) : ImVec4(0.45f,0.45f,0.5f,1.f);
                 ImGui::PushStyleColor(ImGuiCol_PlotHistogram, c);
                 char ov[16]; snprintf(ov,sizeof(ov),"%.0f%%", m.p[k]*100.f);
                 ImGui::ProgressBar(m.p[k], ImVec2(-1.f, 12.f), ov);
@@ -99,7 +115,7 @@ void draw_panel(FFTViewer& v){
         ImGui::PopID();
     }
 
-    if(!shown){
+    if(!n_ord){
         if(!bewe_mod_avail("amc", stn)) ImGui::TextDisabled("  not available on this station");
         else                            ImGui::TextDisabled("  (none)");
     }
