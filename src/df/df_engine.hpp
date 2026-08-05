@@ -71,13 +71,29 @@ public:
     bool cal_save(const char* path) const;
     bool cal_load(const char* path);
 
-    // ── ch0 탭 (BEWE 스펙트럼용) ─────────────────────────────────────────
+    // ── 프레임 탭 (BEWE 스펙트럼용) ──────────────────────────────────────
     // DAQ 스레드에서 프레임마다 호출된다. 블로킹 금지 — 필요한 만큼 복사하고
-    // 즉시 반환할 것. 포인터는 콜백 동안만 유효하다.
-    using Ch0Sink = std::function<void(const std::complex<float>* ch0, size_t n,
-                                       uint64_t center_hz, uint64_t fs_hz,
-                                       uint32_t overdrive_flags, int64_t wall_ms)>;
-    void set_ch0_sink(Ch0Sink s);
+    // 즉시 반환할 것. iq 는 콜백 동안만 유효하고 **읽기 전용**이다 (DF 측정이
+    // 같은 버퍼를 그대로 쓴다 — 여기서 고치면 방탐이 깨진다).
+    //
+    // 전 채널을 넘긴다. 소비자가 ch0 만 쓰든 5채널을 합치든(MRC) 고를 수 있게
+    // 하기 위해서다. channel(m) = iq + m*samples_per_ch (channel-major).
+    struct FrameView {
+        const std::complex<float>* iq = nullptr;
+        uint32_t channels = 0;
+        uint32_t samples_per_ch = 0;
+        uint64_t center_hz = 0, fs_hz = 0;
+        uint32_t overdrive_flags = 0;
+        // heimdall 이 채널 간 지연·IQ 보정을 건 프레임인가. false 면 위상이
+        // 아직 틀리므로 채널 간 통계에 넣으면 안 된다 (ch0 만 쓰는 건 무방).
+        bool     usable = false;
+        int64_t  wall_ms = 0;
+        const std::complex<float>* channel(uint32_t m) const {
+            return (iq && m < channels) ? iq + (size_t)m * samples_per_ch : nullptr;
+        }
+    };
+    using FrameSink = std::function<void(const FrameView&)>;
+    void set_frame_sink(FrameSink s);
 
     // ── DAQ 제어 (:5001) ─────────────────────────────────────────────────
     // 전부 heimdall 을 STATE_INIT 으로 되돌린다 = 수 초간 DF 불가.

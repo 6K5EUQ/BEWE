@@ -63,8 +63,8 @@ struct Engine::Impl {
     Request           req{};
     Result            res{};
 
-    std::mutex ch0_mtx;
-    Ch0Sink    ch0;
+    std::mutex sink_mtx;
+    FrameSink  frame_sink;
 
     HeimdallClient client;
     Manifold       manifold;
@@ -211,9 +211,9 @@ Engine::CalInfo Engine::cal_info() const {
     return o;
 }
 
-void Engine::set_ch0_sink(Ch0Sink s){
-    std::lock_guard<std::mutex> lk(d_->ch0_mtx);
-    d_->ch0 = std::move(s);
+void Engine::set_frame_sink(FrameSink s){
+    std::lock_guard<std::mutex> lk(d_->sink_mtx);
+    d_->frame_sink = std::move(s);
 }
 
 bool Engine::start(const Config& cfg){
@@ -367,11 +367,22 @@ void Engine::Impl::loop(){
             }
         }
 
-        // ── ch0 탭 ───────────────────────────────────────────────────────
+        // ── 프레임 탭 ────────────────────────────────────────────────────
+        // 전 채널을 넘기지만 **소비자는 읽기만 한다**. 아래 held 백로그 복사와
+        // xspec.add_frame 이 같은 f.iq 를 그대로 쓰므로, 여기서 내용을 바꾸면
+        // 방탐이 조용히 틀어진다.
         if(f.iq && !f.stale && h.frame_type == FRAME_DATA){
-            std::lock_guard<std::mutex> lk(ch0_mtx);
-            if(ch0) ch0(f.channel(0), f.samples_per_ch, h.rf_center_freq,
-                        h.sampling_freq, h.adc_overdrive_flags, (int64_t)h.time_stamp);
+            Engine::FrameView v;
+            v.iq              = f.iq;
+            v.channels        = f.channels;
+            v.samples_per_ch  = (uint32_t)f.samples_per_ch;
+            v.center_hz       = h.rf_center_freq;
+            v.fs_hz           = h.sampling_freq;
+            v.overdrive_flags = h.adc_overdrive_flags;
+            v.usable          = usable_for_df(h);
+            v.wall_ms         = (int64_t)h.time_stamp;
+            std::lock_guard<std::mutex> lk(sink_mtx);
+            if(frame_sink) frame_sink(v);
         }
 
         // ── 최근 프레임 보관 (버스트 요청이 최근에 있었을 때만) ──────────

@@ -9,8 +9,8 @@
 //   ch0 .. ch4 -> DF(방탐) 엔진
 //
 // 스레드 구성
-//   df::Engine 스레드 : TCP 소비 + DF 측정. ch0 을 Ch0Sink 로 넘긴다.
-//   캡처 스레드        : Ch0Sink 가 채워둔 int16 스테이징을 받아 FFT/ring/TM.
+//   df::Engine 스레드 : TCP 소비 + DF 측정. 프레임을 FrameSink 로 넘긴다.
+//   캡처 스레드        : sink 가 채워둔 int16 스테이징을 받아 FFT/ring/TM.
 // 두 개로 나눈 이유는 DF 측정(수백 ms)이 스펙트럼 갱신을 멈추면 안 되기 때문이고,
 // 또 캡처 스레드는 기존 코드가 존재를 전제하기 때문이다 (cap.join 등).
 //
@@ -187,8 +187,12 @@ bool FFTViewer::initialize_kraken(float cf_mhz){
     // 엔진 스레드에서 불린다. 블로킹 금지 — 변환해서 스테이징에 넣고 즉시 반환.
     // 블로킹 금지 — 여기서 기다리면 DF 측정 루프가 통째로 멈춘다. 락도 try_to_lock
     // 으로만 잡고, 못 잡으면 그 프레임만 포기한다 (캡처가 큐를 만지는 그 짧은 순간).
-    K.engine->set_ch0_sink([](const std::complex<float>* ch0, size_t n,
-                              uint64_t cf, uint64_t fs, uint32_t od, int64_t){
+    K.engine->set_frame_sink([](const df::Engine::FrameView& v){
+        const std::complex<float>* ch0 = v.channel(0);
+        if(!ch0) return;
+        const size_t n = v.samples_per_ch;
+        const uint64_t cf = v.center_hz, fs = v.fs_hz;
+        const uint32_t od = v.overdrive_flags;
         auto& S = kst();
         std::unique_lock<std::mutex> lk(S.mtx, std::try_to_lock);
         if(!lk.owns_lock()){ S.dropped++; return; }
