@@ -4,6 +4,7 @@
 #include "df_estimator.hpp"
 #include "heimdall_header.hpp"
 #include "df_xspec.hpp"
+#include "df_mrc.hpp"
 
 #include <cmath>
 #include <cstdarg>
@@ -700,6 +701,173 @@ void test_calib(){
     }
 }
 
+// ── MRC ──────────────────────────────────────────────────────────────────
+// 합성 5채널 시계열을 만들어 결합 이득·연속성·무신호 수렴·불균형 보정을 잰다.
+// 여기서 쓰는 진실값은 df_estimator 와 독립이다 (조향벡터를 직접 만든다).
+void test_mrc(){
+    const int M = 5;
+    const uint32_t N = 1u << 20;          // heimdall 프레임과 같은 길이
+    std::mt19937 rng(20260806);
+    std::normal_distribution<double> g(0.0, 1.0);
+
+    // 방위 40도, 반경 0.175 m, 162 MHz UCA 의 조향벡터 — 이론 매니폴드를 그대로
+    // 쓰지 않고 여기서 만든다 (추정기와 독립적인 진실값이어야 한다).
+    cd a[kMaxElements];
+    {
+        const double lam = 299792458.0 / 162e6, r = 0.175, beta = 40.0 * kPi / 180.0;
+        for(int m = 0; m < M; m++){
+            const double phi = 2.0 * kPi * m / M;
+            const double d = r * std::cos(phi - beta);
+            a[m] = std::polar(1.0, 2.0 * kPi * d / lam);
+        }
+    }
+
+    // 소자당 SNR rho 로 프레임을 합성한다. sig_amp^2 / noise_var = rho.
+    auto synth = [&](std::vector<std::complex<float>>& iq, double rho,
+                     const double* gain_lin, uint32_t n){
+        iq.assign((size_t)M * n, std::complex<float>(0.f,0.f));
+        const double sa = std::sqrt(rho);
+        for(uint32_t i = 0; i < n; i++){
+            const cd s(g(rng), g(rng));                 // 대역 신호 (백색으로 근사)
+            for(int m = 0; m < M; m++){
+                const double gm = gain_lin ? gain_lin[m] : 1.0;
+                const cd v = gm * sa * a[m] * s + cd(g(rng), g(rng));
+                iq[(size_t)m*n + i] = std::complex<float>((float)v.real(), (float)v.imag());
+            }
+        }
+    };
+
+    // 출력/ch0 의 SNR 을 잰다. 신호 성분을 알고 있으므로 상관으로 분리한다.
+    // 여기선 더 단순하게: 전력비 대신 결합 이득을 |w^H a|^2 / (||w||^2) 로 검증하고,
+    // 실제 시계열로는 잡음 전력 불변을 확인한다 (그게 정규화의 핵심 주장이다).
+    {
+        std::vector<std::complex<float>> iq;
+        synth(iq, 10.0, nullptr, N);                    // rho = +10 dB
+        Mrc mrc; mrc.reset(); mrc.set_enabled(true);
+        // 워밍업 + 드웰을 채운다 (같은 프레임을 반복 관측해도 통계는 유효하다).
+        for(int f = 0; f < kMrcWarm + kMrcDwell + 2; f++)
+            mrc.observe(iq.data(), M, N, 162000000ull, 2400000ull, true);
+        check(mrc.engaged(), "MRC engages on a +10 dB signal");
+        MrcStatus st = mrc.status();
+        check(std::abs(st.gain_db - 6.99) < 0.15,
+              "array gain %.2f dB (expect 6.99 +- 0.15)", st.gain_db);
+        check(st.gamma > kMrcGammaOn, "coherence %.3f above the engage threshold", st.gamma);
+        // 위상 앵커: w0 는 정규화 후에도 실수 양수여야 한다.
+        check(st.w_mag[0] > 0.3 && std::abs(st.w_deg[0]) < 1e-6,
+              "w0 is real-positive (|w0|=%.3f, arg=%.2e deg)", st.w_mag[0], st.w_deg[0]);
+    }
+
+    // 무신호: 가중치가 e_0 로 수렴해 출력이 ch0 과 같아져야 한다.
+    {
+        const uint32_t n = 1u << 18;
+        std::vector<std::complex<float>> iq;
+        synth(iq, 0.0, nullptr, n);                     // 잡음만
+        Mrc mrc; mrc.reset(); mrc.set_enabled(true);
+        for(int f = 0; f < kMrcWarm + kMrcDwell + 4; f++)
+            mrc.observe(iq.data(), M, n, 162000000ull, 2400000ull, true);
+        check(!mrc.engaged(), "MRC stays disengaged on noise only");
+        MrcStatus st = mrc.status();
+        double worst = 0.0;
+        for(int m = 1; m < M; m++) worst = std::max(worst, st.w_mag[m]);
+        check(worst < 0.02, "noise-only weights collapse to e0 (max |w_m|=%.4f)", worst);
+    }
+
+    // 진폭 불균형: 소자 하나가 -10 dB 면 그 가중치가 그만큼 내려가야 한다
+    // (w_m = c_m/p_m 이 잡음 대비 신호가 약한 소자를 자동으로 덜 믿는다).
+    {
+        const uint32_t n = 1u << 18;
+        double gain[kMaxElements] = {1.0, 1.0, 1.0, 1.0, 1.0};
+        gain[3] = std::pow(10.0, -10.0/20.0);           // 소자 3 을 -10 dB
+        std::vector<std::complex<float>> iq;
+        synth(iq, 10.0, gain, n);
+        Mrc mrc; mrc.reset(); mrc.set_enabled(true);
+        for(int f = 0; f < kMrcWarm + kMrcDwell + 2; f++)
+            mrc.observe(iq.data(), M, n, 162000000ull, 2400000ull, true);
+        MrcStatus st = mrc.status();
+        check(st.w_mag[3] < st.w_mag[0] * 0.8,
+              "the -10 dB element is downweighted (|w3|=%.3f vs |w0|=%.3f)",
+              st.w_mag[3], st.w_mag[0]);
+        check(st.gain_db < 6.99,
+              "reported gain drops below the ideal with a weak element (%.2f dB)", st.gain_db);
+    }
+
+    // 잡음 전력 불변 — 정규화 주장의 핵심. ||w||=1 이면 결합 출력의 잡음 전력이
+    // ch0 과 같아야 한다. 이게 깨지면 워터폴/autoscale/HIST/스퀠치가 전부 어긋난다.
+    {
+        const uint32_t n = 1u << 17;
+        std::vector<std::complex<float>> iq;
+        synth(iq, 0.0, nullptr, n);
+        Mrc mrc; mrc.reset(); mrc.set_enabled(true);
+        mrc.observe(iq.data(), M, n, 162000000ull, 2400000ull, true);
+        std::vector<std::complex<float>> out(n);
+        mrc.combine(iq.data(), M, n, out.data());
+        double p_in = 0.0, p_out = 0.0;
+        for(uint32_t i = 0; i < n; i++){
+            p_in  += std::norm(iq[i]);
+            p_out += std::norm(out[i]);
+        }
+        const double d_db = 10.0 * std::log10((p_out + 1e-30) / (p_in + 1e-30));
+        check(std::abs(d_db) < 0.05,
+              "noise power unchanged through the combiner (%.3f dB)", d_db);
+    }
+
+    // 프레임 경계 연속성: 결합 출력의 램프 구간 스텝이 내부 스텝을 크게 넘으면
+    // 클릭이 들린다. 램프가 재정규화되지 않으면 여기서 잡힌다.
+    {
+        const uint32_t n = 1u << 18;
+        std::vector<std::complex<float>> iq;
+        synth(iq, 10.0, nullptr, n);
+        Mrc mrc; mrc.reset(); mrc.set_enabled(true);
+        for(int f = 0; f < kMrcWarm + kMrcDwell + 2; f++)
+            mrc.observe(iq.data(), M, n, 162000000ull, 2400000ull, true);
+        std::vector<std::complex<float>> out(n);
+        mrc.combine(iq.data(), M, n, out.data());
+        double ramp_max = 0.0, tail_sum = 0.0; int tail_n = 0;
+        const size_t rn = std::min<size_t>(kMrcRampLen, n);
+        for(size_t i = 1; i < rn; i++)
+            ramp_max = std::max(ramp_max, (double)std::abs(out[i] - out[i-1]));
+        for(size_t i = rn + 1; i < n; i++){ tail_sum += std::norm(out[i] - out[i-1]); tail_n++; }
+        const double tail_rms = tail_n ? std::sqrt(tail_sum / tail_n) : 1.0;
+        check(ramp_max < tail_rms * 6.0,
+              "no step discontinuity in the ramp (max %.3f vs tail rms %.3f)",
+              ramp_max, tail_rms);
+    }
+
+    // 교차검증: c/p 가중치가 주고유벡터(원소 0 위상 회전 후)와 맞는가.
+    // 고SNR 에선 둘이 같은 방향이어야 한다 — 서로 완전히 다른 경로로 계산되므로
+    // 일치하면 양쪽 다 맞다는 강한 증거다.
+    {
+        const uint32_t n = 1u << 18;
+        std::vector<std::complex<float>> iq;
+        synth(iq, 100.0, nullptr, n);                   // rho = +20 dB
+        Mrc mrc; mrc.reset(); mrc.set_enabled(true);
+        for(int f = 0; f < kMrcWarm + kMrcDwell + 2; f++)
+            mrc.observe(iq.data(), M, n, 162000000ull, 2400000ull, true);
+        MrcStatus st = mrc.status();
+        // 같은 데이터로 R 을 직접 만들고 고유분해
+        cd R[kMaxElements*kMaxElements] = {};
+        for(uint32_t i = 0; i < n; i += 8){
+            cd x[kMaxElements];
+            for(int m = 0; m < M; m++) x[m] = cd(iq[(size_t)m*n+i].real(), iq[(size_t)m*n+i].imag());
+            for(int r = 0; r < M; r++) for(int c = 0; c < M; c++) R[r*M+c] += x[r]*std::conj(x[c]);
+        }
+        double ev[kMaxElements]; cd evec[kMaxElements*kMaxElements];
+        hermitian_eigen(R, M, ev, evec);
+        cd pv[kMaxElements];
+        { cd p0 = evec[0*M + (M-1)];
+          const cd rot = (std::abs(p0) > 1e-12) ? std::conj(p0)/std::abs(p0) : cd(1,0);
+          for(int m = 0; m < M; m++) pv[m] = evec[m*M + (M-1)] * rot; }
+        double worst = 0.0;
+        for(int m = 0; m < M; m++){
+            const cd w(st.w_mag[m]*std::cos(st.w_deg[m]*kPi/180.0),
+                       st.w_mag[m]*std::sin(st.w_deg[m]*kPi/180.0));
+            worst = std::max(worst, std::abs(w - pv[m]));
+        }
+        check(worst < 0.08,
+              "c/p weights agree with the principal eigenvector (max dev %.3f)", worst);
+    }
+}
+
 int run_selftest(int verbosity){
     g_fail = g_run = 0; g_verb = verbosity;
     printf("=== DF selftest ===\n");
@@ -710,6 +878,7 @@ int run_selftest(int verbosity){
     test_accept();
     test_xspec();
     test_calib();
+    test_mrc();
     printf("=== %d/%d checks passed ===\n", g_run - g_fail, g_run);
     return g_fail;
 }

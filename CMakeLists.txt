@@ -101,6 +101,7 @@ if(CLI)
         src/df/df_calib.cpp
         src/df/df_xspec.cpp
         src/df/df_estimator.cpp
+        src/df/df_mrc.cpp
         src/df/df_engine.cpp
         # 합성 배열 시뮬레이터 회귀 하네스. `BEWE --df-selftest` 로만 도달한다
         # (main.cpp). DF DSP 를 고칠 때 유일한 검증 수단이라 HOST 빌드에 넣는다.
