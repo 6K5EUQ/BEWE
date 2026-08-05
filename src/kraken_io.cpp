@@ -22,6 +22,7 @@
 #include "net_server.hpp"
 #include "long_waterfall.hpp"
 #include "df/df_engine.hpp"
+#include "df/df_mrc.hpp"
 #include "df/df_manifold.hpp"
 #include "df/heimdall_header.hpp"
 
@@ -76,6 +77,13 @@ struct KrakenState {
     std::deque<Ch0Frame>    q;          // mtx 보호
     std::deque<std::vector<int16_t>> freelist;  // 버퍼 재활용 (프레임당 4 MB 재할당 방지)
     uint64_t                dropped = 0;   // 캡처가 못 따라가 버린 프레임 수
+
+    // ── MRC ──────────────────────────────────────────────────────────────
+    // 전부 **엔진 스레드 전용**이다 (sink 안에서만 만진다). mrc_on 만 UI 스레드가
+    // 쓰므로 atomic 이고, 나머지는 락이 필요 없다.
+    df::Mrc                          mrc;
+    std::atomic<bool>                mrc_on{false};
+    std::vector<std::complex<float>> mrc_scratch;
 };
 
 KrakenState& kst(){ static KrakenState s; return s; }
@@ -183,7 +191,13 @@ bool FFTViewer::initialize_kraken(float cf_mhz){
     ring.resize(IQ_RING_CAPACITY*2,0);
     autoscale_req.store(true, std::memory_order_relaxed);
 
-    // ── ch0 탭 등록 ─────────────────────────────────────────────────────
+    // MRC 통계를 버린다. /rx stop -> start 나 재초기화를 거치면 그 사이 DAQ 가
+    // 내려갔다 재캘리브했을 수 있고, 그러면 옛 가중치는 다른 하드웨어의 것이다.
+    K.mrc.reset();
+    { std::lock_guard<std::mutex> lk(K.cfg_mtx); K.mrc_on.store(K.cfg.mrc_enable,
+                                                std::memory_order_relaxed); }
+
+    // ── 프레임 탭 등록 ──────────────────────────────────────────────────
     // 엔진 스레드에서 불린다. 블로킹 금지 — 변환해서 스테이징에 넣고 즉시 반환.
     // 블로킹 금지 — 여기서 기다리면 DF 측정 루프가 통째로 멈춘다. 락도 try_to_lock
     // 으로만 잡고, 못 잡으면 그 프레임만 포기한다 (캡처가 큐를 만지는 그 짧은 순간).
@@ -194,6 +208,20 @@ bool FFTViewer::initialize_kraken(float cf_mhz){
         const uint64_t cf = v.center_hz, fs = v.fs_hz;
         const uint32_t od = v.overdrive_flags;
         auto& S = kst();
+
+        // ── MRC ──────────────────────────────────────────────────────────
+        // 통계는 결합 여부와 무관하게 매 프레임 누적한다 (~0.1 ms). 그래야
+        // /mrc on 이 이미 수렴한 가중치로 즉시 붙는다. 합산까지 **전부 락 밖**
+        // 에서 끝낸다 — 여기서 S.mtx 를 잡고 있으면 DF 측정 루프가 그만큼 멈춘다.
+        const std::complex<float>* src = ch0;
+        S.mrc.set_enabled(S.mrc_on.load(std::memory_order_relaxed));
+        S.mrc.observe(v.iq, v.channels, v.samples_per_ch, cf, fs, v.usable);
+        if(S.mrc.engaged()){
+            if(S.mrc_scratch.size() < n) S.mrc_scratch.resize(n);
+            S.mrc.combine(v.iq, v.channels, v.samples_per_ch, S.mrc_scratch.data());
+            src = S.mrc_scratch.data();
+        }
+
         std::unique_lock<std::mutex> lk(S.mtx, std::try_to_lock);
         if(!lk.owns_lock()){ S.dropped++; return; }
         // 재활용 버퍼가 있으면 꺼내 쓴다 (프레임당 4 MB 재할당 방지).
@@ -203,7 +231,7 @@ bool FFTViewer::initialize_kraken(float cf_mhz){
         // std::complex<float> 는 interleaved float 연속 배열 — VOLK 커널이 kr_f2i 와
         // 동일한 스케일·포화·nearest-even 라운딩으로 한 번에 변환 (스칼라 루프 대체)
         volk_32f_s32f_convert_16i(fr.iq.data(),
-                                  reinterpret_cast<const float*>(ch0),
+                                  reinterpret_cast<const float*>(src),
                                   2048.0f, (unsigned)(n*2));
         fr.n = n; fr.cf_hz = cf; fr.fs_hz = fs; fr.overdrive = od;
         // drop-oldest: 캡처가 계속 못 따라오면 가장 오래된 것부터 버린다.
@@ -744,6 +772,7 @@ static void cfg_to_pkt(const df::Config& c, PktDfConfig& p){
     p.max_frames     = (uint8_t)c.max_frames;
     p.signal_dim     = (uint8_t)c.signal_dim;
     p.enable_control = c.enable_control ? 1 : 0;
+    p.mrc            = c.mrc_enable ? 1 : 0;
     p.gain_idx       = 255;   // 정본 송신 시엔 아래 df_get_cfg 가 실제값으로 채운다
     p.array_type     = (uint8_t)c.array_type;
     for(int m = 0; m < df::kMaxElements; m++){
@@ -767,6 +796,7 @@ static void pkt_to_cfg(const PktDfConfig& p, df::Config& c){
     c.max_frames       = p.max_frames;
     c.signal_dim       = p.signal_dim;
     c.enable_control   = (p.enable_control != 0);
+    c.mrc_enable       = (p.mrc != 0);
     c.array_type       = (df::ArrayType)std::min<int>(p.array_type, 3);
     for(int m = 0; m < df::kMaxElements; m++){
         c.elem_x[m] = p.elem_x[m];
@@ -816,6 +846,13 @@ bool FFTViewer::df_set_gain_index(int idx, char* err, size_t errn){
     return true;
 }
 
+// MRC 상태 조회 (CLI 전용 자유함수). FFTViewer 메서드로 두면 GUI 가 df/ 를
+// 링크하지 않으므로 스텁이 필요해진다 — 이 기능은 HOST 에만 있으면 된다.
+df::MrcStatus kraken_mrc_status(){
+    auto& K = kst();
+    return K.mrc.status();
+}
+
 void FFTViewer::df_set_cfg(const PktDfConfig& in){
     auto& K = kst();
     df::Config c;
@@ -833,6 +870,9 @@ void FFTViewer::df_set_cfg(const PktDfConfig& in){
     }
     // 거절이면 K.cfg 는 그대로다 — 그 값을 다시 방송해 JOIN 이 유령값을 붙들지 않게 한다.
     if(need_echo){ df_broadcast_cfg(); return; }
+    // sink 는 cfg_mtx 를 잡을 수 없으므로(엔진 스레드가 블로킹되면 DF 가 멈춘다)
+    // MRC on/off 만 atomic 으로 따로 건넨다.
+    K.mrc_on.store(c.mrc_enable, std::memory_order_relaxed);
     if(K.engine) K.engine->apply_config(c);
     df_broadcast_cfg();
 }

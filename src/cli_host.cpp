@@ -3,6 +3,10 @@
 // GLFW/OpenGL/ImGui 의존성 없음
 
 #include "fft_viewer.hpp"
+// MRC 상태 조회 (kraken_io.cpp). HOST 전용이라 FFTViewer 메서드로 두지 않는다 —
+// GUI 는 df/ 를 링크하지 않으므로 그랬다면 스텁이 필요했을 것이다.
+#include "df/df_mrc.hpp"
+df::MrcStatus kraken_mrc_status();
 #include "detect_base.hpp"
 #include "module_api.hpp"
 #include "sigmf.hpp"
@@ -3267,6 +3271,45 @@ void run_cli_host(){
                 else
                     bewe_log_push(0,"  Usage: /df <filter number>   (the number drawn on the filter)\n");
                 fflush(stdout);
+            } else if(line == "/mrc" || line.rfind("/mrc ", 0) == 0){
+                // /mrc            — 상태
+                // /mrc on|off     — 5채널 결합 켜기/끄기
+                // KrakenSDR 전용. 켜면 링에 들어가는 IQ 가 ch0 대신 결합 스트림이
+                // 되어 복조·녹음·디코더·워터폴이 전부 그 이득을 받는다.
+                std::string sub = line.size() > 4 ? line.substr(4) : "";
+                while(!sub.empty() && sub.front() == ' ') sub.erase(sub.begin());
+                if(v.hw.type != HWType::KRAKEN){
+                    bewe_log_push(0,"  /mrc is KrakenSDR only (needs coherent channels)\n");
+                } else if(sub.empty()){
+                    const df::MrcStatus m = kraken_mrc_status();
+                    bewe_log_push(0,"  MRC: %s, %s  (%d ch, coherence %.3f, array gain %.2f dB)\n",
+                                  m.enabled ? "ON" : "OFF",
+                                  m.engaged ? "engaged" : (m.warm > 0 ? "warming up" : "idle"),
+                                  m.elements, m.gamma, m.gain_db);
+                    for(int i = 0; i < m.elements; i++)
+                        bewe_log_push(0,"    w%d  %.3f  %+7.1f deg   dc %6.1f dBFS\n",
+                                      i, m.w_mag[i], m.w_deg[i], m.dc_dbfs[i]);
+                    bewe_log_push(0,"    frames %llu   warm %d%s\n",
+                                  (unsigned long long)m.frames, m.warm,
+                                  m.ch0_weak ? "   ch0 WEAK - check the antenna/cable" : "");
+                    // 채널별 신호/임계 — Test B 의 측정 지점이다.
+                    for(int i = 0; i < MAX_CHANNELS; i++){
+                        const Channel& ch = v.channels[i];
+                        if(!ch.filter_active) continue;
+                        bewe_log_push(0,"    CH%d %.4f MHz  sig %.1f dB  thr %.1f dB\n",
+                                      i, (ch.s + ch.e) * 0.5f,
+                                      ch.sq_sig.load(std::memory_order_relaxed),
+                                      ch.sq_threshold.load(std::memory_order_relaxed));
+                    }
+                } else if(sub == "on" || sub == "off"){
+                    PktDfConfig c{}; v.df_get_cfg(c);
+                    c.mrc = (sub == "on") ? 1 : 0;
+                    v.df_set_cfg(c);
+                    bewe_log_push(0,"  MRC %s\n", sub.c_str());
+                } else {
+                    bewe_log_push(0,"  Usage: /mrc [on|off]\n");
+                }
+                fflush(stdout);
             } else if(line == "/gain" || line.rfind("/gain ", 0) == 0){
                 // /gain            — 현재 튜너 게인
                 // /gain <dB>       — 가장 가까운 RTL 이산 스텝으로 설정 (5채널 동시)
@@ -3511,6 +3554,7 @@ void run_cli_host(){
                 bewe_log_push(0,"  /rx stop         - Release the SDR (safe to unplug; station stays online)\n");
                 bewe_log_push(0,"  /rx start        - Re-detect the SDR and resume streaming\n");
                 bewe_log_push(0,"  /autoscale       - Re-fit the waterfall dB window to the noise floor\n");
+                bewe_log_push(0,"  /mrc [on|off]    - Combine the 5 Kraken channels into the IQ path (+7 dB)\n");
                 bewe_log_push(0,"  /shutdown        - Clean exit\n");
                 bewe_log_push(0,"  /help            - Show this help\n");
                 bewe_log_push(0,"  <text>           - Broadcast as chat message\n");

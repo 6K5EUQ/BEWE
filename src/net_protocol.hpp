@@ -697,7 +697,11 @@ struct __attribute__((packed)) PktDfConfig {
     // _pad 는 8 배수 정렬용이다 — host_state 의 fingerprint 가 이 구조체를 u64 로
     // 나눠 섞으므로 크기가 8 의 배수여야 한다 (static_assert 로 강제됨). 32+8+64=104.
     uint8_t  array_type;             // df::ArrayType (0=UCA 1=ULA 2=ULA+1 3=Custom)
-    uint8_t  _pad[7];
+    // MRC(5채널 결합) on/off. _pad 에서 1 바이트를 떼어 썼으므로 구조체 크기와
+    // 프로토콜 버전은 그대로다 — 구버전 JOIN 은 이 자리를 0 으로 채워 보내고,
+    // 0 = off 라 안전하게 무시된다.
+    uint8_t  mrc;
+    uint8_t  _pad[6];
     float    elem_x[8];              // m, 배열 중심 기준 (동쪽 +)
     float    elem_y[8];              // m, (북쪽 +)
 };

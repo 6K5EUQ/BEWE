@@ -1077,6 +1077,12 @@ void df_draw_panel(FFTViewer& v, bool just_opened){
         ImGui::SliderFloat("SNR threshold (dB)", &c.snr_thr_db, -10.0f, 40.0f, "%.0f");
         }
 
+        if(ImGui::CollapsingHeader("COMBINING")){
+        bool mrc = (c.mrc != 0);
+        if(ImGui::Checkbox("MRC (combine 5 ch into the IQ path)", &mrc))
+            c.mrc = mrc ? 1 : 0;
+        }
+
         if(ImGui::CollapsingHeader("SIGNAL EXTRACTION")){
         ImGui::SetNextItemWidth(150);
         ImGui::InputFloat("DC guard (Hz)", &c.dc_guard_hz, 100.f, 1000.f, "%.0f");
