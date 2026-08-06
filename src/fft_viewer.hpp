@@ -57,12 +57,33 @@
 // 세 경로가 반드시 같은 창을 써야 한다 — 어긋나면 같은 신호가 HOST·JOIN·HIST 에서
 // 다른 색으로 보인다.
 inline void autoscale_db_window(float noise, float peak, float& out_min, float& out_max){
-    float headroom = (peak - noise) * 0.5f;
-    if(headroom <  5.f) headroom =  5.f;
+    // 신호 스팬 = 노이즈플로어에서 피크까지. 이게 실제로 봐야 하는 전부다.
+    const float span = (peak > noise) ? (peak - noise) : 0.f;
+
+    // 여유는 스팬에 비례시킨다. 상수로 두면 조용한 대역에서 창의 대부분이
+    // 빈 공간이 된다 — 실측(DGS-X 700 MHz, 무신호): 스팬이 7.1 dB 뿐인데
+    // 바닥 5 + 천장 7.9 가 붙어 창 20 dB 중 내용이 36% 밖에 안 됐다.
+    // 워터폴이 통짜 하늘색으로 보이던 원인이 이것이다.
+    float below = span * 0.25f;              // 잡음이 아래로 흔들리는 폭
+    if(below < 1.5f) below = 1.5f;
+    if(below > 5.0f) below = 5.0f;
+
+    float headroom = span * 0.5f;            // 다음 신호가 들어올 자리
+    if(headroom <  3.f) headroom =  3.f;
     if(headroom > 20.f) headroom = 20.f;
-    out_min = noise - 5.f;
+
+    out_min = noise - below;
     out_max = peak + headroom;
-    if(out_max - out_min < 20.f) out_max = out_min + 20.f;   // 최소 스팬
+
+    // 최소 스팬. 예전엔 20 dB 였는데, 그 값이 조용한 대역에서 창을 억지로
+    // 늘려 대비를 깎는 주범이었다. 8 dB 면 컬러맵이 색을 구분하기에 충분하고
+    // (255 단계 / 8 dB = 0.03 dB), 붐비는 대역은 어차피 span 이 커서 이 하한에
+    // 걸리지 않는다.
+    if(out_max - out_min < 8.f){
+        const float mid = (out_max + out_min) * 0.5f;
+        out_min = mid - 4.f;
+        out_max = mid + 4.f;
+    }
 }
 
 // ── Global log helper (ui.cpp에서 정의, 모든 .cpp에서 사용 가능) ─────────
