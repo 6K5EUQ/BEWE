@@ -2069,6 +2069,10 @@ void run_streaming_viewer(){
     glfwWindowHint(GLFW_OPENGL_PROFILE,GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_SAMPLES,4);
     glfwWindowHint(GLFW_DECORATED,GLFW_TRUE);
+    // 최대화 상태로 뜬다. JOIN 창도 execv 로 같은 바이너리를 다시 띄우는 것이라
+    // 이 힌트 하나가 부모·자식 모두에 걸린다. 제목줄은 남으므로 창 전환은 그대로다
+    // (모니터를 독점하는 진짜 풀스크린은 F11 이 따로 있다).
+    glfwWindowHint(GLFW_MAXIMIZED,GLFW_TRUE);
     GLFWmonitor* primary=glfwGetPrimaryMonitor();
     const GLFWvidmode* vmode=glfwGetVideoMode(primary);
     glfwWindowHint(GLFW_RED_BITS,  vmode->redBits);
@@ -2078,6 +2082,9 @@ void run_streaming_viewer(){
     glfwWindowHintString(GLFW_X11_CLASS_NAME,    "BEWE");  // 독/작업표시줄 .desktop 매칭용
     glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "BEWE");
     GLFWwindow* win=glfwCreateWindow(1400,900,"BEWE (" BEWE_VERSION ")",nullptr,nullptr);
+    // GNOME/mutter 는 GLFW_MAXIMIZED 힌트를 무시하고 요청한 크기 그대로 띄운다.
+    // 창을 만든 뒤 한 번 더 요청해야 실제로 최대화된다.
+    glfwMaximizeWindow(win);
     glfwMakeContextCurrent(win); glfwSwapInterval(0);
     // 창 아이콘 (원형 지구본) — assets/icon_round.png(모서리 투명)을 RGBA로 로드
     {
@@ -2125,11 +2132,16 @@ void run_streaming_viewer(){
             glfwSetWindowAttrib(win,GLFW_DECORATED, deco_on?GLFW_TRUE:GLFW_FALSE);
         }
         if(!ImGui::IsKeyPressed(ImGuiKey_F11,false)) return;
+        // 창은 최대화 상태로 뜨므로, 풀스크린을 빠져나올 때 그 최대화를 되돌려 준다.
+        // 좌표/크기만 복원하면 최대화 플래그가 풀려 화면 한구석의 창이 돼 버린다.
+        static bool saved_maximized = false;
         if(is_fullscreen){
             glfwSetWindowMonitor(win,nullptr,saved_win_x,saved_win_y,saved_win_w,saved_win_h,0);
             glfwSetWindowAttrib(win,GLFW_DECORATED, deco_on?GLFW_TRUE:GLFW_FALSE);
+            if(saved_maximized) glfwMaximizeWindow(win);
             is_fullscreen=false;
         } else {
+            saved_maximized = glfwGetWindowAttrib(win,GLFW_MAXIMIZED)==GLFW_TRUE;
             glfwGetWindowPos(win,&saved_win_x,&saved_win_y);
             glfwGetWindowSize(win,&saved_win_w,&saved_win_h);
             GLFWmonitor* mon=glfwGetPrimaryMonitor();
