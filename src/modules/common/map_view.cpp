@@ -64,6 +64,16 @@ static void fit_to_points(MapView& v, const std::vector<MapPoint>& pts, float W,
 // 육지 채움용 엣지 — 해안선(KR_OSM_COAST) 닫힌 링만 모아 lat 오름차순 정렬 (1회 캐시).
 // 화면 scanline even-odd 로 "해안선이 둘러싼 영역"을 그대로 채우는 paint-bucket 용.
 // (데이터는 bbox 32~43N 로 클립된 닫힌 링 — 북한 육지도 온전히 닫혀 채워짐.)
+//
+// 배열은 **short 구간 [0,fill_nshort) + tall 구간 [fill_nshort,end)** 로 나뉘고 각 구간이
+// latlo 오름차순이다. short = 위도높이 <= FILL_TALL_H 인 엣지 (실측 134만개 중 99.97%).
+// scanline 이 "시야 아래에서 시작해 시야에 닿지도 못하는 엣지"를 이분탐색으로 통째 건너뛰려면
+// 높이 상한이 필요한데, 소수의 긴 엣지(실측 419개)가 그 상한을 3.36° 까지 끌어올려 무력화한다.
+// 그래서 긴 것만 떼어 뒤에 두고 전수검사한다 (419개는 공짜).
+// point_on_land/land_bands 는 이 배열을 순회해 자기 인덱스를 새로 만들 뿐이라 순서 변경 무영향.
+static const float FILL_TALL_H = 0.005f;
+static size_t fill_nshort = 0;       // short 구간 길이
+static float  fill_maxh_short = 0;   // short 구간 최대 위도높이 (이분탐색 마진)
 struct FillEdge { float latlo, lathi, lonlo, slope; };  // lonlo=latlo 에서의 lon, slope=dlon/dlat
 static const std::vector<FillEdge>& fill_edges(){
     static std::vector<FillEdge> E; static bool done=false;
@@ -90,7 +100,16 @@ static const std::vector<FillEdge>& fill_edges(){
             rla.push_back(lat); rlo.push_back(lon);
         }
         flush();
-        std::sort(E.begin(),E.end(),[](const FillEdge&a,const FillEdge&b){ return a.latlo<b.latlo; });
+        // short 를 앞, tall 을 뒤로 (stable_partition 아님 — 어차피 각 구간을 따로 정렬한다)
+        auto mid = std::partition(E.begin(), E.end(),
+                                  [](const FillEdge& e){ return e.lathi-e.latlo <= FILL_TALL_H; });
+        fill_nshort = (size_t)(mid - E.begin());
+        fill_maxh_short = 0;
+        for(size_t i=0;i<fill_nshort;i++)
+            fill_maxh_short = std::max(fill_maxh_short, E[i].lathi-E[i].latlo);
+        auto bylat=[](const FillEdge&a,const FillEdge&b){ return a.latlo<b.latlo; };
+        std::sort(E.begin(), mid, bylat);
+        std::sort(mid, E.end(), bylat);
     }
     return E;
 }
@@ -266,28 +285,68 @@ MapResult draw_map(const char* id, MapView& v, const std::vector<MapPoint>& pts,
             v._fill.clear();
             const std::vector<FillEdge>& E = fill_edges();
             double latspan=v.lat1-v.lat0, lonspan=v.lon1-v.lon0;
-            size_t NE=E.size(), ei=0;
+            size_t NS=fill_nshort;
             static std::vector<const FillEdge*> active; active.clear();
+            static std::vector<const FillEdge*> left;   left.clear();   // 시야 왼쪽 — 패리티만 기여
             static std::vector<float> xs;
             int Hi=(int)H;
+            // 뷰가 데이터 경도폭 대부분을 덮으면 경도 컬링이 걸러낼 게 없다 — 판정만 낭비다.
+            const bool cull = (v.lon1-v.lon0) < 0.60*(MAP_LON1-MAP_LON0);
+            // 엣지를 시야 경도 기준으로 분류. even-odd 는 **왼쪽 교차까지 세야** 짝이 맞는다 —
+            // 왼쪽 엣지를 그냥 버리면 패리티가 뒤집혀 바다/육지가 반전된다. 그래서 버리지 않고
+            // left 로 옮겨 x 계산·정렬 없이 패리티만 세고, 오른쪽 엣지는 그대로 버린다
+            // (마지막 span 을 lon1 에서 닫으므로 결과가 같다).
+            auto add=[&](const FillEdge& e){
+                if(!cull){ active.push_back(&e); return; }
+                float a=e.lonlo, b=e.lonlo+e.slope*(e.lathi-e.latlo);
+                if(a>b){ float t=a; a=b; b=t; }
+                if(b < v.lon0)      left.push_back(&e);
+                else if(a > v.lon1) { /* 오른쪽 — 시야에 영향 없음 */ }
+                else                active.push_back(&e);
+            };
+            // 시야 아래에서 시작하는 엣지 중 시야에 닿을 수 있는 것만 (높이 <= fill_maxh_short)
+            FillEdge key{(float)(v.lat0-fill_maxh_short),0,0,0};
+            size_t ei = (size_t)(std::lower_bound(E.begin(), E.begin()+NS, key,
+                          [](const FillEdge&a,const FillEdge&b){ return a.latlo<b.latlo; }) - E.begin());
+            for(size_t i=ei; i<NS && E[i].latlo<=v.lat0; i++)
+                if(E[i].lathi >= v.lat0) add(E[i]);
+            while(ei<NS && E[ei].latlo<=v.lat0) ++ei;
+            for(size_t i=NS; i<E.size(); i++)                    // tall 은 소수 — 전수 검사
+                if(E[i].lathi>=v.lat0 && E[i].latlo<=v.lat1) add(E[i]);
             for(int yy=Hi-1; yy>=0; --yy){                       // 아래(저위도)→위 = lat 오름차순 sweep
                 double latc = v.lat1 - ((yy+0.5)/(double)Hi)*latspan;
-                while(ei<NE && E[ei].latlo<=latc){ active.push_back(&E[ei]); ++ei; }   // 새 엣지 활성화
+                while(ei<NS && E[ei].latlo<=latc){ add(E[ei]); ++ei; }                  // 새 엣지 활성화
                 for(size_t a=0;a<active.size();){                 // 만료 엣지 제거 (swap-pop)
                     if(active[a]->lathi < latc){ active[a]=active.back(); active.pop_back(); }
                     else ++a;
                 }
+                for(size_t a=0;a<left.size();){
+                    if(left[a]->lathi < latc){ left[a]=left.back(); left.pop_back(); }
+                    else ++a;
+                }
+                int par=0;                                        // 시야 왼쪽 교차수의 홀짝
+                for(const FillEdge* e : left)
+                    if(e->latlo<=latc && latc<e->lathi) par^=1;
                 xs.clear();
                 for(const FillEdge* e : active)
                     if(e->latlo<=latc && latc<e->lathi)
                         xs.push_back(e->lonlo + (float)(latc-e->latlo)*e->slope);   // 교차 lon
-                if(xs.size()<2) continue;
+                if(xs.empty() && !par) continue;
                 std::sort(xs.begin(), xs.end());
-                for(size_t k=0;k+1<xs.size();k+=2){               // even-odd: 쌍 사이 채움
-                    float dx0=(float)((xs[k]  -v.lon0)/lonspan*W);
-                    float dx1=(float)((xs[k+1]-v.lon0)/lonspan*W);
-                    v._fill.push_back(dx0); v._fill.push_back((float)yy); v._fill.push_back(dx1);
+                // par=1 이면 화면 왼쪽 경계에서 이미 육지 안이다.
+                double cur = par ? v.lon0 : 0; bool inside = par!=0;
+                auto emit=[&](double a,double b){
+                    if(a<v.lon0) a=v.lon0; if(b>v.lon1) b=v.lon1;
+                    if(b<=a) return;
+                    v._fill.push_back((float)((a-v.lon0)/lonspan*W));
+                    v._fill.push_back((float)yy);
+                    v._fill.push_back((float)((b-v.lon0)/lonspan*W));
+                };
+                for(float x : xs){
+                    if(!inside){ cur=x; inside=true; }
+                    else { emit(cur,x); inside=false; }
                 }
+                if(inside) emit(cur, v.lon1);
             }
         }
         ImU32 lc=IM_COL32(34,46,40,255);
