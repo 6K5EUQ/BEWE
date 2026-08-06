@@ -4274,7 +4274,15 @@ void run_streaming_viewer(){
                             v.autoscale_last = std::chrono::steady_clock::now();
                             v.autoscale_init = true;
                         }
-                        v.autoscale_accum.insert(v.autoscale_accum.end(), dst+1, dst+fsz);
+                        // 대역 가장자리(필터 스커트)는 제외 — HOST 쪽과 같은 이유다
+                        // (bladerf_io.cpp 의 누적 주석 참조). 세 경로가 같은 빈을
+                        // 봐야 같은 신호가 같은 색으로 나온다.
+                        {
+                            const int _lo_bin = std::max(1, fsz/10), _hi_bin = fsz - fsz/10;
+                            if(_hi_bin > _lo_bin)
+                                v.autoscale_accum.insert(v.autoscale_accum.end(),
+                                                         dst+_lo_bin, dst+_hi_bin);
+                        }
                         float _el=std::chrono::duration<float>(
                             std::chrono::steady_clock::now()-v.autoscale_last).count();
                         if(_el>=1.0f && !v.autoscale_accum.empty()){
@@ -4287,6 +4295,8 @@ void run_streaming_viewer(){
                             // 피크: 실제 max (99% 분위수는 신호 bin이 너무 적어 노이즈권에 머무름)
                             float _peak = *std::max_element(v.autoscale_accum.begin(),
                                 v.autoscale_accum.end());
+                            // 천장은 전 빈에서 (가장자리 신호도 잘리면 안 된다)
+                            for(int _i = 1; _i < fsz; _i++) if(dst[_i] > _peak) _peak = dst[_i];
                             autoscale_db_window(_noise, _peak,
                                 v.display_power_min, v.display_power_max);
                             v.join_manual_scale = true; // 수신 frm.pmin 덮어쓰기 차단
