@@ -667,6 +667,47 @@ static uint8_t read_bat_pct(uint8_t* ac_out){
     else if(bat_idx == -1){ bat_idx = -2; bat_rescan_at = time(nullptr) + 60; }
     return read_bat_pct_csv(ac_out); // sysfs 없음 → UPS CSV 폴백
 }
+// ── 상행 회선 종류 + 신호 세기 ────────────────────────────────────────────
+// 이동 기지(드론)는 LTE 동글이 빠지면 WiFi 로 넘어간다. 운용자는 지금 어느
+// 경로로 나가는지를 알아야 하므로 default route 의 인터페이스로 종류를 가른다.
+//   kind_out = 0 미상 / 1 LTE / 2 WiFi / 3 유선
+//   반환     = 신호 0~5, 255 = 세기를 모르는 회선(WiFi·유선)
+//
+// LTE 세기는 동글의 admin(192.168.0.1) 이 로그인 없이 내주므로 그대로 읽는다.
+// 그 호출이 수 초 걸릴 수 있어 30초 주기로만 새로 읽고 그 사이는 캐시를 쓴다.
+static uint8_t read_uplink(uint8_t* kind_out){
+    *kind_out = 0;
+    char ifc[64] = {};
+    if(FILE* f = popen("ip route show default 2>/dev/null | awk '/^default/{print $5; exit}'","r")){
+        if(fgets(ifc,sizeof(ifc),f)){ char* nl=strchr(ifc,'\n'); if(nl) *nl=0; }
+        pclose(f);
+    }
+    if(!ifc[0]) return 255;
+
+    if(strncmp(ifc,"wl",2)==0)                                   { *kind_out = 2; return 255; }
+    if(strncmp(ifc,"enx",3)==0 || strncmp(ifc,"usb",3)==0)         *kind_out = 1;   // USB RNDIS 동글
+    else if(strncmp(ifc,"eth",3)==0 || strncmp(ifc,"en",2)==0)   { *kind_out = 3; return 255; }
+    else                                                         { *kind_out = 0; return 255; }
+
+    static time_t next_at = 0;
+    static uint8_t cached  = 255;
+    if(time(nullptr) < next_at) return cached;
+    next_at = time(nullptr) + 30;
+
+    cached = 255;
+    if(FILE* f = popen("curl -s -m 3 'http://192.168.0.1/goform/goform_get_cmd_process?cmd=signalbar'"
+                       " -H 'Referer: http://192.168.0.1/index.html' 2>/dev/null","r")){
+        char buf[256] = {};
+        if(fgets(buf,sizeof(buf),f)){
+            if(const char* p = strstr(buf,"\"signalbar\":\"")){
+                int b = atoi(p + 13);
+                if(b >= 0 && b <= 5) cached = (uint8_t)b;
+            }
+        }
+        pclose(f);
+    }
+    return cached;
+}
 static long long read_io_ms(){
     FILE* f=fopen("/proc/diskstats","r"); if(!f) return 0;
     long long sum=0; char dev[32]; unsigned int maj,min_;
@@ -2506,6 +2547,8 @@ void run_cli_host(){
                 v.sysmon_ram=read_ram();
                 v.sysmon_cpu_temp_c.store(read_cpu_temp_c());
                 { uint8_t bac=2; v.sysmon_bat.store(read_bat_pct(&bac)); v.sysmon_bat_ac.store(bac); }
+                { uint8_t uk=0; uint8_t ub=read_uplink(&uk);
+                  v.sysmon_uplink_kind.store(uk); v.sysmon_uplink_bars.store(ub); }
                 long long io_now=read_io_ms();
                 v.sysmon_io=std::min(100.0f,(float)(io_now-io_last_ms)/10.0f);
                 io_last_ms=io_now;
@@ -2701,7 +2744,8 @@ void run_cli_host(){
                 v.net_srv->broadcast_heartbeat(hst, sdr_t_hb, sdr_st, iq_st,
                                                cpu_pct, ram_pct, cpu_temp, v.host_antenna, sk,
                                                v.sysmon_bat.load(), up_x100, v.sysmon_bat_ac.load(),
-                                               df_st, (int8_t)lrint(v.df_snr_threshold()));
+                                               df_st, (int8_t)lrint(v.df_snr_threshold()),
+                                               v.sysmon_uplink_kind.load(), v.sysmon_uplink_bars.load());
             }
         }
 

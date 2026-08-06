@@ -319,7 +319,8 @@ public:
                              const char* antenna = nullptr, const char* sdr_kind = nullptr,
                              uint8_t host_bat_pct = 255, uint32_t host_up_x100 = 0,
                              uint8_t host_bat_ac = 2, uint8_t df_state = 0,
-                             int8_t df_snr_thr = 0);
+                             int8_t df_snr_thr = 0,
+                             uint8_t uplink_kind = 0, uint8_t uplink_bars = 255);
 
     // DISK_STAT → all clients (HOST 측 recordings/missions 디스크 여유공간)
     void broadcast_disk_stat(uint64_t free_bytes, uint64_t total_bytes, const char* station);

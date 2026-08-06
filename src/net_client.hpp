@@ -171,6 +171,8 @@ public:
     std::atomic<uint8_t>  remote_host_cpu_temp{0};     // HOST CPU 온도 °C
     std::atomic<uint8_t>  remote_host_bat{255};        // HOST 배터리 % (255=읽을 값 없음)
     std::atomic<uint8_t>  remote_host_bat_ac{2};       // 0=방전 중, 1=AC 연결, 2=알 수 없음
+    std::atomic<uint8_t>  remote_uplink_kind{0};       // HOST 상행 0=미상 1=LTE 2=WiFi 3=유선
+    std::atomic<uint8_t>  remote_uplink_bars{255};     // HOST 상행 신호 0~5, 255=세기 없음
     std::atomic<uint32_t> remote_host_up_x100{0};      // HOST→Central 업로드 (0.01 KB/s 단위)
     // ── 디스크 여유공간 (DISK_STAT 패킷 수신 시 갱신, JOIN UI 표시용) ──
     std::atomic<uint64_t> remote_host_disk_free{0};

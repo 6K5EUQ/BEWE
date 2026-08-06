@@ -868,11 +868,12 @@ void NetServer::broadcast_heartbeat(uint8_t host_state, uint8_t sdr_temp_c, uint
                                     uint8_t host_cpu_pct, uint8_t host_ram_pct, uint8_t host_cpu_temp_c,
                                     const char* antenna, const char* sdr_kind, uint8_t host_bat_pct,
                                     uint32_t host_up_x100, uint8_t host_bat_ac, uint8_t df_state,
-                                    int8_t df_snr_thr){
+                                    int8_t df_snr_thr, uint8_t uplink_kind, uint8_t uplink_bars){
     PktHeartbeat hb{}; hb.host_state = host_state; hb.sdr_temp_c = sdr_temp_c; hb.sdr_state = sdr_state; hb.iq_on = iq_on;
     hb.host_cpu_pct = host_cpu_pct; hb.host_ram_pct = host_ram_pct; hb.host_cpu_temp_c = host_cpu_temp_c;
     hb.host_bat_pct = host_bat_pct; hb.host_up_x100 = host_up_x100; hb.host_bat_ac = host_bat_ac;
     hb.df_state = df_state; hb.df_snr_thr = df_snr_thr;
+    hb.uplink_kind = uplink_kind; hb.uplink_bars = uplink_bars;
     if(antenna)  strncpy(hb.antenna,  antenna,  sizeof(hb.antenna)-1);
     if(sdr_kind) strncpy(hb.sdr_kind, sdr_kind, sizeof(hb.sdr_kind)-1);
     auto pkt = make_packet(PacketType::HEARTBEAT, &hb, sizeof(hb));

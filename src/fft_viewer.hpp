@@ -186,6 +186,8 @@ public:
     std::atomic<int>     sysmon_cpu_temp_c{0};   // CPU 온도 (정수 °C, heartbeat 전송용)
     std::atomic<uint8_t> sysmon_bat{255};         // 배터리 % (255=읽을 값 없음)
     std::atomic<uint8_t> sysmon_bat_ac{2};        // 0=방전 중, 1=AC 연결, 2=알 수 없음
+    std::atomic<uint8_t> sysmon_uplink_kind{0};   // 상행 회선 0=미상 1=LTE 2=WiFi 3=유선
+    std::atomic<uint8_t> sysmon_uplink_bars{255}; // 상행 신호 0~5, 255=세기 없음
     // 네트워크 레이트 (STATUS 패널 / heartbeat 송신용, 1초 창)
     // HOST: 자기 → Central 업로드. JOIN: Central → 자기(접속 기지 1개) 다운로드.
     std::atomic<float> net_up_kbps{0.f};          // HOST 모드에서만 유효

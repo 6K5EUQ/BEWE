@@ -748,8 +748,12 @@ void NetClient::handle_packet(PacketType type,
             // 말미 확장 필드는 각각 자기 오프셋으로 게이트 — 구 HOST 와 섞여도 안전
             if(len >= offsetof(PktHeartbeat, host_bat_ac))
                 remote_host_up_x100.store(hb->host_up_x100);
-            if(len >= sizeof(PktHeartbeat))
+            if(len >= (int)(offsetof(PktHeartbeat, host_bat_ac) + 1))
                 remote_host_bat_ac.store(hb->host_bat_ac);
+            if(len >= (int)(offsetof(PktHeartbeat, uplink_bars) + 1)){
+                remote_uplink_kind.store(hb->uplink_kind);
+                remote_uplink_bars.store(hb->uplink_bars);
+            }
             std::lock_guard<std::mutex> lk(remote_antenna_mtx);
             memcpy(remote_antenna, hb->antenna, sizeof(remote_antenna));
             remote_antenna[sizeof(remote_antenna)-1] = '\0';

@@ -5306,6 +5306,30 @@ void run_streaming_viewer(){
                                               : vv.header.sample_rate/1e6;
                     ImGui::Text("Freq : %.4fMHz  Sample Rate : %.3fMSPS", cf_mhz, sr_mhz);
                 }
+                // 상행 회선 — 이동 기지는 LTE 가 끊기면 WiFi 로 넘어간다. 지금 어느
+                // 경로인지가 운용자가 바로 알아야 하는 값이라 여기에 둔다. 세기를
+                // 주지 않는 회선(WiFi·유선)은 막대 없이 종류만 적는다.
+                {
+                    uint8_t uk = vv.net_cli ? vv.net_cli->remote_uplink_kind.load()
+                                            : vv.sysmon_uplink_kind.load();
+                    uint8_t ub = vv.net_cli ? vv.net_cli->remote_uplink_bars.load()
+                                            : vv.sysmon_uplink_bars.load();
+                    if(uk){
+                        const char* kn = (uk==1) ? "LTE" : (uk==2) ? "WiFi" : "Wired";
+                        if(ub <= 5){
+                            char bars[16] = {};
+                            for(int i=0;i<5;i++) bars[i] = (i < ub) ? '|' : '.';
+                            ImVec4 c = (ub >= 4) ? ImVec4(0.55f,0.85f,0.55f,1.0f)
+                                     : (ub >= 2) ? ImVec4(0.90f,0.80f,0.35f,1.0f)
+                                                 : ImVec4(0.90f,0.45f,0.45f,1.0f);
+                            ImGui::Text("Link : %s", kn);
+                            ImGui::SameLine(0, 0);
+                            ImGui::TextColored(c, "  [%s]", bars);
+                        } else {
+                            ImGui::Text("Link : %s", kn);
+                        }
+                    }
+                }
                 // 레이트 표기: 1000KB/s 미만 → ###.##KB/s, 이상 → ##.##MB/s
                 auto fmt_rate = [](char* buf, size_t n, float kbps){
                     if(!(kbps > 0.f)) kbps = 0.f;   // 음수/NaN 방어
