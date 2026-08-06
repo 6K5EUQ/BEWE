@@ -6411,9 +6411,12 @@ void run_streaming_viewer(){
                 double now_sc  = std::chrono::duration<double>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
                 bool hb_ok     = (lht2 > 0.0) ? (now_sc - lht2) < 5.0 : connected;
+                // 초록=전부 정상, 노랑=통신은 되는데 일부가 멈춤, 빨강=통신 불가.
+                // host_state 1(chassis 리셋)·2(스펙트럼 정지)는 하트비트가 계속
+                // 오는 상태다 — 링크는 살아 있고 RX 만 멈춘 것이므로 노랑이다.
                 if(!connected || !hb_ok) link_state = 0;
-                else if(hs==1) link_state = 2; // 노란: HOST chassis 리셋 중
-                else           link_state = 1; // 초록: 연결됨 + heartbeat 수신 중
+                else if(hs==1 || hs==2)  link_state = 2;
+                else                     link_state = 1;
             }
 
             // ── DF LED: 방탐 가용 상태 ───────────────────────────────────
