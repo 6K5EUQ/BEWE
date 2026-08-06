@@ -643,11 +643,19 @@ void FFTViewer::commit_fft_row(const std::vector<float>& pacc, int fcnt){
              std::nth_element(tmp.begin(),tmp.begin()+(ptrdiff_t)idx_lo,tmp.end());
              float noise=tmp[idx_lo];
              float peak=*std::max_element(tmp.begin(),tmp.end());
-             autoscale_db_window(noise,peak,display_power_min,display_power_max);
+             // 창 하한의 기준이 되는 관측 최솟값. nth_element 가 idx_lo 앞을
+             // 이미 그보다 작은 것들로 갈라놨으므로 거기서만 찾으면 된다.
+             // 스퍼 하나에 창이 끌려가지 않게 하위 0.5% 분위수를 쓴다.
+             size_t idx_min=(size_t)(n*0.005f);
+             std::nth_element(tmp.begin(),tmp.begin()+(ptrdiff_t)idx_min,
+                              tmp.begin()+(ptrdiff_t)idx_lo);
+             float lo_db=tmp[idx_min];
+             autoscale_db_window(noise,peak,lo_db,display_power_min,display_power_max);
              header.power_min=display_power_min;
              header.power_max=display_power_max;
-             bewe_log_push(0,"[autoscale]%s noise=%.1f peak=%.1f → pmin=%.1f pmax=%.1f\n",
-                 deadline?" (deadline)":"", noise, peak, display_power_min, display_power_max);
+             bewe_log_push(0,"[autoscale]%s noise=%.1f peak=%.1f lo=%.1f → pmin=%.1f pmax=%.1f\n",
+                 deadline?" (deadline)":"", noise, peak, lo_db,
+                 display_power_min, display_power_max);
              autoscale_active=false; autoscale_init=false;
              autoscale_wp=0; autoscale_buf_full=false;
              autoscale_start=std::chrono::steady_clock::time_point{};

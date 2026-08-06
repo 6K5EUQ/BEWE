@@ -49,20 +49,32 @@
 #include <sys/types.h>
 
 // ── autoscale dB 창 (HOST 실시간 / JOIN 실시간 / HIST 파일 공용) ─────────────
-// 천장 헤드룸을 피크 높이에 비례시킨다. 예전엔 무조건 peak+20 이었는데, 빈 대역에서
-// 유일한 피크가 잡음보다 10 dB 남짓 위인 스퍼 하나뿐이면 범위가 35 dB 넘게 벌어져
-// 실제 내용물이 컬러맵 아래쪽 1/3 에 눌려 워터폴이 통짜 파랑으로 보였다 (915 MHz).
-// (peak-noise)*0.5 를 5~20 dB 로 자르면 붐비는 대역(스팬 40 dB 이상)은 종전과 똑같이
-// 20 dB 헤드룸을 받고, 빈 대역만 천장이 내려와 대비가 산다.
+// **노이즈플로어가 창 바닥 10% 에 오도록** 창을 잡는다. 예전엔 창을 peak 기준으로
+// 잡았는데, 그러면 신호가 없는 대역에서 잡을 게 없어 최소 스팬(20 dB)에 걸리고
+// 노이즈가 화면의 4분의 1 높이까지 올라와 워터폴이 통짜 하늘색이 됐다. 반대로
+// 신호가 센 대역(FM 방송)에서는 우연히 창이 넓어져 보기 좋았는데, 그건 공식이
+// 맞아서가 아니라 peak 가 높았던 덕이다.
+//
+// lo = 그 대역에서 실제로 관측된 **최솟값**이다. 안티앨리어싱 필터 스커트(대역
+// 좌우 끝)가 여기 들어온다 — 그 아래로 창을 잡아야 가장자리가 잘리지 않는다.
+// noise(하위 분위수)가 아니라 lo 를 하한 기준으로 삼는 이유가 이것이다.
+//
 // 세 경로가 반드시 같은 창을 써야 한다 — 어긋나면 같은 신호가 HOST·JOIN·HIST 에서
 // 다른 색으로 보인다.
-inline void autoscale_db_window(float noise, float peak, float& out_min, float& out_max){
-    float headroom = (peak - noise) * 0.5f;
-    if(headroom <  5.f) headroom =  5.f;
-    if(headroom > 20.f) headroom = 20.f;
-    out_min = noise - 5.f;
-    out_max = peak + headroom;
-    if(out_max - out_min < 20.f) out_max = out_min + 20.f;   // 최소 스팬
+inline void autoscale_db_window(float noise, float peak, float lo,
+                                float& out_min, float& out_max){
+    // 관측 최솟값보다 조금 아래에서 시작 (가장자리가 창 밖으로 나가지 않게)
+    if(!(lo < noise)) lo = noise - 1.f;          // 방어: lo 가 이상하면 noise 기준
+    out_min = lo - 2.f;
+
+    // 노이즈가 정확히 바닥 10% 지점에 오는 창 폭
+    const float rise = noise - out_min;          // > 0
+    float span = rise / 0.10f;
+    if(span < 20.f) span = 20.f;                 // 너무 좁은 창은 색이 뭉갠다
+    out_max = out_min + span;
+
+    // 신호가 그보다 높으면 그 위로 여유를 준다 (잘리면 안 된다)
+    if(peak + 15.f > out_max) out_max = peak + 15.f;
 }
 
 // ── Global log helper (ui.cpp에서 정의, 모든 .cpp에서 사용 가능) ─────────

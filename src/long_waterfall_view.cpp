@@ -476,10 +476,17 @@ static void scan_file_db_range(){
     for(int b = 255; b >= 0; b--){
         if(g_hist[b]){ peak_b = b; break; }
     }
+    // 창 하한 기준 = 관측 최솟값(하위 0.5%). HOST/JOIN 과 같은 규약
+    // (fft_viewer.hpp autoscale_db_window 주석 참조).
+    int lo_b = 0;
+    { const uint64_t want_lo = (uint64_t)(total * 0.005);
+      uint64_t a2 = 0;
+      for(int b = 0; b < 256; b++){ a2 += g_hist[b]; if(a2 > want_lo){ lo_b = b; break; } } }
     const float fmin = g_open.hdr.db_min, fmax = g_open.hdr.db_max;
     float noise = LongWaterfall::byte_to_db((uint8_t)noise_b, fmin, fmax);
     float peak  = LongWaterfall::byte_to_db((uint8_t)peak_b,  fmin, fmax);
-    autoscale_db_window(noise, peak, g_file_db_min, g_file_db_max);
+    float lo_db = LongWaterfall::byte_to_db((uint8_t)lo_b,    fmin, fmax);
+    autoscale_db_window(noise, peak, lo_db, g_file_db_min, g_file_db_max);
 }
 
 void rebuild_texture(float view_db_min, float view_db_max){

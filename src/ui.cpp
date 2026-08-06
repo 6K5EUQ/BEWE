@@ -4287,7 +4287,14 @@ void run_streaming_viewer(){
                             // 피크: 실제 max (99% 분위수는 신호 bin이 너무 적어 노이즈권에 머무름)
                             float _peak = *std::max_element(v.autoscale_accum.begin(),
                                 v.autoscale_accum.end());
-                            autoscale_db_window(_noise, _peak,
+                            // 창 하한 기준 = 관측 최솟값(하위 0.5%). HOST 와 같은 규약
+                            // (fft_viewer.hpp autoscale_db_window 주석 참조).
+                            size_t _lo0 = (size_t)(_n * 0.005f);
+                            std::nth_element(v.autoscale_accum.begin(),
+                                v.autoscale_accum.begin()+_lo0,
+                                v.autoscale_accum.begin()+_lo);
+                            float _lodb = v.autoscale_accum[_lo0];
+                            autoscale_db_window(_noise, _peak, _lodb,
                                 v.display_power_min, v.display_power_max);
                             v.join_manual_scale = true; // 수신 frm.pmin 덮어쓰기 차단
                             v.autoscale_accum.clear();
