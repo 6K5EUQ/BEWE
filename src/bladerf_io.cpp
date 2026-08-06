@@ -628,31 +628,9 @@ void FFTViewer::commit_fft_row(const std::vector<float>& pacc, int fcnt){
              autoscale_init=true;
          }
          size_t cap=autoscale_accum.size();
-         // 대역 가장자리(안티앨리어싱 필터 스커트)는 빼고 담는다. 거기 잡음은
-         // 필터가 깎은 값이라 "수신기 잡음 바닥" 이 아닌데, 하위 분위수를 쓰는
-         // 노이즈 추정이 하필 그 구간을 문다. Kraken 실측(DGS-X 700 MHz): 스팬
-         // 2.4 MHz 중 평탄부가 1.9 MHz 뿐이라 롤오프가 하위 21% 를 차지했고,
-         // 15퍼센타일이 통째로 그 안에 들어가 평탄부 -69 대신 -72.4 가 나왔다.
-         // 창이 그만큼 아래로 늘어나 워터폴 대비가 죽는다.
-         //
-         // **빈 순서는 unshifted 다** — rowp[0] 이 DC 이고 rowp[fft_size/2] 근처가
-         // 나이퀴스트, 즉 대역 **가장자리**다 (ui.cpp bin_to_mhz_sp 가 b<half 를
-         // 양의 주파수로 읽는 것과 같은 규약). 그래서 잘라낼 곳은 배열의 양 끝이
-         // 아니라 **가운데**다. 배열 인덱스로 착각해 양 끝을 자르면 정확히 반대로
-         // 롤오프만 남긴다.
-         //
-         // 대역의 바깥 10% (|f| > 0.4*fs) 를 버린다.
-         {
-             const int half = fft_size/2;
-             const int keep = (int)(half * 0.8f);     // |bin| <= 0.4*fft_size
-             for(int i=1;i<=keep;i++){                // 양의 주파수
-                 autoscale_accum[autoscale_wp]=rowp[i];
-                 if(++autoscale_wp>=cap){ autoscale_wp=0; autoscale_buf_full=true; }
-             }
-             for(int i=fft_size-keep;i<fft_size;i++){ // 음의 주파수
-                 autoscale_accum[autoscale_wp]=rowp[i];
-                 if(++autoscale_wp>=cap){ autoscale_wp=0; autoscale_buf_full=true; }
-             }
+         for(int i=1;i<fft_size;i++){
+             autoscale_accum[autoscale_wp]=rowp[i];
+             if(++autoscale_wp>=cap){ autoscale_wp=0; autoscale_buf_full=true; }
          }
          float el=std::chrono::duration<float>(now_as-autoscale_last).count();
          float el_total=std::chrono::duration<float>(now_as-autoscale_start).count();
@@ -664,10 +642,7 @@ void FFTViewer::commit_fft_row(const std::vector<float>& pacc, int fcnt){
              size_t idx_lo=(size_t)(n*0.15f);
              std::nth_element(tmp.begin(),tmp.begin()+(ptrdiff_t)idx_lo,tmp.end());
              float noise=tmp[idx_lo];
-             // 천장은 **전 빈**에서 구한다 (누적본은 중앙만 담고 있다) — 가장자리에
-             // 있는 신호도 잘리지 않아야 하기 때문이다.
              float peak=*std::max_element(tmp.begin(),tmp.end());
-             for(int i=1;i<fft_size;i++) if(rowp[i]>peak) peak=rowp[i];
              autoscale_db_window(noise,peak,display_power_min,display_power_max);
              header.power_min=display_power_min;
              header.power_max=display_power_max;

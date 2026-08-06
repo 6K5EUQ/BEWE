@@ -103,8 +103,7 @@ float    g_file_db_min = 0.0f;
 float    g_file_db_max = 0.0f;
 uint64_t g_scanned_rows = 0;      // 스캔한 표본 행수 (진단용)
 uint64_t g_scan_cursor  = 0;      // 다음 스캔할 행 인덱스 (서브샘플 커서)
-uint64_t g_hist[256] = {0};       // 바이트 히스토그램 (누적, 중앙 대역만 — 노이즈용)
-uint64_t g_hist_all[256] = {0};   // 전 빈 (천장용). 가장자리 신호도 잘리면 안 된다
+uint64_t g_hist[256] = {0};       // 바이트 히스토그램 (누적)
 
 // (우측 파일목록 패널 제거 — 도달불가 확정 후 삭제. 진입은 미션창에서 파일 선택.)
 
@@ -193,7 +192,6 @@ void close_open(){
     g_last_known_rows = 0;
     g_tex_dirty = true;
     std::memset(g_hist, 0, sizeof(g_hist));
-    std::memset(g_hist_all, 0, sizeof(g_hist_all));
     g_scanned_rows = 0;
     g_scan_cursor = 0;
     g_zoom_hist.clear();
@@ -425,7 +423,6 @@ static void scan_file_db_range(){
     const uint32_t fft_sz = g_open.hdr.fft_size;
     if(g_scan_cursor > g_open.num_rows){     // 다른 파일로 교체됨 → 처음부터
         std::memset(g_hist, 0, sizeof(g_hist));
-    std::memset(g_hist_all, 0, sizeof(g_hist_all));
         g_scan_cursor = 0; g_scanned_rows = 0;
     }
     // v13.3.2 — 블록 단위 서브샘플.
@@ -454,14 +451,7 @@ static void scan_file_db_range(){
                 const uint8_t* p = get_row((uint32_t)r);
                 if(!p){ ok = false; break; }
                 // bin 0 은 DC — 실시간 autoscale 도 i=1 부터 누적하므로 동일하게 제외.
-                // 대역 가장자리(필터 스커트)도 뺀다: 거기 잡음은 필터가 깎은
-                // 값이라 노이즈플로어가 아닌데 하위 분위수가 그걸 문다
-                // (bladerf_io.cpp 의 누적 주석 참조).
-                // 빈은 unshifted — 가장자리가 배열 가운데다 (bladerf_io.cpp 참조).
-                { const uint32_t half = fft_sz/2, keep = (uint32_t)(half * 0.8f);
-                  for(uint32_t i = 1; i <= keep; i++)          g_hist[p[i]]++;
-                  for(uint32_t i = fft_sz-keep; i < fft_sz; i++) g_hist[p[i]]++;
-                  for(uint32_t i = 1; i < fft_sz; i++)          g_hist_all[p[i]]++; }
+                for(uint32_t i = 1; i < fft_sz; i++) g_hist[p[i]]++;
                 g_scanned_rows++;
             }
             g_scan_cursor = r0 + cstride * chunk;
@@ -483,9 +473,8 @@ static void scan_file_db_range(){
         acc += g_hist[b];
         if(acc > want){ noise_b = b; break; }
     }
-    // 천장은 전 빈 히스토그램에서 — 가장자리에 있는 신호도 담아야 한다.
     for(int b = 255; b >= 0; b--){
-        if(g_hist_all[b]){ peak_b = b; break; }
+        if(g_hist[b]){ peak_b = b; break; }
     }
     const float fmin = g_open.hdr.db_min, fmax = g_open.hdr.db_max;
     float noise = LongWaterfall::byte_to_db((uint8_t)noise_b, fmin, fmax);

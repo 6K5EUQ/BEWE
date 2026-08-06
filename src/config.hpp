@@ -4,7 +4,7 @@
 
 // ── BEWE version (창 제목 및 About 표시용) ──────────────────────────────────
 // SemVer: vMAJOR.MINOR.PATCH — 자세한 정책은 CLAUDE.md 참조
-#define BEWE_VERSION "v15.14.6"
+#define BEWE_VERSION "v15.14.7"
 
 // ── 역할 축 ────────────────────────────────────────────────────────────────
 // HOST = CLI 빌드, JOIN = GUI 빌드. BEWE_HEADLESS 에서 파생하므로 CMake 노브가
