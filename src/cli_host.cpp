@@ -3130,8 +3130,32 @@ void run_cli_host(){
             static int      wd_last_ffts = -1;
             static uint64_t wd_last_net  = 0;
             static auto wd_last_change = clk::now();
+            static auto wd_calib_since = clk::time_point{};
+            // Kraken 은 DAQ 가 캘리브를 끝내야 첫 IQ 가 나온다. 그 사이 BEWE 쪽 플래그는
+            // 전부 "정상"이다 — 접속은 됐으니 is_running=1, sdr_stream_error=0 이라
+            // steady 가 참이 되어 워치독이 FFT 정체를 죽음으로 오판했다. 초기 캘리브는
+            // 실측 ~12초인데 임계가 10초라, 캘리브가 끝나기 전에 강제 복구 → 재접속 →
+            // 캘리브 재시작이 12초 주기로 무한 반복됐다 (2026-08-06 DGS-X, 29회).
+            // 재튠은 채널 간 지연·위상 보정을 재사용해 ~3초라 이 창에 안 걸린다.
+            //
+            // 임계를 30초 같은 상수로 올리지 않는 이유: 캘리브 시간은 환경에 따라
+            // 변하고, 올린 만큼 다른 SDR 의 wedge 복구도 같이 느려진다. DAQ 가
+            // 보고하는 실제 상태를 보면 상수를 고를 필요가 없다.
+            const bool kraken_calibrating =
+                is_kraken_station() && v.df_link_state() == 1;   // 1 = Calibrating
+            if(kraken_calibrating){
+                if(wd_calib_since == clk::time_point{}) wd_calib_since = clk::now();
+            } else {
+                wd_calib_since = clk::time_point{};
+            }
+            // 상한: 캘리브가 영영 안 끝나면(DAQ 자체 고장) 유예가 워치독을 영구
+            // 무력화한다. 정상 캘리브의 10배를 주고, 그 뒤엔 평소대로 판정한다.
+            const bool calib_grace =
+                kraken_calibrating
+                && std::chrono::duration<float>(clk::now()-wd_calib_since).count() < 120.0f;
             bool steady = !v.remote_mode && !v.rx_stopped.load() && v.is_running
-                          && !v.sdr_stream_error.load() && !v.spectrum_pause.load();
+                          && !v.sdr_stream_error.load() && !v.spectrum_pause.load()
+                          && !calib_grace;
             if(steady){
                 int cur = v.total_ffts;
                 // FFT 를 뺀 나머지 송신량. FFT 를 넣으면 스스로를 상쇄해 무의미하다.
@@ -3143,6 +3167,8 @@ void run_cli_host(){
                     wd_last_net  = net;
                     wd_last_change = clk::now();
                 } else if(std::chrono::duration<float>(clk::now()-wd_last_change).count() >= 10.0f){
+                    if(kraken_calibrating)
+                        bewe_log_push(2,"[CLI] DAQ stuck calibrating >120s - treating as dead\n");
                     bewe_log_push(0,"[CLI] SDR STALL: no FFT and no BEWE traffic for >=10s "
                                     "- forcing recovery\n");
                     // 깨워야 블로킹 read (read_sync / iio_buffer_refill) 가 에러 반환.
