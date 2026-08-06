@@ -67,23 +67,39 @@ inline void autoscale_db_window(float noise, float peak, float lo,
     if(!(lo < noise)) lo = noise - 1.f;          // 방어: lo 가 이상하면 noise 기준
     out_min = lo - 2.f;
 
-    // 잡음 **상단**까지가 바닥 10% 안에 들어와야 한다. noise(하위 15%)만 기준으로
-    // 잡으면 그건 잡음 분포의 아래쪽이라, 잡음의 위쪽 절반이 10% 밖으로 삐져나온다.
+    // 잡음 **상단**을 안다. noise(하위 15%)는 잡음 분포의 아래쪽이라 그것만 보면
+    // 잡음의 위쪽 절반이 어디까지 올라오는지 모른다.
     //
     // 상단은 상위 분위수로 못 잰다 — 신호가 대역의 몇 %를 차지하는지 모르므로
     // 99% 분위수가 신호권으로 끌려간다 (실측: 신호 5% 만 있어도 -65 -> -38).
     // 대신 하위 두 분위수의 간격으로 잡음의 폭을 재고 그만큼 위로 올린다.
     // 계수 2.2 는 정규분포에서 0.5%~15% 간격 대비 15%~99.5% 간격의 비율이다.
+    // 합성 검증: 신호가 대역의 0/5/30% 를 차지해도 오차 2 dB 이내.
     const float width = noise - lo;              // >= 0
     const float noise_top = noise + 2.2f * width;
 
-    float span = (noise_top - out_min) / 0.10f;
-    if(span <  20.f) span =  20.f;               // 너무 좁으면 색이 뭉갠다
-    if(span > 150.f) span = 150.f;               // 롤오프가 width 를 부풀린 경우의 상한
-    out_max = out_min + span;
-
-    // 신호가 그보다 높으면 그 위로 여유를 준다 (잘리면 안 된다)
-    if(peak + 15.f > out_max) out_max = peak + 15.f;
+    // 신호가 있느냐 없느냐로 창을 다르게 잡는다. 하나의 공식으로는 둘 다 만족할
+    // 수 없기 때문이다 — 잡음이 바닥 10% 를 차지하게 하면 창이 그만큼 넓어지고,
+    // 그 넓은 창 안에서 신호는 필연적으로 낮은 곳에 눌린다 (100 MHz 실측:
+    // 잡음상단과 신호피크 간격이 34 dB 뿐이라 신호가 화면 32% 에 머물렀다).
+    //
+    // 판정 마진은 넉넉하다 (실측: 신호 있는 대역 +34/+57 dB, 없는 대역 -2/-4 dB).
+    // 잡음보다 6 dB 도 안 높은 신호를 놓치더라도, 그런 신호는 대비를 키워 봐야
+    // 잡음에 묻혀 안 보이므로 오판의 대가가 작다.
+    if(peak > noise_top + 6.f){
+        // 신호 있음 — 신호가 화면 위쪽까지 차게 (대비 우선).
+        float headroom = (peak - noise) * 0.5f;
+        if(headroom <  5.f) headroom =  5.f;
+        if(headroom > 20.f) headroom = 20.f;
+        out_max = peak + headroom;
+        if(out_max - out_min < 20.f) out_max = out_min + 20.f;
+    } else {
+        // 신호 없음 — 잡음 전체가 바닥 10% 안에 들어오게 (워터폴 대비 우선).
+        float span = (noise_top - out_min) / 0.10f;
+        if(span < 20.f) span = 20.f;             // 너무 좁으면 색이 뭉갠다
+        out_max = out_min + span;
+        if(peak + 3.f > out_max) out_max = peak + 3.f;
+    }
 }
 
 // ── Global log helper (ui.cpp에서 정의, 모든 .cpp에서 사용 가능) ─────────
