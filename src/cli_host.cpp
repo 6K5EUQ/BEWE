@@ -2371,6 +2371,15 @@ void run_cli_host(){
     }
     uint64_t last_state_fp = HostState::fingerprint(v);
 
+    // ── Kraken DAQ 재시작 에스컬레이션 상태 ────────────────────────────────
+    // 루프 밖에 둔다: /chassis 1 reset 의 kraken_restart_daq 와 아래 자동
+    // 에스컬레이션이 같은 타임스탬프를 봐야 서로를 밟지 않는다. DAQ 재시작은
+    // 캘리브에 ~40초가 걸리고, 그동안 BEWE 는 정상적으로 sdr_stream_error 상태다 —
+    // 그 창을 못 보면 캘리브 도중에 DAQ 를 또 내려 영영 안 붙는다.
+    auto krk_err_since      = clk::time_point{};   // 에러 지속 시작
+    auto krk_daq_restart_at = clk::time_point{};   // 마지막 DAQ 재시작 (수동 포함)
+    int  krk_daq_tries      = 0;
+
     // ══════════════════════════════════════════════════════════════════════
     //  Main loop
     // ══════════════════════════════════════════════════════════════════════
@@ -2724,6 +2733,9 @@ void run_cli_host(){
                 return false;
             }
             bewe_log_push(0,"[CLI] %s: DAQ restarted - waiting for calibration\n", tag);
+            // 수동(/chassis)이든 자동이든 여기를 지난다 — 캘리브 창을 아래
+            // 에스컬레이션에 알려 중복 재시작을 막는다.
+            krk_daq_restart_at = clk::now();
             return true;
         };
 
@@ -3057,10 +3069,6 @@ void run_cli_host(){
         }
 
         // ── SDR reconnect logic ──────────────────────────────────────────
-        // Kraken DAQ 재시작 에스컬레이션 상태. 재연결 성공 시 아래에서 리셋한다.
-        static auto krk_err_since  = clk::time_point{};
-        static int  krk_daq_tries  = 0;
-
         if(!v.remote_mode && v.sdr_stream_error.load() && !v.rx_stopped.load()){
             if(!bg_join_started && v.hw.type == HWType::BLADERF)
                 usb_reset_pending = true;
@@ -3115,13 +3123,19 @@ void run_cli_host(){
             if(is_kraken_station()){
                 if(krk_err_since == clk::time_point{}) krk_err_since = clk::now();
                 float krk_el = std::chrono::duration<float>(clk::now()-krk_err_since).count();
-                if(krk_el >= 30.0f){
+                // 캘리브 창(~40초) 보호: 방금 DAQ 를 재시작했으면 — 수동이든
+                // 자동이든 — 아직 판정하지 않는다. 12:43 DGS-X 에서 운용자가
+                // /chassis 1 reset 을 친 직후 캘리브가 도는 동안 BEWE 는 정상적으로
+                // 에러 상태였고, 여기서 또 내렸으면 영영 안 붙었다.
+                bool calibrating = krk_daq_restart_at != clk::time_point{}
+                    && std::chrono::duration<float>(clk::now()-krk_daq_restart_at).count() < 60.0f;
+                if(krk_el >= 60.0f && !calibrating){
                     if(krk_daq_tries < 3){
                         krk_daq_tries++;
                         bewe_log_push(0,"[CLI] Kraken: no DAQ stream for %.0fs - restarting "
                                         "heimdall DAQ (attempt %d/3)\n", krk_el, krk_daq_tries);
                         kraken_restart_daq("SDR recovery");
-                        krk_err_since = clk::now();   // 캘리브 대기 — 다음 판정까지 30초
+                        krk_err_since = clk::now();   // 캘리브 대기 — 다음 판정까지 60초
                     } else {
                         bewe_log_push(2,"[CLI] Kraken: DAQ restarted 3x without recovery - "
                                         "stopping automatic retries. Check the dongles/power, "
