@@ -35,6 +35,11 @@ static constexpr int64_t AMC_PERIOD_MS = 1000;
 // 데시메이션 하한. 출력 48 kHz 이상을 보장해 4096 표본이 항상 ≤85 ms 안에 차게 한다 —
 // detect hold 창(360 ms)보다 넉넉히 짧아야 lock 이 풀리기 전에 캡처가 끝난다.
 static constexpr double AMC_MIN_OUT_SR = 48000.0;
+// 대역내 SNR 하한. 이보다 낮으면 스퀄치가 열려 있어도 재지 않는다 — 분류기가
+// 잡음을 넣으면 FM 이라고 답하기 때문이다(잡음의 순시주파수 분산이 광대역 FM 과
+// 닮았다). 6 dB 는 잡음바닥 추정 자체의 흔들림(하위 25% 분위수, ~1 dB)보다 충분히
+// 크면서, 약한 실신호를 버리지 않는 선이다.
+static constexpr float AMC_MIN_SNR_DB = 6.0f;
 
 void worker(FFTViewer& v, int ch_idx){
     Channel& ch = v.channels[ch_idx];
@@ -141,12 +146,19 @@ void worker(FFTViewer& v, int ch_idx){
         // 리셋한다 — 영원히 have=0 이고 한 건도 못 잰다 (2026-08-04 실측).
         const bool rising  = gate && !gate_prev;
         const bool periodic= gate && (tnow - last_infer_ms >= AMC_PERIOD_MS);
-        if(!cap_arm && (rising || periodic) && tnow - last_infer_ms > AMC_MIN_GAP_MS){
+        // 잡음 배제 — 스퀄치가 열려 있어도 대역내 SNR 이 낮으면 재지 않는다.
+        // AIS 처럼 슬롯이 26.7 ms 인 버스트 채널은 대부분의 시간이 빈 채널인데
+        // 스퀄치는 계속 열려 있어, 그대로 두면 표본의 87% 가 잡음이 된다 (2026-08-04
+        // 실측: ch4 345건 중 301건이 잡음권, 그 82% 가 FM 으로 분류됐다). 잡음을
+        // 평균에 넣으면 진짜 버스트가 묻혀 평균이 오히려 나빠진다.
+        const float snr_now = ch.sq_sig.load(std::memory_order_relaxed)
+                            - ch.sq_nf.load(std::memory_order_relaxed);
+        const bool  snr_ok  = snr_now >= AMC_MIN_SNR_DB;
+        if(!cap_arm && snr_ok && (rising || periodic) && tnow - last_infer_ms > AMC_MIN_GAP_MS){
             cap_have = 0; cap_arm = true;
             cap_trig = AMC_TRIG_SQUELCH;
             cap_t_ms = tnow;
-            cap_snr  = ch.sq_sig.load(std::memory_order_relaxed)
-                     - ch.sq_nf.load(std::memory_order_relaxed);
+            cap_snr  = snr_now;
             // ring 이 조용하던 동안 rp 가 뒤처져 있다. 여기서 안 당기면 첫 캡처가
             // 수 초 전 노이즈가 된다.
             my_rp.store(v.ring_wp.load(std::memory_order_acquire), std::memory_order_release);
@@ -162,9 +174,11 @@ void worker(FFTViewer& v, int ch_idx){
             if(last_infer_ms == 0 || tnow - last_infer_ms > 30000){
                 size_t wp_d=v.ring_wp.load(std::memory_order_acquire);
                 size_t adv=(wp_d-last_diag_wp)&IQ_RING_MASK;   // 30초 동안 ring 이 얼마나 돌았나
-                bewe_log_push(2,"AMC[%d] idle: gate=%d sig=%.1f thr=%.1f dB  ring_adv=%zu  armed=%d have=%d/%d%s\n",
+                bewe_log_push(2,"AMC[%d] idle: gate=%d sig=%.1f nf=%.1f SNR=%.1f(min %.0f) thr=%.1f dB  ring_adv=%zu  armed=%d have=%d/%d%s\n",
                     ch_idx, gate?1:0,
                     ch.sq_sig.load(std::memory_order_relaxed),
+                    ch.sq_nf.load(std::memory_order_relaxed),
+                    snr_now, (double)AMC_MIN_SNR_DB,
                     ch.sq_threshold.load(std::memory_order_relaxed),
                     adv, cap_arm?1:0, cap_have, AMC_CAP,
                     adv==0 ? "  (IQ ring not being filled)"

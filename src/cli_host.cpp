@@ -128,26 +128,74 @@ void FFTViewer::update_channel_squelch(){
         int bin_e = freq_to_bin(e_mhz);
         // 행·대역 둘 다 그대로면 캐시 재사용 (계산결과 동일 → 게이트/시간 동작 불변)
         float peak_db;
+        float nf_db;      // 같은 대역의 잡음바닥 (하위 25% 분위수)
         if(same_row && ch.sq_calibrated.load(std::memory_order_relaxed)
            && ch.sq_scan_s == scan_s && ch.sq_scan_e == scan_e){
             peak_db = ch.sq_cached_peak;
+            nf_db   = ch.sq_cached_nf;
         } else {
+            // peak 와 잡음바닥을 **한 번의 순회로** 같이 뽑는다. 대역 bin 을 작은
+            // 고정 버퍼에 복사해 nth_element 로 분위수를 구한다 — 채널 대역이
+            // 좁아(수 kHz~수백 kHz) bin 수가 적고, 넘치면 균등 서브샘플한다.
+            //
+            // 왜 하위 25% 인가: 협대역 채널은 대역 대부분이 신호로 차 있을 수
+            // 있다. 15% 는 표본이 너무 적어 튀고, 50% 는 신호에 물린다. 25% 가
+            // "신호가 대역의 3/4 를 채우기 전까지는 잡음을 본다" 는 절충이다.
+            // (autoscale 은 전 대역을 보므로 15% 가 맞다 — 목적이 다르다.)
+            static constexpr int NF_MAX = 512;
+            float nfbuf[NF_MAX];
+            int   nfn = 0;
             peak_db = -120.0f;
+
+            auto scan = [&](int b0, int b1, int stride){
+                for(int b = b0; b <= b1; b += stride){
+                    const float vdb = rowp[b];
+                    if(vdb > peak_db) peak_db = vdb;
+                    if(nfn < NF_MAX) nfbuf[nfn++] = vdb;
+                }
+            };
+            int nbin = (bin_s <= bin_e) ? (bin_e - bin_s + 1)
+                                        : (fft_size - bin_s) + (bin_e + 1);
+            int stride = (nbin > NF_MAX) ? (nbin / NF_MAX + 1) : 1;
             if(bin_s <= bin_e){
-                for(int b = bin_s; b <= bin_e; b++)
-                    if(rowp[b] > peak_db) peak_db = rowp[b];
+                scan(bin_s, bin_e, stride);
             } else {
-                for(int b = bin_s; b < fft_size; b++)
-                    if(rowp[b] > peak_db) peak_db = rowp[b];
-                for(int b = 0; b <= bin_e; b++)
-                    if(rowp[b] > peak_db) peak_db = rowp[b];
+                scan(bin_s, fft_size - 1, stride);
+                scan(0, bin_e, stride);
+            }
+            // stride 로 걸러도 peak 는 놓치면 안 된다 — 좁은 캐리어가 건너뛴 bin 에
+            // 있으면 신호를 통째로 못 본다. peak 만 전수 재확인한다 (분위수는 표본으로 충분).
+            if(stride > 1){
+                peak_db = -120.0f;
+                if(bin_s <= bin_e){
+                    for(int b = bin_s; b <= bin_e; b++) if(rowp[b] > peak_db) peak_db = rowp[b];
+                } else {
+                    for(int b = bin_s; b < fft_size; b++) if(rowp[b] > peak_db) peak_db = rowp[b];
+                    for(int b = 0; b <= bin_e; b++)       if(rowp[b] > peak_db) peak_db = rowp[b];
+                }
+            }
+            if(nfn > 0){
+                const int q = nfn / 4;                     // 하위 25%
+                std::nth_element(nfbuf, nfbuf + q, nfbuf + nfn);
+                nf_db = nfbuf[q];
+            } else {
+                nf_db = peak_db;                           // 대역이 1 bin — SNR 0
             }
             ch.sq_cached_peak = peak_db;
+            ch.sq_cached_nf   = nf_db;
             ch.sq_scan_s = scan_s; ch.sq_scan_e = scan_e;
         }
         float prev = ch.sq_sig.load(std::memory_order_relaxed);
         float sig = 0.3f * peak_db + 0.7f * prev;
         ch.sq_sig.store(sig, std::memory_order_relaxed);
+        // 잡음바닥은 sig 보다 느리게 따라가야 한다. 같은 시정수를 쓰면 신호가
+        // 들어올 때 바닥이 같이 올라가 SNR 이 안 오른다 — 그러면 이 값을 만든
+        // 목적 자체가 사라진다. 0.05 면 시정수가 6 배라 버스트에는 거의 안 움직이고
+        // 게인/주파수 변경 같은 진짜 바닥 이동은 수 초 안에 따라간다.
+        float prev_nf = ch.sq_nf.load(std::memory_order_relaxed);
+        float nf = (prev_nf <= -119.0f) ? nf_db            // 첫 값은 그대로 (수렴 대기 제거)
+                                        : 0.05f * nf_db + 0.95f * prev_nf;
+        ch.sq_nf.store(nf, std::memory_order_relaxed);
         // detect 채널은 캘리브 제외 — sq_threshold 가 절대 dB 가 아니라 기준선 대비
         // 마진이라(config.hpp) 절대값으로 덮어쓰면 마진 설정이 날아간다.
         if(!det && !ch.sq_calibrated.load(std::memory_order_relaxed)){
@@ -3365,9 +3413,10 @@ void run_cli_host(){
                     for(int i = 0; i < MAX_CHANNELS; i++){
                         const Channel& ch = v.channels[i];
                         if(!ch.filter_active) continue;
-                        bewe_log_push(0,"    CH%d %.4f MHz  sig %.1f dB  thr %.1f dB\n",
-                                      i, (ch.s + ch.e) * 0.5f,
-                                      ch.sq_sig.load(std::memory_order_relaxed),
+                        const float csig = ch.sq_sig.load(std::memory_order_relaxed);
+                        const float cnf  = ch.sq_nf.load(std::memory_order_relaxed);
+                        bewe_log_push(0,"    CH%d %.4f MHz  sig %.1f  nf %.1f  SNR %.1f dB  thr %.1f dB\n",
+                                      i, (ch.s + ch.e) * 0.5f, csig, cnf, csig - cnf,
                                       ch.sq_threshold.load(std::memory_order_relaxed));
                     }
                 } else if(sub == "on" || sub == "off"){

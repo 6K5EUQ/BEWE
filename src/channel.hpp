@@ -315,13 +315,18 @@ struct Channel {
 
     // Squelch (UI 스레드에서 FFT 기반으로 중앙 관리)
     std::atomic<float> sq_threshold{-50.0f};
-    std::atomic<float> sq_sig{-120.0f}, sq_nf{0.0f};
+    // sq_nf = 채널 대역 안 잡음바닥 추정 (dBFS). sq_sig - sq_nf 가 곧 대역내 SNR 이다.
+    // 초기값을 0 으로 두면 안 된다 — 첫 갱신 전에 SNR 을 읽는 쪽이 -120 dB 같은
+    // 값을 보고 "잡음뿐" 으로 오판한다. sq_sig 와 같은 바닥에서 출발시켜 SNR 0 으로
+    // 읽히게 한다 (모르는 상태 = 판단 보류).
+    std::atomic<float> sq_sig{-120.0f}, sq_nf{-120.0f};
     std::atomic<bool>  sq_gate{false};
     std::atomic<bool>  sq_calibrated{false};
     // 사용자가 직접 조정한 임계값이면 true — autoscale 재캘리브레이션에서 제외.
     std::atomic<bool>  sq_manual{false};
     // new-row guard: 같은 FFT 행을 여러 프레임 재스캔하지 않도록 peak 캐시 (UI 스레드 전용)
     float sq_cached_peak = -120.0f;
+    float sq_cached_nf   = -120.0f;      // 같은 행/대역의 잡음바닥 (peak 와 함께 캐시)
     float sq_scan_s = 0, sq_scan_e = 0;  // 캐시가 유효한 대역 (s/e 변하면 무효)
     // 캘리브레이션 (UI 스레드 전용)
     int   sq_calib_cnt = 0;
@@ -414,7 +419,7 @@ struct Channel {
         // squelch
         sq_threshold.store(-50.0f);
         sq_sig.store(-120.0f);
-        sq_nf.store(0.0f);
+        sq_nf.store(-120.0f);
         sq_gate.store(false);
         sq_calibrated.store(false);
         sq_manual.store(false);
