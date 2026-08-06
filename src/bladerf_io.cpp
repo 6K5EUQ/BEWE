@@ -635,12 +635,21 @@ void FFTViewer::commit_fft_row(const std::vector<float>& pacc, int fcnt){
          // 15퍼센타일이 통째로 그 안에 들어가 평탄부 -69 대신 -72.4 가 나왔다.
          // 창이 그만큼 아래로 늘어나 워터폴 대비가 죽는다.
          //
-         // 중앙 80% 만 본다. 어느 SDR이든 나이퀴스트 가장자리는 못 쓰므로 이건
-         // 하드웨어 무관하게 옳고, 신호가 가장자리에 있어도 peak 는 아래에서
-         // 전 빈을 훑으므로 천장은 여전히 그 신호를 담는다.
+         // **빈 순서는 unshifted 다** — rowp[0] 이 DC 이고 rowp[fft_size/2] 근처가
+         // 나이퀴스트, 즉 대역 **가장자리**다 (ui.cpp bin_to_mhz_sp 가 b<half 를
+         // 양의 주파수로 읽는 것과 같은 규약). 그래서 잘라낼 곳은 배열의 양 끝이
+         // 아니라 **가운데**다. 배열 인덱스로 착각해 양 끝을 자르면 정확히 반대로
+         // 롤오프만 남긴다.
+         //
+         // 대역의 바깥 10% (|f| > 0.4*fs) 를 버린다.
          {
-             const int lo = fft_size/10, hi = fft_size - fft_size/10;
-             for(int i=std::max(1,lo);i<hi;i++){
+             const int half = fft_size/2;
+             const int keep = (int)(half * 0.8f);     // |bin| <= 0.4*fft_size
+             for(int i=1;i<=keep;i++){                // 양의 주파수
+                 autoscale_accum[autoscale_wp]=rowp[i];
+                 if(++autoscale_wp>=cap){ autoscale_wp=0; autoscale_buf_full=true; }
+             }
+             for(int i=fft_size-keep;i<fft_size;i++){ // 음의 주파수
                  autoscale_accum[autoscale_wp]=rowp[i];
                  if(++autoscale_wp>=cap){ autoscale_wp=0; autoscale_buf_full=true; }
              }

@@ -4274,14 +4274,15 @@ void run_streaming_viewer(){
                             v.autoscale_last = std::chrono::steady_clock::now();
                             v.autoscale_init = true;
                         }
-                        // 대역 가장자리(필터 스커트)는 제외 — HOST 쪽과 같은 이유다
-                        // (bladerf_io.cpp 의 누적 주석 참조). 세 경로가 같은 빈을
-                        // 봐야 같은 신호가 같은 색으로 나온다.
+                        // 대역 가장자리(필터 스커트)는 제외 — HOST 쪽과 같은 이유다.
+                        // 빈은 unshifted 라 가장자리가 배열 **가운데**에 있다
+                        // (bladerf_io.cpp 의 누적 주석 참조).
                         {
-                            const int _lo_bin = std::max(1, fsz/10), _hi_bin = fsz - fsz/10;
-                            if(_hi_bin > _lo_bin)
-                                v.autoscale_accum.insert(v.autoscale_accum.end(),
-                                                         dst+_lo_bin, dst+_hi_bin);
+                            const int _half = fsz/2, _keep = (int)(_half * 0.8f);
+                            v.autoscale_accum.insert(v.autoscale_accum.end(),
+                                                     dst+1, dst+1+_keep);
+                            v.autoscale_accum.insert(v.autoscale_accum.end(),
+                                                     dst+fsz-_keep, dst+fsz);
                         }
                         float _el=std::chrono::duration<float>(
                             std::chrono::steady_clock::now()-v.autoscale_last).count();

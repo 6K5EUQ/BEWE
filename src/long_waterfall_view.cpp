@@ -457,9 +457,11 @@ static void scan_file_db_range(){
                 // 대역 가장자리(필터 스커트)도 뺀다: 거기 잡음은 필터가 깎은
                 // 값이라 노이즈플로어가 아닌데 하위 분위수가 그걸 문다
                 // (bladerf_io.cpp 의 누적 주석 참조).
-                { const uint32_t lo = std::max(1u, fft_sz/10), hi = fft_sz - fft_sz/10;
-                  for(uint32_t i = lo; i < hi; i++) g_hist[p[i]]++;
-                  for(uint32_t i = 1;  i < fft_sz; i++) g_hist_all[p[i]]++; }
+                // 빈은 unshifted — 가장자리가 배열 가운데다 (bladerf_io.cpp 참조).
+                { const uint32_t half = fft_sz/2, keep = (uint32_t)(half * 0.8f);
+                  for(uint32_t i = 1; i <= keep; i++)          g_hist[p[i]]++;
+                  for(uint32_t i = fft_sz-keep; i < fft_sz; i++) g_hist[p[i]]++;
+                  for(uint32_t i = 1; i < fft_sz; i++)          g_hist_all[p[i]]++; }
                 g_scanned_rows++;
             }
             g_scan_cursor = r0 + cstride * chunk;
