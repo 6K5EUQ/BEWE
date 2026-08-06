@@ -3013,20 +3013,38 @@ void run_cli_host(){
         // 안 풀려 USB reset 으로 hung read_sync 를 깨운 뒤 reconnect 에 위임. (v4.6.1)
         // USB reset 은 SDR 종류를 가리지 않는다 — 예전엔 RTL 만 했는데, Pluto 도
         // 같은 wedge 가 나므로 재초기화만 반복하며 안 풀렸다 (2026-07-29 DGS-2).
+        //
+        // total_ffts 정체만 보고 "USB wedge" 로 단정하면 안 된다. 대용량 파일 전송
+        // (region IQ / DB 다운로드) 이 송신 경로를 독점하면 캡처가 밀려 카운터가
+        // 그대로 멈추는데, SDR 은 멀쩡하다. 2026-08-06 DGS-X 가 정확히 그 경우다 —
+        // 19 MB IQ 전송이 3.4 MB/s 로 나가는 동안 fft 가 0 KB/s 로 떨어졌고, 10초 뒤
+        // 워치독이 발화해 멀쩡한 Kraken 체인을 강제 복구로 몰았다.
+        // 그래서 FFT 하나가 아니라 **BEWE 송신 전체**(file/audio/hist)를 같이 본다:
+        // 어느 하나라도 바이트가 흐르고 있으면 이 노드는 살아 있는 것이므로 죽었다고
+        // 판정하지 않는다. 전송은 언젠가 끝나고, 끝나면 타이머가 다시 돌기 시작한다.
         {
-            static int  wd_last_ffts = -1;
+            static int      wd_last_ffts = -1;
+            static uint64_t wd_last_net  = 0;
             static auto wd_last_change = clk::now();
             bool steady = !v.remote_mode && !v.rx_stopped.load() && v.is_running
                           && !v.sdr_stream_error.load() && !v.spectrum_pause.load();
             if(steady){
                 int cur = v.total_ffts;
-                if(cur != wd_last_ffts){
+                // FFT 를 뺀 나머지 송신량. FFT 를 넣으면 스스로를 상쇄해 무의미하다.
+                uint64_t net = central_cli.stat_tx_file_bytes.load(std::memory_order_relaxed)
+                             + central_cli.stat_tx_audio_bytes.load(std::memory_order_relaxed)
+                             + central_cli.stat_tx_hist_bytes.load(std::memory_order_relaxed);
+                if(cur != wd_last_ffts || net != wd_last_net){
                     wd_last_ffts = cur;
+                    wd_last_net  = net;
                     wd_last_change = clk::now();
                 } else if(std::chrono::duration<float>(clk::now()-wd_last_change).count() >= 10.0f){
-                    bewe_log_push(0,"[CLI] SDR STALL: total_ffts frozen >=10s (read_sync hang) "
+                    bewe_log_push(0,"[CLI] SDR STALL: no FFT and no BEWE traffic for >=10s "
                                     "- forcing recovery\n");
-                    // 깨워야 블로킹 read (read_sync / iio_buffer_refill) 가 에러 반환
+                    // 깨워야 블로킹 read (read_sync / iio_buffer_refill) 가 에러 반환.
+                    // Kraken 은 sdr_usb_ids 가 false 라 여기서 아무 것도 안 한다 —
+                    // 동글 주인이 heimdall DAQ 이기 때문이고, 그쪽 복구는 아래
+                    // reconnect 의 DAQ 재시작 에스컬레이션이 맡는다.
                     uint16_t wvid=0, wpid=0; const char* wlabel=nullptr;
                     if(sdr_usb_ids(v.hw.type, &wvid, &wpid, &wlabel))
                         usb_reset_vidpid(wvid, wpid, wlabel);
@@ -3039,6 +3057,10 @@ void run_cli_host(){
         }
 
         // ── SDR reconnect logic ──────────────────────────────────────────
+        // Kraken DAQ 재시작 에스컬레이션 상태. 재연결 성공 시 아래에서 리셋한다.
+        static auto krk_err_since  = clk::time_point{};
+        static int  krk_daq_tries  = 0;
+
         if(!v.remote_mode && v.sdr_stream_error.load() && !v.rx_stopped.load()){
             if(!bg_join_started && v.hw.type == HWType::BLADERF)
                 usb_reset_pending = true;
@@ -3079,6 +3101,37 @@ void run_cli_host(){
                 }
             }
 
+            // ── Kraken: 재연결이 계속 실패하면 DAQ 를 재시작한다 ──────────────
+            // Kraken 에서 BEWE 는 동글을 소유하지 않으므로 USB 리셋 경로가 전부
+            // 무장해제돼 있다. 그 결과 강제 복구가 "재초기화 → 127.0.0.1:5000 접속
+            // 실패 → 재초기화" 를 영원히 돌기만 했다 — DAQ 가 옛 핸들을 붙들고
+            // rtl_daq 가 -4(NO_DEVICE) 를 뿜는 상태는 BEWE 가 몇 번을 재시작해도
+            // 안 풀리기 때문이다 (2026-08-06 DGS-X: 12:37 발화 후 영구 SDR=ERR,
+            // 운용자가 /chassis 1 reset 을 직접 칠 때까지 복구 안 됨).
+            // 이 모드에서 "케이블을 뽑았다 꽂는 것" 에 해당하는 조치가 DAQ 재시작이고,
+            // /chassis 1 reset 이 이미 그 분기를 갖고 있다 — 같은 helper 를 부른다.
+            // 30초를 주는 이유: DAQ 재시작은 캘리브에 ~40초가 들어 값이 싸지 않다.
+            // 그 전에 스스로 붙으면(일시적 스트림 끊김) 건드리지 않는 편이 낫다.
+            if(is_kraken_station()){
+                if(krk_err_since == clk::time_point{}) krk_err_since = clk::now();
+                float krk_el = std::chrono::duration<float>(clk::now()-krk_err_since).count();
+                if(krk_el >= 30.0f){
+                    if(krk_daq_tries < 3){
+                        krk_daq_tries++;
+                        bewe_log_push(0,"[CLI] Kraken: no DAQ stream for %.0fs - restarting "
+                                        "heimdall DAQ (attempt %d/3)\n", krk_el, krk_daq_tries);
+                        kraken_restart_daq("SDR recovery");
+                        krk_err_since = clk::now();   // 캘리브 대기 — 다음 판정까지 30초
+                    } else {
+                        bewe_log_push(2,"[CLI] Kraken: DAQ restarted 3x without recovery - "
+                                        "stopping automatic retries. Check the dongles/power, "
+                                        "then run /chassis 1 reset.\n");
+                        krk_daq_tries = 4;                 // 로그 1회만
+                        krk_err_since = clk::now() + std::chrono::hours(24);
+                    }
+                }
+            }
+
             sdr_retry_timer -= dt;
             if(usb_reset_in_progress.load()) sdr_retry_timer = 1.f;
             if(sdr_retry_timer <= 0.f && cap_joined.load() && !usb_reset_in_progress.load()){
@@ -3094,6 +3147,8 @@ void run_cli_host(){
                 if(v.initialize(cur_cf, cur_sr2)){
                     bewe_log_push(0,"[CLI] SDR reconnected - resuming at %.2f MHz\n", cur_cf);
                     v.sdr_stream_error.store(false);
+                    krk_err_since = clk::time_point{};   // Kraken 에스컬레이션 해제
+                    krk_daq_tries = 0;
                     bg_join_started = false;
                     cap_joined.store(false);
                     usb_reset_in_progress.store(false);
