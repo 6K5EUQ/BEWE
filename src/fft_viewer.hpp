@@ -67,10 +67,19 @@ inline void autoscale_db_window(float noise, float peak, float lo,
     if(!(lo < noise)) lo = noise - 1.f;          // 방어: lo 가 이상하면 noise 기준
     out_min = lo - 2.f;
 
-    // 노이즈가 정확히 바닥 10% 지점에 오는 창 폭
-    const float rise = noise - out_min;          // > 0
-    float span = rise / 0.10f;
-    if(span < 20.f) span = 20.f;                 // 너무 좁은 창은 색이 뭉갠다
+    // 잡음 **상단**까지가 바닥 10% 안에 들어와야 한다. noise(하위 15%)만 기준으로
+    // 잡으면 그건 잡음 분포의 아래쪽이라, 잡음의 위쪽 절반이 10% 밖으로 삐져나온다.
+    //
+    // 상단은 상위 분위수로 못 잰다 — 신호가 대역의 몇 %를 차지하는지 모르므로
+    // 99% 분위수가 신호권으로 끌려간다 (실측: 신호 5% 만 있어도 -65 -> -38).
+    // 대신 하위 두 분위수의 간격으로 잡음의 폭을 재고 그만큼 위로 올린다.
+    // 계수 2.2 는 정규분포에서 0.5%~15% 간격 대비 15%~99.5% 간격의 비율이다.
+    const float width = noise - lo;              // >= 0
+    const float noise_top = noise + 2.2f * width;
+
+    float span = (noise_top - out_min) / 0.10f;
+    if(span <  20.f) span =  20.f;               // 너무 좁으면 색이 뭉갠다
+    if(span > 150.f) span = 150.f;               // 롤오프가 width 를 부풀린 경우의 상한
     out_max = out_min + span;
 
     // 신호가 그보다 높으면 그 위로 여유를 준다 (잘리면 안 된다)
