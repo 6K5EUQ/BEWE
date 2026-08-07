@@ -65,13 +65,37 @@ static void archive_snapshot(const std::string& tle_dir){
     const std::string dst = adir + "/leo_" + d + ".txt";
     struct stat st{};
     if(stat(dst.c_str(), &st) == 0) return;          // 이미 있음
-    FILE* in = fopen(live.c_str(), "rb");
-    if(!in) return;
+    // **LEO 만, Starlink 는 뺀다.** 실측(2026-08-07 카탈로그): 전체 15,812 중 Starlink 가
+    // 10,618 (67%) 이고, 남는 LEO 는 4,383 개다. 스냅샷이 하루 2.53 MB -> 0.69 MB 로 준다
+    // (1년 0.90 GB -> 0.25 GB). HIST 파일 하나가 312 MB 인 걸 생각하면 1년치가 HIST
+    // 한 개도 안 된다.
+    // 부작용: 아카이브본으로 매칭하면 Starlink 는 후보에서 빠진다. 어차피 같은 셸에
+    // 수십 개가 분 단위로 지나가 sep 를 1 근처로 만들던 것들이라 의도된 배제다.
     FILE* out = fopen(dst.c_str(), "wb");
-    if(!out){ fclose(in); return; }
-    char buf[65536]; size_t n;
-    while((n = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, n, out);
+    if(!out) return;
+    FILE* in = fopen(live.c_str(), "rb");
+    if(!in){ fclose(out); return; }
+    char l0[256], l1[256], l2[256];
+    int kept = 0;
+    while(fgets(l0, sizeof l0, in) && fgets(l1, sizeof l1, in) && fgets(l2, sizeof l2, in)){
+        if(l1[0] != '1' || l2[0] != '2') continue;
+        // 이름에 STARLINK 가 들어가면 제외
+        bool star = false;
+        for(char* p = l0; *p; p++){
+            if((*p=='S'||*p=='s') && strncasecmp(p, "STARLINK", 8) == 0){ star = true; break; }
+        }
+        if(star) continue;
+        // 평균운동(rev/day) -> 반장축 -> 고도. 2000 km 초과는 LEO 가 아니다.
+        const double mm = atof(l2 + 52);
+        if(!(mm > 0)) continue;
+        const double nrad = mm * 2.0*M_PI / 86400.0;
+        const double a = std::cbrt(MU_KM3_S2/(nrad*nrad));
+        if(a - A_E_KM > 2000.0) continue;
+        fputs(l0, out); fputs(l1, out); fputs(l2, out);
+        kept++;
+    }
     fclose(in); fclose(out);
+    if(kept == 0) ::remove(dst.c_str());     // 빈 파일을 남기면 로드가 실패한다
 }
 
 bool load_catalogue(const std::string& tle_dir, double for_utc, std::string& why){
