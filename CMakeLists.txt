@@ -191,6 +191,9 @@ else()
         src/host_band_categories.cpp
         src/long_waterfall.cpp
         src/hist_reader.cpp
+        src/doppler/sat_geom.cpp
+        src/doppler/doppler_extract.cpp
+        src/doppler/doppler_fit.cpp
         src/long_waterfall_view.cpp
         src/sig_lib_view.cpp
         src/mission_view.cpp
