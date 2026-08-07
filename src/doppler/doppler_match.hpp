@@ -46,8 +46,20 @@ struct Cand {
     double incl_deg = 0, alt_km = 0, tle_age_days = 0;
 };
 
+// 결과 신뢰도 판정. 낡은 카탈로그는 **조용히 틀리기 때문에** 필요하다 —
+// 실측(38일 낡음, 진짜 위성 6개): 5개가 오답을 1위로 냈다 (ISS -> STARLINK-6270 등).
+// 다만 그때 rms 는 117~438 Hz, sep 는 1.01~2.10 이었다. 신선한 카탈로그의
+// rms 48.6 Hz / sep 15.24 와 자릿수가 다르다 — 즉 결과 안에 이미 불신 신호가 있다.
+//   RELIABLE   : 잔차가 측정잡음 수준이고 1위가 뚜렷하다
+//   AMBIGUOUS  : 잔차는 맞는데 1·2위가 안 갈린다 (같은 궤도면 위성들 — 정상이다)
+//   UNRELIABLE : 잔차가 측정잡음의 배수다. 카탈로그의 어떤 위성도 이 데이터를
+//                설명하지 못한다 = 정답이 카탈로그에 없거나 원소가 낡았다.
+enum class Verdict { Reliable, Ambiguous, Unreliable };
+
 struct Result {
     std::vector<Cand> cands;
+    Verdict     verdict = Verdict::Unreliable;
+    std::string verdict_why;
     int      n_stage[5] = {0,0,0,0,0};   // 단계별 생존 수 — "왜 못 찾았나" 를 설명하는 유일한 필드
     double   ms = 0;
     double   tle_age_days = 0;

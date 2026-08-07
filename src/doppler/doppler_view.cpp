@@ -165,6 +165,18 @@ float draw_panel(const HistReader& R, float h){
         ImGui::SameLine();
         ImGui::TextDisabled("n=%d", g_match.n_loaded);
     }
+    // 신뢰도 판정 — 표보다 위에 둔다. 낡은 카탈로그는 순위표를 그럴듯하게 채우면서
+    // 조용히 틀리므로(실측: 38일 낡음에서 6건 중 5건이 오답 1위), 표만 보면 속는다.
+    if(g_have_match && g_match.verdict != DopplerMatch::Verdict::Reliable){
+        const bool bad = (g_match.verdict == DopplerMatch::Verdict::Unreliable);
+        ImGui::TextColored(bad ? ImVec4(0.95f,0.35f,0.30f,1) : ImVec4(0.95f,0.72f,0.25f,1),
+                           "%s", bad ? "UNRELIABLE" : "AMBIGUOUS");
+        if(!g_match.verdict_why.empty()){
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextColored(ImVec4(0.78f,0.72f,0.62f,1), "%s", g_match.verdict_why.c_str());
+            ImGui::PopTextWrapPos();
+        }
+    }
     if(st.st == DopplerScan::State::Failed && !st.err.empty())
         ImGui::TextColored(ImVec4(0.95f,0.4f,0.35f,1), "%s", st.err.c_str());
     if(R.is_live())

@@ -399,6 +399,36 @@ bool match(const Doppler::Candidate& trk, const Obs& obs, const Params& P, Resul
     for(size_t i = 0; i < cands.size(); i++)
         cands[i].sep = (cands[0].rms_hz > 0) ? cands[i].rms_hz/cands[0].rms_hz : 0.0;
     out.cands = std::move(cands);
+
+    // ── 신뢰도 판정 ──────────────────────────────────────────────────────
+    // 기준선은 **트랙 자신의 S곡선 적합 잔차**다. 그게 이 관측의 측정잡음이므로,
+    // 최선 위성의 도플러 잔차가 그보다 몇 배 크면 궤도가 데이터를 설명 못 하는 것이다.
+    // 절대 Hz 임계를 박으면 대역/설정마다 틀린다 (bin 폭이 49~3750 Hz 로 다르다).
+    {
+        const double meas = (trk.fit.valid && trk.fit.rms_resid_hz > 0)
+                            ? trk.fit.rms_resid_hz : (trk.bin_hz > 0 ? trk.bin_hz : 1.0);
+        const double best = out.cands.empty() ? 1e300 : out.cands[0].rms_hz;
+        const double sep2 = (out.cands.size() > 1) ? out.cands[1].sep : 1e300;
+        char b[160];
+        if(out.cands.empty()){
+            out.verdict = Verdict::Unreliable;
+            out.verdict_why = "no candidate passed the geometry gates";
+        } else if(best > 6.0*meas){
+            out.verdict = Verdict::Unreliable;
+            snprintf(b, sizeof b,
+                "best residual %.0f Hz is %.1fx the track's own %.0f Hz - no catalogue "
+                "orbit explains this (TLE %.0f d from the recording?)",
+                best, best/meas, meas, out.tle_age_days);
+            out.verdict_why = b;
+        } else if(sep2 < 2.0){
+            out.verdict = Verdict::Ambiguous;
+            snprintf(b, sizeof b, "top candidates differ by only x%.2f", sep2);
+            out.verdict_why = b;
+        } else {
+            out.verdict = Verdict::Reliable;
+            out.verdict_why.clear();
+        }
+    }
     out.ms = std::chrono::duration<double,std::milli>(
                  std::chrono::steady_clock::now()-tstart).count();
     if(prog) prog(1.0f, "done");
@@ -449,6 +479,10 @@ bool archive_scan(const Doppler::Candidate& trk, const Obs& obs, const Params& P
             trk.fit.max_slope_hz_s, trk.score);
     fprintf(f, "\"tle\":{\"src\":\"%s\",\"age_days\":%.2f,\"n_loaded\":%d},",
             r.tle_src.c_str(), r.tle_age_days, r.n_loaded);
+    {   std::string vw; for(char ch : r.verdict_why){ if(ch=='"'||ch=='\\') vw+='_'; else vw+=ch; }
+        fprintf(f, "\"verdict\":{\"level\":\"%s\",\"why\":\"%s\"},",
+                r.verdict==Verdict::Reliable?"reliable":
+                r.verdict==Verdict::Ambiguous?"ambiguous":"unreliable", vw.c_str()); }
     fprintf(f, "\"search\":{\"el_min_deg\":%.1f,\"win_pad_s\":%.0f,"
                "\"n_stage\":[%d,%d,%d,%d,%d],\"ms\":%.0f},",
             P.el_min_deg, P.win_pad_s,
