@@ -161,20 +161,34 @@ bool fit_scurve(const std::vector<TrackPoint>& pts, double cf_hz, double bin_hz,
         // 인데 곡선은 양끝이 거의 평평하므로, 표본별로 재면 진짜 S곡선도 15~20% 가
         // 위로 튄다 (실측: 완벽한 합성 S곡선이 0.84 로 떨어져 거부됐다).
         // 구간 중앙값은 잡음을 sqrt(k) 로 줄이면서 상승 처프·요동을 그대로 잡는다.
-        const int SEG = 16;
+        // **Spearman 순위상관**을 쓴다. 구간 중앙값 방식도 잡음에 흔들려, 육안으로
+        // 명백한 실제 S곡선이 0.60~0.67 로 떨어져 거부됐다 (실측, DGS-2 G29).
+        // 순위상관은 척도무관·이상치강건이고 "추세가 감소하는가" 를 정확히 그대로
+        // 묻는다. rho=-1(완전 감소) → 1.0, rho=0(무관) → 0.5, rho=+1(상승) → 0.0
+        // 으로 옮겨 기존 임계(0.90 = rho -0.8)를 그대로 쓴다.
         const size_t n = pts.size();
-        if(n >= (size_t)SEG*2){
-            double med[SEG];
-            for(int s = 0; s < SEG; s++){
-                const size_t a = n*s/SEG, b = n*(s+1)/SEG;
-                std::vector<double> v; v.reserve(b-a);
-                for(size_t i = a; i < b; i++) v.push_back(pts[i].f_hz);
-                std::nth_element(v.begin(), v.begin()+v.size()/2, v.end());
-                med[s] = v[v.size()/2];
+        if(n >= 12){
+            std::vector<size_t> ord(n);
+            for(size_t i = 0; i < n; i++) ord[i] = i;
+            std::sort(ord.begin(), ord.end(),
+                      [&](size_t a, size_t b){ return pts[a].f_hz < pts[b].f_hz; });
+            std::vector<double> rank(n);
+            for(size_t k = 0; k < n; ){        // 동점은 평균순위
+                size_t j = k;
+                while(j+1 < n && pts[ord[j+1]].f_hz == pts[ord[k]].f_hz) j++;
+                const double r = 0.5*((double)k + (double)j) + 1.0;
+                for(size_t m = k; m <= j; m++) rank[ord[m]] = r;
+                k = j+1;
             }
-            int down = 0;
-            for(int s = 1; s < SEG; s++) if(med[s] <= med[s-1]) down++;
-            out.mono_frac = (float)down/(float)(SEG-1);
+            // 시간 순위는 1..n (트랙은 이미 시간순)
+            const double mt = 0.5*(n+1.0);
+            double num = 0, dt2 = 0, df2 = 0;
+            for(size_t i = 0; i < n; i++){
+                const double a = (double)(i+1) - mt, b = rank[i] - mt;
+                num += a*b; dt2 += a*a; df2 += b*b;
+            }
+            const double rho = (dt2 > 0 && df2 > 0) ? num/std::sqrt(dt2*df2) : 0.0;
+            out.mono_frac = (float)((1.0 - rho)*0.5);
         } else {
             int mono = 0, tot = 0;
             for(size_t i = 1; i < n; i++){

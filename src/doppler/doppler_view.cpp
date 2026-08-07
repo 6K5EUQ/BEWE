@@ -150,6 +150,7 @@ float draw_panel(const HistReader& R, float h){
             }
         }
         ImGui::EndChild();
+        ImGui::PopStyleColor();      // BeginChild 가 ChildBg 를 소비하므로 여기서 해제
     }
 
     // ── TLE 나이 (데이터지 설명문이 아니다) ─────────────────────────────

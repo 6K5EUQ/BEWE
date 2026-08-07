@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 
 namespace Doppler {
 
@@ -271,7 +273,20 @@ double fit_slope(const std::vector<TrackPoint>& p){
     return (sw*sxy - sx*sy) / den;
 }
 
-struct Peak { double lin; float snr; uint8_t flags; };
+struct Peak { double lin; float snr; float w_bins; uint8_t flags; };
+
+// 점별 주파수 불확실도. 좁은 톤이면 SNR 이 지배하고(계측기 폭 / sqrt(2 SNR)),
+// 넓은 신호면 신호 폭이 지배한다. 둘을 제곱합해 자연스럽게 넘어가게 한다.
+inline double peak_sigma_hz(float snr_db, float w_bins, float mainlobe_bins, double bin_hz){
+    const double snr_lin = std::pow(10.0, std::max(0.1f, snr_db)/10.0);
+    const double s_snr = ((double)mainlobe_bins*0.5)*bin_hz / std::sqrt(2.0*snr_lin);
+    // 폭이 계측기 한계보다 넓은 만큼만 추가 불확실도로 센다.
+    const double excess = std::max(0.0, (double)w_bins - (double)mainlobe_bins);
+    const double s_w = 0.25 * excess * bin_hz;
+    double s = std::sqrt(s_snr*s_snr + s_w*s_w);
+    if(s < 0.05*bin_hz) s = 0.05*bin_hz;
+    return s;
+}
 
 } // anon
 
@@ -296,6 +311,7 @@ static bool pick_peaks(const std::vector<float>& e, const Calib& C, const Extrac
         if(e[i] < C.thr_db) continue;
         if(!(e[i] >= e[i-1] && e[i] >= e[i+1])) continue;
         double sub = 0.0;
+        float  wbin = 0.0f;
         uint8_t fl = TP_INTERP;
         const bool saturated = sat && ((*sat)[i] || (*sat)[i-1] || (*sat)[i+1]);
         if(saturated){
@@ -310,6 +326,7 @@ static bool pick_peaks(const std::vector<float>& e, const Calib& C, const Extrac
                 num += w * (double)b; den += w;
             }
             sub = (den > 0) ? (num/den - (double)i) : 0.0;
+            wbin = (float)(r - l);
             fl = TP_SATURATED;
         } else {
             // dB 도메인 포물선. 폴드 보정(C.fold_bias)은 기본 0 — doppler_extract.cpp
@@ -320,8 +337,18 @@ static bool pick_peaks(const std::vector<float>& e, const Calib& C, const Extrac
             if(sub >  1.0) sub =  1.0;
             if(sub < -1.0) sub = -1.0;
             sub += (double)C.fold_bias;
+            // 이 피크의 -3dB 폭. **계측기 메인로브가 아니라 신호 자체의 폭**이다.
+            // 광대역 신호(실측 32.8 kHz = 130 bin)에서 중심주파수는 원리적으로 그
+            // 폭보다 정밀하게 정의되지 않으므로, 점별 불확실도를 여기서 끌어와야
+            // rms 게이트가 신호 성질에 맞게 자동으로 늘어난다.
+            const float half = e[i] - 3.0f;
+            int lw = (int)i, rw = (int)i, steps = 0;
+            while(lw > 0        && e[lw] > half && steps < 512){ lw--; steps++; }
+            steps = 0;
+            while(rw < (int)N-1 && e[rw] > half && steps < 512){ rw++; steps++; }
+            wbin = (float)(rw - lw);
         }
-        cand.push_back({ (double)i + sub, e[i], fl });
+        cand.push_back({ (double)i + sub, e[i], wbin, fl });
     }
     if(cand.empty()) return true;
 
@@ -436,12 +463,7 @@ static bool extract_range(HistReader& R, const ExtractParams& P, const Calib& C,
             tp.f_hz  = R.freq_hz_of_linear(pk.lin);
             tp.snr_db= pk.snr;
             // sigma_f ~ (mainlobe/2)*bin / sqrt(2*SNR_linear), 0.05 bin 하한.
-            {
-                const double snr_lin = std::pow(10.0, std::max(0.1f, pk.snr)/10.0);
-                double s = ((double)C.mainlobe_bins*0.5)*bin_hz / std::sqrt(2.0*snr_lin);
-                if(s < 0.05*bin_hz) s = 0.05*bin_hz;
-                tp.sigma_hz = (float)s;
-            }
+            tp.sigma_hz = (float)peak_sigma_hz(pk.snr, pk.w_bins, C.mainlobe_bins, bin_hz);
             tp.flags = pk.flags;
             T.pts.push_back(tp);
             T.last_t = t_now; T.last_f = tp.f_hz;
@@ -455,19 +477,18 @@ static bool extract_range(HistReader& R, const ExtractParams& P, const Calib& C,
         // 남은 피크 → 새 트랙 씨앗
         for(size_t pi = 0; pi < peaks.size(); pi++){
             if(used[pi]) continue;
-            if(single_track && (!live.empty() || !done.empty())) break;
+            // 단일트랙 모드는 "동시에 하나" 지 "평생 하나" 가 아니다. 살아있는 트랙이
+            // 없으면 다시 씨를 뿌려야 한다 — 안 그러면 첫 트랙이 페이드로 한 번
+            // 죽는 순간 그 뒤 구간을 통째로 못 본다 (실측: refine 이 통째로 실패했다).
+            if(single_track && !live.empty()) break;
             if((int)live.size() >= P.max_tracks) break;
             LiveTrack T;
             TrackPoint tp;
             tp.t_utc = t_now; tp.row = r0;
             tp.f_hz = R.freq_hz_of_linear(peaks[pi].lin);
             tp.snr_db = peaks[pi].snr;
-            {
-                const double snr_lin = std::pow(10.0, std::max(0.1f, peaks[pi].snr)/10.0);
-                double s = ((double)C.mainlobe_bins*0.5)*bin_hz / std::sqrt(2.0*snr_lin);
-                if(s < 0.05*bin_hz) s = 0.05*bin_hz;
-                tp.sigma_hz = (float)s;
-            }
+            tp.sigma_hz = (float)peak_sigma_hz(peaks[pi].snr, peaks[pi].w_bins,
+                                               C.mainlobe_bins, bin_hz);
             tp.flags = peaks[pi].flags;
             T.pts.push_back(tp);
             T.last_t = t_now; T.last_f = tp.f_hz; T.seen = 1; T.span = 1;
@@ -544,7 +565,12 @@ bool refine_in_box(HistReader& R, uint32_t row_lo, uint32_t row_hi,
     // 박스 안에서는 다중비교 모집단이 ~1e4 배 작아지므로 임계를 낮추고, 페이드를 더
     // 오래 견디며, 비콘만 뜨는 방사체도 살린다. 트랙은 하나만.
     ExtractParams Q = P;
-    Q.force_L      = 1;
+    // **L 은 1 로 두면 안 된다.** L 은 "프레임 안 도플러 번짐 < 0.7 bin" 의 상한이지
+    // 목표가 아니다. 1 로 강제하면 sqrt(L) 만큼의 SNR 을 그냥 버린다 — 실측에서
+    // L=1 은 프레임당 피크가 64개(상한 포화)로 터지고 트랙 occupancy 가 0.15 밑으로
+    // 떨어져 **정상 통과 신호에서 refine 이 통째로 실패했다** (DGS-2 G29, L=18 전수
+    // 스캔은 같은 신호를 mono 1.00 / rms 0.28 bin 으로 잡는데).
+    Q.force_L      = 0;                 // 전수 스캔과 같은 자동 결정
     Q.max_gap_s    = 60.0;
     Q.min_occupancy= 0.15f;
     Q.max_tracks   = 1;
@@ -554,6 +580,10 @@ bool refine_in_box(HistReader& R, uint32_t row_lo, uint32_t row_hi,
     ExtractStats st;
     if(!extract_range(R, Q, D, row_lo, row_hi, lin_lo, lin_hi, true, v, st, prog, cancel))
         return false;
+    if(getenv("BEWE_DOP_DEBUG"))
+        fprintf(stderr, "[refine] L=%u frames=%u peaks=%u seeded=%u kept=%u interf=%u\n",
+                st.L, st.frames, st.peaks, st.tracks_seeded, st.tracks_kept,
+                st.interference_frames);
     if(v.empty()) return false;
     // 가장 점이 많은 것
     size_t best = 0;
