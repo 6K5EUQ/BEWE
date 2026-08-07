@@ -75,8 +75,10 @@ std::string needed_tle_name(const HistReader& R){
     if(!R.is_open()) return "";
     const time_t t = (time_t)R.hdr().start_utc_unix;
     struct tm g{}; gmtime_r(&t, &g);
+    // Starlink 를 포함하려면 all_ 계열이 필요하다 (leo_ 는 저장 시점에 걸러져 있다).
+    const char* pre = g_mp.include_starlink ? "all" : "leo";
     char nm[32];
-    snprintf(nm, sizeof nm, "leo_%04d%02d%02d.txt", g.tm_year+1900, g.tm_mon+1, g.tm_mday);
+    snprintf(nm, sizeof nm, "%s_%04d%02d%02d.txt", pre, g.tm_year+1900, g.tm_mon+1, g.tm_mday);
     const std::string p = tle_dir() + "/archive/" + nm;
     struct stat st{};
     if(stat(p.c_str(), &st) == 0 && st.st_size > 0) return "";

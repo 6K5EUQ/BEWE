@@ -80,7 +80,11 @@ static const char* db_subdir_for(const char* fn){
     // 요구하는데, 그걸 기지마다 받으면 space-track 요청 제한(계정당)을 서로 잡아먹는다.
     // Central 이 하루 한 번 모아 두고 기존 DB_DOWNLOAD_REQ 경로로 그대로 서빙한다
     // (와이어 프로토콜 무변경).
-    if(strncmp(fn, "leo_", 4) == 0 && n > 4 && strcmp(fn + n - 4, ".txt") == 0) return "tle";
+    // 궤도원소 스냅샷 두 계열:
+    //   leo_YYYYMMDD.txt = LEO 페이로드, Starlink 제외 (도플러 매칭 기본)
+    //   all_YYYYMMDD.txt = 전 페이로드 + Starlink       (지구본, Starlink 포함 매칭)
+    if((strncmp(fn, "leo_", 4) == 0 || strncmp(fn, "all_", 4) == 0)
+       && n > 4 && strcmp(fn + n - 4, ".txt") == 0) return "tle";
     return "iq";
 }
 

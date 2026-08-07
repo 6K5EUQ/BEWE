@@ -21,6 +21,8 @@ void sat_view_draw(GlobeRenderer& globe, ImGuiIO& io, time_t now_utc);
 // 수동 TLE 갱신 (chat 명령 `/Update TLEs` 트리거용).
 // force=true 로 staleness throttle 무시 + sat list 재로드. ALL 모드면 starlink/etc 도 강제 reload.
 void sat_view_update_tle();
+// Central 에서 새 카탈로그가 도착했을 때 다시 읽는다.
+void sat_view_reload();
 
 // Returns true if a satellite marker was hit (and selection updated).
 // Caller should skip station/pick logic when true.

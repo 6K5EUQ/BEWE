@@ -41,84 +41,28 @@ double catalogue_age_days(double ref_utc){
 int catalogue_size(){ return (int)g_sats.size(); }
 const std::string& catalogue_src(){ return g_src; }
 
-// 현재 leo_tle.txt 를 **자기 에폭 날짜로** 아카이브에 스냅샷한다 (이미 있으면 그대로).
-//
-// 왜 필요한가 — 실측(2026-08-07, 양쪽 카탈로그에 다 있는 위성 8개, 38일 전파):
-//   궤도방향 오차 중앙값 570 km / TCA 오차 중앙값 75초 / 403MHz 도플러 오차 중앙값 330 Hz
-//   최악(ISS, reboost 하는 저궤도) 6172 km / 805초 / 3007 Hz
-// 측정 잔차가 15~50 Hz 인데 도플러 오차가 그 10~60배라 순위가 뒤집힌다.
-//
-// **오차는 에폭으로부터 |dt| 에만 의존하므로 방향 대칭이다** — 오늘 TLE 를 한 달 뒤로
-// 전파하는 것과 한 달 묵은 TLE 를 앞으로 전파하는 것이 같은 크기다. Celestrak GP 는
-// 현재 원소만 주므로, 과거 녹화를 제대로 보려면 그때 받아 둔 원소가 있어야 한다.
-// 이 스냅샷은 소급 적용이 안 된다 (지나간 날짜의 원소는 구할 수 없다) — 지금부터
-// 기록을 쌓기 시작하는 것뿐이다.
-static void archive_snapshot(const std::string& tle_dir){
-    const std::string live = tle_dir + "/leo_tle.txt";
-    std::vector<TleElem> v;
-    if(!tle_load(live, v) || v.empty()) return;
-    const double med = median_epoch_jd(v);
-    if(med <= 0) return;
-    const time_t t = (time_t)((med - 2440587.5)*86400.0);
-    struct tm g{}; gmtime_r(&t, &g);
-    char d[16]; snprintf(d, sizeof d, "%04d%02d%02d", g.tm_year+1900, g.tm_mon+1, g.tm_mday);
-    const std::string adir = tle_dir + "/archive";
-    ::mkdir(adir.c_str(), 0755);
-    const std::string dst = adir + "/leo_" + d + ".txt";
-    struct stat st{};
-    if(stat(dst.c_str(), &st) == 0) return;          // 이미 있음
-    // **LEO 만, Starlink 는 뺀다.** 실측(2026-08-07 카탈로그): 전체 15,812 중 Starlink 가
-    // 10,618 (67%) 이고, 남는 LEO 는 4,383 개다. 스냅샷이 하루 2.53 MB -> 0.69 MB 로 준다
-    // (1년 0.90 GB -> 0.25 GB). HIST 파일 하나가 312 MB 인 걸 생각하면 1년치가 HIST
-    // 한 개도 안 된다.
-    // 부작용: 아카이브본으로 매칭하면 Starlink 는 후보에서 빠진다. 어차피 같은 셸에
-    // 수십 개가 분 단위로 지나가 sep 를 1 근처로 만들던 것들이라 의도된 배제다.
-    FILE* out = fopen(dst.c_str(), "wb");
-    if(!out) return;
-    FILE* in = fopen(live.c_str(), "rb");
-    if(!in){ fclose(out); return; }
-    char l0[256], l1[256], l2[256];
-    int kept = 0;
-    while(fgets(l0, sizeof l0, in) && fgets(l1, sizeof l1, in) && fgets(l2, sizeof l2, in)){
-        if(l1[0] != '1' || l2[0] != '2') continue;
-        // 이름에 STARLINK 가 들어가면 제외
-        bool star = false;
-        for(char* p = l0; *p; p++){
-            if((*p=='S'||*p=='s') && strncasecmp(p, "STARLINK", 8) == 0){ star = true; break; }
-        }
-        if(star) continue;
-        // 평균운동(rev/day) -> 반장축 -> 고도. 2000 km 초과는 LEO 가 아니다.
-        const double mm = atof(l2 + 52);
-        if(!(mm > 0)) continue;
-        const double nrad = mm * 2.0*M_PI / 86400.0;
-        const double a = std::cbrt(MU_KM3_S2/(nrad*nrad));
-        if(a - A_E_KM > 2000.0) continue;
-        fputs(l0, out); fputs(l1, out); fputs(l2, out);
-        kept++;
-    }
-    fclose(in); fclose(out);
-    if(kept == 0) ::remove(dst.c_str());     // 빈 파일을 남기면 로드가 실패한다
-}
-
 bool load_catalogue(const std::string& tle_dir, double for_utc, bool want_starlink,
                     std::string& why){
     why.clear();
-    archive_snapshot(tle_dir);
+    // 로컬 스냅샷은 만들지 않는다 — 궤도원소 정본은 Central 이다 (기지마다 받으면
+    // space-track 요청 제한을 서로 잡아먹고 카탈로그가 기지별로 갈린다).
+    // 여기 archive/ 는 Central 에서 받아 온 것을 담아 두는 캐시일 뿐이다.
     // 아카이브본 중 녹화 시각에 가장 가까운 에폭을 고른다. 오늘 TLE 를 3주 뒤로
     // 역전파하는 것은 3주 된 TLE 를 순전파하는 것과 정확히 똑같이 나쁘다 —
     // Celestrak GP 는 현재 원소만 주므로 과거 파일엔 과거 원소가 필요하다.
     struct Cand { std::string path; double dist; };
     std::vector<Cand> cands;
-    const std::string live = tle_dir + "/leo_tle.txt";
-    {
-        struct stat st{};
-        if(stat(live.c_str(), &st) == 0) cands.push_back({live, 1e18});
-    }
     const std::string adir = tle_dir + "/archive";
     if(DIR* d = opendir(adir.c_str())){
         while(struct dirent* e = readdir(d)){
             const std::string n = e->d_name;
-            if(n.rfind("leo_", 0) != 0 || n.size() < 16) continue;
+            if(n.size() < 16) continue;
+            const bool is_leo = (n.rfind("leo_", 0) == 0);
+            const bool is_all = (n.rfind("all_", 0) == 0);
+            if(!is_leo && !is_all) continue;
+            // Starlink 를 원하면 all_ 만이 답이다. 아니면 둘 다 쓸 수 있지만 leo_ 가
+            // 작고 분리도가 좋으므로 같은 날짜면 아래 tie-break 이 leo_ 를 고른다.
+            if(want_starlink && !is_all) continue;
             cands.push_back({adir + "/" + n, 1e18});
         }
         closedir(d);
@@ -132,22 +76,14 @@ bool load_catalogue(const std::string& tle_dir, double for_utc, bool want_starli
         if(!tle_load(c.path, v) || v.empty()) continue;
         const double med = median_epoch_jd(v);
         const double dist = std::fabs(jd_from_unix(for_utc) - med);
-        if(dist < best){ best = dist; best_path = c.path; best_v = std::move(v); }
+        const bool prefer = (dist < best - 1e-9) ||
+            (std::fabs(dist - best) < 1e-9 &&
+             c.path.find("/leo_") != std::string::npos &&
+             best_path.find("/all_") != std::string::npos);
+        if(prefer){ best = dist; best_path = c.path; best_v = std::move(v); }
     }
     if(best_v.empty()){ why = "TLE load failed"; return false; }
     g_sats = std::move(best_v);
-    // Starlink 는 **별도 파일**에 있다 (/Update TLEs 가 GROUP=starlink 로 받아 둔 것).
-    // 자동 아카이브는 용량 정책상 Starlink 를 안 담으므로, 포함하려면 여기서 덧붙인다.
-    // Starlink 다운링크는 Ku 밴드(10.7~12.7 GHz)라 이 플랫폼 대역에선 사실상 안 나오고,
-    // 카탈로그의 3분의 2를 차지하며 같은 셸 수십 개가 분 단위로 지나가 분리도를 깎는다
-    // (실측: 제외 시 sep 15.24 -> 57.17). 그래서 기본 제외이고 켤 때만 읽는다.
-    if(want_starlink){
-        std::vector<TleElem> sl;
-        if(tle_load(tle_dir + "/starlink_tle.txt", sl) && !sl.empty())
-            g_sats.insert(g_sats.end(),
-                          std::make_move_iterator(sl.begin()),
-                          std::make_move_iterator(sl.end()));
-    }
     // tle_load 는 분류를 하지 않는다 (sat_view.cpp:299,340 처럼 부르는 쪽이 채운다).
     // 아카이브본은 이미 걸러져 있지만 leo_tle.txt 를 고른 경우엔 Starlink 가 섞여 있다.
     for(TleElem& e : g_sats){

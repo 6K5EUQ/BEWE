@@ -154,3 +154,64 @@ void tle_propagate(const TleElem& e, time_t now_utc,
     lat_deg    = lat * 180.0 / M_PI;
     lon_deg    = atan2(ye, xe) * 180.0 / M_PI;
 }
+
+// ── TleCache: Central 이 정본, 로컬은 캐시 ─────────────────────────────────
+#include "bewe_paths.hpp"
+#include <dirent.h>
+#include <sys/stat.h>
+#include <algorithm>
+
+namespace TleCache {
+
+static std::function<bool(const std::string&)> g_req;
+
+void set_requester(std::function<bool(const std::string&)> fn){ g_req = std::move(fn); }
+
+bool request(const std::string& filename){
+    if(!g_req) return false;
+    return g_req(filename);
+}
+
+std::string dir(){ return BEWEPaths::assets_dir() + "/tle/archive"; }
+
+std::string newest(const char* prefix){
+    const std::string d = dir();
+    DIR* dp = opendir(d.c_str());
+    if(!dp) return "";
+    const size_t plen = strlen(prefix);
+    std::string best;
+    while(struct dirent* e = readdir(dp)){
+        const std::string n = e->d_name;
+        if(n.size() < plen + 13) continue;                    // pre_YYYYMMDD.txt
+        if(n.compare(0, plen, prefix) != 0 || n[plen] != '_') continue;
+        if(n.compare(n.size()-4, 4, ".txt") != 0) continue;
+        struct stat st{};
+        if(stat((d + "/" + n).c_str(), &st) != 0 || st.st_size == 0) continue;
+        if(n > best) best = n;                                 // 이름이 곧 날짜순
+    }
+    closedir(dp);
+    return best.empty() ? "" : (d + "/" + best);
+}
+
+int request_recent(const char* prefix, int back_days){
+    // JOIN 은 Central 에 무엇이 있는지 모른다. 목록 조회 프로토콜을 새로 만드는 대신
+    // 최근 며칠을 이름으로 찍어 본다 — 없는 날은 Central 이 조용히 무응답이라 무해하다.
+    if(!g_req) return 0;
+    ::mkdir((BEWEPaths::assets_dir() + "/tle").c_str(), 0755);
+    ::mkdir(dir().c_str(), 0755);
+    const time_t now = time(nullptr);
+    int asked = 0;
+    for(int b = 0; b <= back_days; b++){
+        const time_t t = now - (time_t)b*86400;
+        struct tm g{}; gmtime_r(&t, &g);
+        char nm[32];
+        snprintf(nm, sizeof nm, "%s_%04d%02d%02d.txt", prefix,
+                 g.tm_year+1900, g.tm_mon+1, g.tm_mday);
+        struct stat st{};
+        if(stat((dir() + "/" + nm).c_str(), &st) == 0 && st.st_size > 0) continue;
+        if(g_req(nm)) asked++;
+    }
+    return asked;
+}
+
+} // namespace TleCache

@@ -1,5 +1,6 @@
 #include "sat_view.hpp"
 #include "sat_tle.hpp"
+#include <cctype>
 #include "globe.hpp"
 #include "bewe_paths.hpp"
 #include "imgui.h"
@@ -291,12 +292,25 @@ namespace {
     void ensure_all_loaded() {
         if (g_all_loaded) return;
         g_all_loaded = true;
-        // No auto-fetch — load whatever starlink+etc files already exist.
-        std::string dir = BEWEPaths::assets_dir() + "/tle";
+        // 궤도원소 정본은 Central 이다 (sat_tle.hpp TleCache 주석 참조).
+        // all_YYYYMMDD.txt 한 파일에 Starlink 포함 전 페이로드가 들어 있으므로
+        // 예전처럼 starlink/etc 를 따로 읽지 않는다. **가장 최근 받아 온 것**을 쓴다.
         std::vector<TleElem> starlink, etc;
-        tle_load(dir + "/starlink_tle.txt", starlink);
-        tle_load(dir + "/etc_tle.txt",      etc);
-        for (auto& e : starlink) e.is_starlink = true;
+        {
+            const std::string p = TleCache::newest("all");
+            if(!p.empty()){
+                tle_load(p, starlink);
+                for (auto& e : starlink){
+                    std::string up = e.name;
+                    for(char& c : up) c = (char)toupper((unsigned char)c);
+                    e.is_starlink = (up.find("STARLINK") != std::string::npos);
+                }
+                fprintf(stderr, "[sat_view] catalogue from %s (%zu)\n",
+                        p.c_str(), starlink.size());
+            } else {
+                fprintf(stderr, "[sat_view] no catalogue yet - use /Update TLEs\n");
+            }
+        }
 
         g_sats.reserve(g_sats.size() + starlink.size() + etc.size());
         int sl_kept = 0, etc_kept = 0;
@@ -319,23 +333,19 @@ namespace {
     void ensure_leo_loaded() {
         if (g_leo_loaded) return;
         g_leo_loaded = true;
-        std::string dir = BEWEPaths::assets_dir() + "/tle";
-
-        // leo_tle.txt (GROUP=active) contains Starlink too. Skip those —
-        // they're either loaded separately by ensure_all_loaded() or hidden.
-        std::set<int> starlink_ids;
-        {
-            std::vector<TleElem> sl;
-            tle_load(dir + "/starlink_tle.txt", sl);
-            for (auto& s : sl) starlink_ids.insert(s.catalog_num);
-        }
-
+        // 같은 all_ 파일에서 LEO 만 추린다 (예전 leo_tle.txt 는 더 이상 없다).
         std::vector<TleElem> leo;
-        tle_load(dir + "/leo_tle.txt", leo);
+        {
+            const std::string p = TleCache::newest("all");
+            if(!p.empty()) tle_load(p, leo);
+        }
         int kept = 0, skipped_sl = 0;
         g_sats.reserve(g_sats.size() + leo.size());
         for (auto& e : leo) {
-            if (starlink_ids.count(e.catalog_num)) { skipped_sl++; continue; }
+            if (e.semi_major_km - 6378.137 > 2000.0) { skipped_sl++; continue; }
+            {   std::string up = e.name;
+                for(char& c : up) c = (char)toupper((unsigned char)c);
+                if(up.find("STARLINK") != std::string::npos){ skipped_sl++; continue; } }
             if (g_seen_ids.insert(e.catalog_num).second) {
                 e.is_leo = true;
                 g_sats.push_back(std::move(e)); kept++;
@@ -349,12 +359,22 @@ namespace {
 }
 
 void sat_view_update_tle() {
-    sat_tle_fetch(true);
+    // Celestrak 을 직접 때리지 않는다 — 궤도원소 정본은 Central 이다. 여기서는
+    // Central 에 최근 며칠치 all_ 스냅샷을 요청하고, 도착한 것 중 가장 최근을 읽는다.
+    // (SOI 는 운용자 정의 목록이라 종전대로 로컬에서 갱신한다.)
+    const int asked = TleCache::request_recent("all", 7);
     sat_tle_refresh_soi(true);
+    sat_view_reload();
+    fprintf(stderr, "[sat_view] requested %d catalogue file(s) from Central\n", asked);
+}
+
+// 캐시가 바뀐 뒤 다시 읽는다 (Central 수신 완료 시 ui.cpp 가 부른다).
+void sat_view_reload() {
+    g_all_loaded = false;
+    g_leo_loaded = false;
     sat_view_init();
     if (g_mode == SAT_ALL) { ensure_all_loaded(); ensure_leo_loaded(); }
     if (g_mode == SAT_LEO) ensure_leo_loaded();
-    fprintf(stderr, "[sat_view] TLE manually updated\n");
 }
 
 void sat_view_draw(GlobeRenderer& globe, ImGuiIO& io, time_t now_utc) {

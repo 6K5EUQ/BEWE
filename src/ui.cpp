@@ -15,6 +15,7 @@
 #include "host_band_categories.hpp"
 #include "long_waterfall.hpp"
 #include "doppler/doppler_view.hpp"
+#include "sat_tle.hpp"
 #include "hist_check.hpp"
 #include "sig_lib_view.hpp"
 #include "session_args.hpp"
@@ -3668,7 +3669,8 @@ void run_streaming_viewer(){
             if(n >= 9 && strcmp(fn + n - 9, ".bewehist") == 0) return "hist";
             if(strstr(fn, "_DE_")) return "audio";
             // 궤도원소 스냅샷 — Central 의 db_subdir_for() 와 같은 규약.
-            if(strncmp(fn, "leo_", 4) == 0 && n > 4 && strcmp(fn + n - 4, ".txt") == 0) return "tle";
+            if((strncmp(fn, "leo_", 4) == 0 || strncmp(fn, "all_", 4) == 0)
+               && n > 4 && strcmp(fn + n - 4, ".txt") == 0) return "tle";
             return "iq";
         };
         // leo_*.txt 는 downloads/db 가 아니라 도플러 매칭이 읽는 자리로 바로 내린다.
@@ -3705,10 +3707,14 @@ void run_streaming_viewer(){
         static std::map<std::string, ActiveDl> db_dl_active;
         // 도플러 패널이 Central 에 원소를 요청할 수 있게 배선. doppler 모듈은 net 을
         // 모르므로 여기서 클로저로 물려 준다.
-        DopplerView::set_tle_requester([cli,&v](const std::string& fn)->bool{
+        // 궤도원소 요청 배선 — 도플러와 지구본이 같은 통로를 쓴다.
+        TleCache::set_requester([cli](const std::string& fn)->bool{
             if(!cli) return false;
             bewe_log_push(2,"[TLE] request %s from Central\n", fn.c_str());
             return cli->cmd_db_download(fn.c_str(), cli->my_name);
+        });
+        DopplerView::set_tle_requester([](const std::string& fn)->bool{
+            return TleCache::request(fn);
         });
         cli->on_db_download_data = [&,db_classify,db_dest_dir](const PktDbDownloadData* d, const uint8_t* data, uint32_t data_len){
             std::string key(d->filename);
@@ -3751,6 +3757,7 @@ void run_streaming_viewer(){
                 db_dl_active.erase(it);
                 bewe_log_push(2,"[DB] Download done: %s\n", done_path.c_str());
                 DopplerView::note_tle_arrived(std::string(d->filename));
+                if(strncmp(d->filename, "all_", 4) == 0) sat_view_reload();
                 // 완료 표시
                 {
                     std::lock_guard<std::mutex> lk(v.file_xfer_mtx);
