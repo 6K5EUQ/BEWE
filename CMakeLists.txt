@@ -190,6 +190,7 @@ else()
         src/central_client.cpp
         src/host_band_categories.cpp
         src/long_waterfall.cpp
+        src/hist_reader.cpp
         src/long_waterfall_view.cpp
         src/sig_lib_view.cpp
         src/mission_view.cpp

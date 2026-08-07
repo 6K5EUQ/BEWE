@@ -182,6 +182,11 @@ inline std::string fmt_lat_lon(float lat, float lon){
     return b;
 }
 
+// FileHeader.station_lon 은 위 관례대로 **서경 양수** 다 (128.5553E 가 -128.5553 으로
+// 저장됨). 궤도/기하 계산은 동경 양수를 요구하므로 반드시 이걸로 한 번만 뒤집는다.
+// df_view.cpp:167-170 처럼 fabs() 로 방어하지 말 것 — 북동반구에서만 우연히 맞는다.
+inline double hist_lon_east(float station_lon){ return -(double)station_lon; }
+
 // ── Mission-code filename helpers (host + JOIN 공용) ──────────────────────
 // 양식: <station>_<MissCode><DD>_<Mon><DD>.<YYYY>_<F.F>MHz_<HHMM>-LIVE.bewehist
 // 종료 시 -LIVE → -<HHMM> 로 rename (KST 기준).
