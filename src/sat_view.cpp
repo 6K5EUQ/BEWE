@@ -358,14 +358,28 @@ namespace {
     }
 }
 
-void sat_view_update_tle() {
+std::string sat_view_update_tle_status() {
     // Celestrak 을 직접 때리지 않는다 — 궤도원소 정본은 Central 이다. 여기서는
     // Central 에 최근 며칠치 all_ 스냅샷을 요청하고, 도착한 것 중 가장 최근을 읽는다.
     // (SOI 는 운용자 정의 목록이라 종전대로 로컬에서 갱신한다.)
+    sat_tle_refresh_soi(true);          // SOI 는 운용자 목록 — 종전대로 로컬 갱신
+    if(!TleCache::wired())
+        return "Not connected to Central - cannot get satellite data.";
     const int asked = TleCache::request_recent("all", 7);
-    sat_tle_refresh_soi(true);
     sat_view_reload();
-    fprintf(stderr, "[sat_view] requested %d catalogue file(s) from Central\n", asked);
+    const std::string have = TleCache::newest("all");
+    if(asked > 0){
+        char b[160];
+        snprintf(b, sizeof b, "Asked Central for satellite data (%d day%s). It will appear shortly.",
+                 asked, asked==1?"":"s");
+        return b;
+    }
+    if(!have.empty()) return "Satellite data already up to date.";
+    return "Central has no satellite data yet.";
+}
+
+void sat_view_update_tle() {
+    (void)sat_view_update_tle_status();
 }
 
 // 캐시가 바뀐 뒤 다시 읽는다 (Central 수신 완료 시 ui.cpp 가 부른다).

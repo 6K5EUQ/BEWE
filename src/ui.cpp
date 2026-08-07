@@ -2254,9 +2254,7 @@ void run_streaming_viewer(){
                 if(s == "/shutdown"){
                     early_do_shutdown = true;
                 } else if(s == "/Update TLEs" || s == "/update_tle" || s == "/UpdateTLEs"){
-                    push("System", "TLE update started ...", false);
-                    sat_view_update_tle();
-                    push("System", "TLE update done.", false);
+                    push("System", sat_view_update_tle_status().c_str(), false);
                 } else if(s == "/chassis 1 reset" || s == "/chassis 2 reset"){
                     push("System", "Not available here.", true);
                 } else {
@@ -7180,8 +7178,7 @@ void run_streaming_viewer(){
                     if(chat_str == "/Update TLEs" || chat_str == "/update_tle"
                        || chat_str == "/UpdateTLEs"){
                         push_local("System", "TLE update started ...", false);
-                        sat_view_update_tle();
-                        push_local("System", "TLE update done.", false);
+                        push_local("System", sat_view_update_tle_status().c_str(), false);
                     } else if(chat_str == "/shutdown"){
                         // 프로그램 완전 종료
                         glfwSetWindowShouldClose(win, GLFW_TRUE);

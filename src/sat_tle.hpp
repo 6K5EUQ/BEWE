@@ -26,6 +26,7 @@ namespace TleCache {
 // ui.cpp 가 NetClient 를 물려 준다 — 하위 모듈은 net 계층을 모른다.
 void set_requester(std::function<bool(const std::string&)> fn);
 bool request(const std::string& filename);      // Central 에 요청 (false=배선 없음)
+bool wired();                                   // Central 연결 배선이 되어 있나
 std::string dir();                              // assets/tle/archive
 // 가장 최근 <prefix>_*.txt 경로. 없으면 빈 문자열.
 std::string newest(const char* prefix);

@@ -167,6 +167,8 @@ static std::function<bool(const std::string&)> g_req;
 
 void set_requester(std::function<bool(const std::string&)> fn){ g_req = std::move(fn); }
 
+bool wired(){ return (bool)g_req; }
+
 bool request(const std::string& filename){
     if(!g_req) return false;
     return g_req(filename);

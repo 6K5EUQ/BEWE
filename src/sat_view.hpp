@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 #include <ctime>
 
 class GlobeRenderer;
@@ -20,6 +21,8 @@ void sat_view_draw(GlobeRenderer& globe, ImGuiIO& io, time_t now_utc);
 
 // 수동 TLE 갱신 (chat 명령 `/Update TLEs` 트리거용).
 // force=true 로 staleness throttle 무시 + sat list 재로드. ALL 모드면 starlink/etc 도 강제 reload.
+// 반환: 사람이 읽을 결과 문구 (성공/실패 이유). 채팅에 그대로 띄운다.
+std::string sat_view_update_tle_status();
 void sat_view_update_tle();
 // Central 에서 새 카탈로그가 도착했을 때 다시 읽는다.
 void sat_view_reload();
