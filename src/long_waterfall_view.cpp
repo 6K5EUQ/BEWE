@@ -180,6 +180,9 @@ bool open_file(const std::string& path){
     // v13.3.2 — 종료된 v4 파일은 여기서 전체를 풀어 둔다 (열 때 한 번 비용을 치르고
     // 이후 팬/줌을 매끄럽게). LIVE 는 계속 자라므로 제외 — 종전 블록캐시로 동작.
     if(!g_reader.is_live()) g_reader.preload_full(FULL_DECOMP_MAX_BYTES);
+    // 다른 녹화를 열었으면 앞 파일의 위성 트랙을 버린다 (같은 파일이면 유지 —
+    // 껐다 다시 봐도 스캔이 남아 있어야 한다).
+    DopplerView::note_file_changed(g_reader);
     return true;
 }
 
@@ -579,8 +582,10 @@ void draw_modal(FFTViewer& v, NetClient* cli){
         ImGui::Text("Stop  : %s", fmt_local_time(stop_utc, off_h).c_str());
         ImGui::Text("Color : %.1f / %.1f dB",
             g_file_db_min, g_file_db_max);
-        {   // 도플러 토글 — 정보줄 우측 정렬. Meas 영역이 있으면 REFINE 도 같이.
-            const float bw = ImGui::CalcTextSize("DOPPLER").x
+        {   // 위성 스캔 토글 — 정보줄 우측 정렬. Meas 영역이 있으면 REFINE 도 같이.
+            // 폭은 가장 긴 라벨("ORBIT DATA..." = 원소 수신 대기) 기준 — 짧은 걸로
+            // 잡으면 스캔이 시작될 때 버튼이 늘어나며 우측으로 삐져나간다.
+            const float bw = ImGui::CalcTextSize("ORBIT DATA...").x
                            + ImGui::GetStyle().FramePadding.x*2;
             float rx = view_w - bw - 22.0f;
             if(g_meas.active){
@@ -983,7 +988,7 @@ void draw_modal(FFTViewer& v, NetClient* cli){
 
 void close_modal(){
     DopplerScan::shutdown();     // 스캔 중이면 취소 + join (워커가 리더를 물고 있다)
-    DopplerView::on_close();
+    DopplerView::on_viewer_closed();
     close_open();
     if(g_tex){ glDeleteTextures(1, &g_tex); g_tex = 0; }
 }

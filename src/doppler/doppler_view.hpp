@@ -27,7 +27,13 @@ void  draw_overlay(ImDrawList* dl, const HistReader& R,
                    const std::function<float(double)>& row_to_px,
                    const std::function<float(double)>& lin_to_py);
 
+// 패널만 접는다 (결과 유지 — 같은 녹화를 다시 열면 스캔을 또 돌리지 않는다).
 void  on_close();
+// 뷰어 모달 종료. 결과까지 버린다 (리더가 사라진다).
+void  on_viewer_closed();
+// 뷰어가 다른 파일을 열었을 때 호출. 경로나 행수가 달라졌으면 결과를 버린다 —
+// 같은 파일이면 그대로 두어 재진입 시 유지된다.
+void  note_file_changed(const HistReader& R);
 
 // ── Central 에서 궤도원소 받아오기 ───────────────────────────────────────
 // 필요한 날짜의 원소가 로컬에 없으면 Central 에 요청한다. 기지마다 space-track

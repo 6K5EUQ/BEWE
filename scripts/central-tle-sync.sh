@@ -127,6 +127,19 @@ install_out(){  # $1=filtered $2=YYYYMMDD $3=prefix(leo|all)
   local pre="${3:-leo}"
   local n; n=$(( $(wc -l < "$1") / 3 ))
   [ "$n" -gt 0 ] || { log "$2: 0 records after filter, skipping"; return 1; }
+  # **오늘 날짜를 소급 요청하면 반쪽짜리가 나온다** — gp_history 는 그 날 올라온
+  # 만큼만 주므로 하루가 끝나기 전엔 수십 건뿐이다 (실측 2026-08-07: LEO 76건 vs
+  # 전날 4530건). 그런 파일이 들어오면 매칭 쪽 "녹화일에 가장 가까운 날짜" 규칙이
+  # 완전한 전날 것 대신 이걸 골라 정답 위성이 아예 목록에 없게 된다.
+  # 같은 계열의 최근 완전본에 한참 못 미치면 버린다.
+  local prev; prev=$(ls -1 "$OUT/${pre}_"*.txt 2>/dev/null | sort | tail -1)
+  if [ -n "$prev" ] && [ "$prev" != "$OUT/${pre}_$2.txt" ]; then
+    local pn; pn=$(( $(wc -l < "$prev") / 3 ))
+    if [ "$pn" -gt 100 ] && [ "$n" -lt $(( pn / 2 )) ]; then
+      log "${pre}_$2: only $n sats vs $pn in $(basename "$prev") - partial day, skipping"
+      return 1
+    fi
+  fi
   mv -f "$1" "$OUT/${pre}_$2.txt"
   log "${pre}_$2: $n sats, $(du -h "$OUT/${pre}_$2.txt" | cut -f1)"
 }

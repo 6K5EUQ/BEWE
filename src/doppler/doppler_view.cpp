@@ -29,13 +29,19 @@ namespace {
 
 bool  g_open = false;
 bool  g_show_rejected = false;   // 위성이 아니라고 판정된 트랙까지 표에 낼까
-char  g_filter[64] = {0};
 int   g_sel_track = -1;
 int   g_sort_col  = -1;
 bool  g_sort_asc  = true;
 modview::Selection g_sel;
 DopplerMatch::Params g_mp;      // 검색 옵션 (Starlink 포함 여부 등)
 std::string g_want_tle;         // Central 에 요청해 놓은 파일명 (비면 없음)
+double g_want_since = 0.0;      // 그 요청을 건 시각 (타임아웃 판정용)
+
+// 분석 결과는 파일에 딸린 것이다. 다른 녹화를 열면 남의 트랙을 그리게 되므로 버리고,
+// 같은 녹화로 돌아오면 다시 스캔하지 않는다 (전 파일 스캔은 실측 최대 3.8초).
+// 행수까지 보는 이유: LIVE 가 자랐으면 뒤쪽이 미분석이라 결과가 반쪽이다.
+std::string g_owner_path;
+uint64_t    g_owner_rows = 0;
 
 std::vector<Doppler::Candidate> g_tracks;
 DopplerMatch::Result            g_match;
@@ -113,9 +119,18 @@ std::string needed_tle_name(const HistReader& R){
     if(stat(p.c_str(), &st) == 0 && st.st_size > 0) return "";
     return nm;
 }
+
+// Central 이 그 날짜를 안 가진 경우 **아무 응답도 오지 않는다** (central_server.cpp 는
+// file not found 를 자기 로그에만 찍는다). 그래서 도착 통보만 기다리면 영원히 멈춘다.
+// 시간이 지나면 포기하고 로컬에 있는 가장 가까운 날짜로 돌린다 — 나이는 바에 뜬다.
+static constexpr double kTleWaitSec = 20.0;
+static bool tle_wait_expired(){
+    return !g_want_tle.empty() && g_want_since > 0.0
+        && (ImGui::GetTime() - g_want_since) > kTleWaitSec;
+}
 bool tle_pending(){ return !g_want_tle.empty(); }
 void note_tle_arrived(const std::string& filename){
-    if(!g_want_tle.empty() && filename == g_want_tle) g_want_tle.clear();
+    if(!g_want_tle.empty() && filename == g_want_tle){ g_want_tle.clear(); g_want_since = 0.0; }
 }
 
 bool panel_open(){ return g_open; }
@@ -126,11 +141,13 @@ bool toolbar_button(const HistReader& R){
     const DopplerScan::Status st = DopplerScan::status();
 
     char label[32];
-    if(st.st == DopplerScan::State::Running){
+    if(!g_want_tle.empty()){
+        snprintf(label, sizeof label, "ORBIT DATA...");
+    } else if(st.st == DopplerScan::State::Running){
         if(st.stage[0]) snprintf(label, sizeof label, "%s %d%%", st.stage, (int)(st.progress*100));
         else            snprintf(label, sizeof label, "SCAN %d%%", (int)(st.progress*100));
     } else {
-        snprintf(label, sizeof label, "DOPPLER");
+        snprintf(label, sizeof label, "SAT SCAN");
     }
 
     if(!ok) ImGui::BeginDisabled();
@@ -148,23 +165,57 @@ void set_tle_requester(std::function<bool(const std::string&)> fn){ g_req_tle = 
 // 필요한 원소가 로컬에 없으면 Central 에 한 번 요청한다. true = 요청함(대기).
 static bool ensure_tle(const HistReader& R){
     const std::string nm = needed_tle_name(R);
-    if(nm.empty()){ g_want_tle.clear(); return false; }
+    if(nm.empty()){ g_want_tle.clear(); g_want_since = 0.0; return false; }
     if(g_want_tle == nm) return true;              // 이미 대기 중
-    if(g_req_tle && g_req_tle(nm)){ g_want_tle = nm; return true; }
+    if(g_req_tle && g_req_tle(nm)){
+        g_want_tle = nm; g_want_since = ImGui::GetTime();
+        return true;
+    }
     return false;
+}
+
+// 지금 열린 녹화가 결과의 주인인가. 아니면 남의 트랙을 그리게 된다.
+static bool owns(const HistReader& R){
+    if(!R.is_open() || g_owner_path != R.path()) return false;
+    // LIVE 는 매 프레임 자란다 — 행수를 그대로 견주면 언제나 "다른 파일"이 된다.
+    // 어차피 LIVE 는 자동 스캔 대상이 아니고(REFINE 으로만 본다) 결과는 사용자가
+    // 박스 친 구간의 것이므로, 자란 것을 갈아탄 것으로 치지 않는다.
+    if(R.is_live()) return true;
+    return g_owner_rows == R.num_rows();
+}
+static void claim(const HistReader& R){
+    g_owner_path = R.is_open() ? R.path() : std::string();
+    g_owner_rows = R.is_open() ? R.num_rows() : 0;
+}
+static void wipe(){
+    g_sel_track = -1; g_sel.clear();
+    g_have_match = false; g_match_of = 0xFFFFFFFFu;
+    g_tracks.clear(); g_top_name.clear();
+    g_want_tle.clear(); g_want_since = 0.0;
+}
+
+// 다른 녹화가 열렸으면 이전 결과를 버린다. 같은 녹화면 그대로 둔다 — 껐다 다시 켜도
+// 스캔이 남아 있어야 한다 (전 파일 스캔은 실측 최대 3.8초).
+void note_file_changed(const HistReader& R){
+    if(g_owner_path.empty()) return;
+    if(owns(R)) return;
+    DopplerScan::shutdown();     // 옛 리더를 문 워커부터 세운다
+    wipe();
+    g_owner_path.clear(); g_owner_rows = 0;
 }
 
 void toggle(const HistReader& R, const Doppler::ExtractParams& P){
     if(g_open){ g_open = false; return; }
     g_open = true;
-    g_sel_track = -1; g_sel.clear(); g_have_match = false; g_match_of = 0xFFFFFFFFu;
-    g_tracks.clear();
     if(!R.is_open() || !R.has_station_pos()) return;
+    // 같은 녹화로 돌아온 것이면 이미 있는 결과를 그대로 보여 준다.
+    if(owns(R) && !g_tracks.empty()) return;
+    wipe();
+    claim(R);
     // LIVE 는 계속 자라서 선해제도 안 되고 행수가 스캔 중에 바뀐다 — 자동 스캔 대상 아님.
     if(R.is_live()) return;
-    // 원소가 없으면 먼저 받아 온다. 도착하면 draw_panel 이 자동으로 스캔을 건다 —
-    // 낡은 원소로 돌려 봐야 순위가 틀리므로(실측: 38일 낡으면 6건 중 5건 오답 1위)
-    // 기다리는 편이 낫다.
+    // 원소부터 확보하고 스캔한다. 도착하면 draw_panel 이 이어서 건다 — 낡은 원소로
+    // 돌려 봐야 순위가 틀린다 (실측: 38일 낡으면 6건 중 5건 오답 1위).
     if(ensure_tle(R)) return;
     DopplerScan::start_full(R, P, g_mp, tle_dir());
 }
@@ -173,8 +224,8 @@ void start_refine(const HistReader& R, uint32_t row_lo, uint32_t row_hi,
                   uint32_t lin_lo, uint32_t lin_hi, const Doppler::ExtractParams& P){
     if(!R.is_open() || !R.has_station_pos()) return;
     g_open = true;
-    g_sel_track = -1; g_sel.clear(); g_have_match = false; g_match_of = 0xFFFFFFFFu;
-    g_tracks.clear();
+    wipe();
+    claim(R);
     DopplerScan::start_refine(R, row_lo, row_hi, lin_lo, lin_hi, P, g_mp, tle_dir());
 }
 
@@ -190,9 +241,11 @@ float draw_panel(const HistReader& R, float h){
 
     const DopplerScan::Status st = DopplerScan::status();
 
-    // 원소가 도착했으면(파일이 생겼으면) 그때 스캔을 건다.
-    if(!g_want_tle.empty() && needed_tle_name(R).empty()){
-        g_want_tle.clear();
+    // 원소가 도착했으면(파일이 생겼으면) 그때 스캔을 건다. Central 이 그 날짜를
+    // 안 가진 경우엔 응답이 아예 없으므로, 기다리다 지치면 로컬 최근사로 돌린다 —
+    // 나이는 아래 바에 뜬다.
+    if(!g_want_tle.empty() && (needed_tle_name(R).empty() || tle_wait_expired())){
+        g_want_tle.clear(); g_want_since = 0.0;
         if(!DopplerScan::busy() && !R.is_live()){
             Doppler::ExtractParams EP;
             DopplerScan::start_full(R, EP, g_mp, tle_dir());
@@ -205,33 +258,32 @@ float draw_panel(const HistReader& R, float h){
     {
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f,0.12f,0.16f,1.0f));
         ImGui::BeginChild("##dop_hdr", ImVec2(0, 30), false);
-        ImGui::SetCursorPos(ImVec2(12, 4));
-        ImGui::SetNextItemWidth(200);
-        ImGui::InputText("##dopfilter", g_filter, sizeof g_filter);
-        ImGui::SameLine(0, 8);
+        ImGui::SetCursorPos(ImVec2(12, 6));
         // 세는 대상은 위성이다. 잡힌 트랙 수를 내면 지상 신호까지 성과처럼 보인다.
         { int n_sat = 0;
           for(const auto& t : g_tracks) if(t.score > 0.0f) n_sat++;
           ImGui::Text(n_sat==1 ? "%d satellite" : "%d satellites", n_sat); }
-        if(st.st == DopplerScan::State::Running){
-            ImGui::SameLine(0, 8);
-            ImGui::TextDisabled("%s", st.stage[0] ? st.stage : "scanning");
-        }
+
         const bool running = (st.st == DopplerScan::State::Running);
         const char* rl = running ? "CANCEL" : "RESCAN";
         const float pad = ImGui::GetStyle().FramePadding.x*2;
         const float bw  = ImGui::CalcTextSize(rl).x + pad;
+        // 우측 정렬 기준은 **자식 창의 실제 폭**이다. 바깥 W(460) 로 잡으면 자식의
+        // 좌우 패딩(WindowPadding*2)만큼 넘쳐 마지막 버튼이 잘린다 — 실제로 RESCAN
+        // 오른쪽이 잘려 있었다.
+        const float availW = ImGui::GetWindowWidth();
+        const float rmargin = 8.0f;
         if(running){
-            ImGui::SameLine(W - bw - 12);
+            ImGui::SameLine(availW - bw - rmargin);
             if(ImGui::Button(rl)) DopplerScan::cancel();
         } else {
             // 버스트(간헐 송신) 2차 패스는 명시 실행이다. 자동으로 돌리면 스캔이 두 배
             // 걸리는데, 대부분의 녹화에는 버스트 위성이 없다.
             const float bb = ImGui::CalcTextSize("BURST").x + pad;
-            ImGui::SameLine(W - bw - bb - 20);
+            ImGui::SameLine(availW - bw - bb - rmargin - 8.0f);
             if(ImGui::Button("BURST"))
                 DopplerScan::start_burst(R, g_mp, tle_dir());
-            ImGui::SameLine(W - bw - 12);
+            ImGui::SameLine(availW - bw - rmargin);
             if(ImGui::Button(rl)){
                 Doppler::ExtractParams P;
                 DopplerScan::start_full(R, P, g_mp, tle_dir());
@@ -241,45 +293,54 @@ float draw_panel(const HistReader& R, float h){
         ImGui::PopStyleColor();      // BeginChild 가 ChildBg 를 소비하므로 여기서 해제
     }
 
-    // ── TLE 나이 (데이터지 설명문이 아니다) ─────────────────────────────
-    if(g_have_match){
-        const double age = g_match.tle_age_days;
-        ImVec4 col = (age > 10.0) ? ImVec4(0.95f,0.35f,0.30f,1)
-                   : (age > 3.0)  ? ImVec4(0.95f,0.72f,0.25f,1)
-                                  : ImVec4(0.65f,0.70f,0.78f,1);
-        ImGui::Text("Orbit data :");
-        ImGui::SameLine();
-        if(age < 1.5)      ImGui::TextColored(col, "same day as recording");
-        else               ImGui::TextColored(col, "%.0f days off from recording", age);
-        ImGui::SameLine();
-        ImGui::TextDisabled("(%d satellites)", g_match.n_loaded);
-    }
-    // 신뢰도 판정 — 표보다 위에 둔다. 낡은 카탈로그는 순위표를 그럴듯하게 채우면서
-    // 조용히 틀리므로(실측: 38일 낡음에서 6건 중 5건이 오답 1위), 표만 보면 속는다.
-    if(g_have_match && g_match.verdict != DopplerMatch::Verdict::Reliable){
-        const bool bad = (g_match.verdict == DopplerMatch::Verdict::Unreliable);
-        ImGui::PushTextWrapPos(0.0f);
-        if(bad){
-            ImGui::TextColored(ImVec4(0.95f,0.35f,0.30f,1), "No good match");
-            ImGui::TextColored(ImVec4(0.78f,0.72f,0.62f,1),
-                g_match.tle_age_days > 3.0
-                  ? "None of these orbits fit the signal. The orbit data is too old for this recording."
-                  : "None of these orbits fit the signal. The satellite may not be in the list.");
-        } else {
-            ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1), "Several equally likely");
-            ImGui::TextColored(ImVec4(0.78f,0.72f,0.62f,1),
-                "These satellites fit about as well as each other.");
+    // ── 진행 바 ─────────────────────────────────────────────────────────
+    // 원소 수신과 스캔을 한 줄로 잇는다. 사용자에게는 "위성 찾는 중" 하나의 일이라
+    // 단계가 바뀌었다고 바가 사라졌다 다시 나타나면 안 된다.
+    // 다 끝난 뒤에는 원소 나이를 같은 자리에 남긴다 — 순위가 얼마나 믿을 만한지는
+    // 그 값 하나로 갈린다 (실측: 38일 낡음에서 6건 중 5건이 오답 1위).
+    {
+        const bool fetching = !g_want_tle.empty();
+        const bool running  = (st.st == DopplerScan::State::Running);
+        if(fetching || running){
+            char ov[64];
+            float frac;
+            if(fetching){
+                // 수신은 진행률을 모른다 (Central 이 청크만 흘린다). 앞 1/3 을
+                // 불확정 구간으로 쓰되 시간에 따라 차오르게 해 멈춘 것처럼 안 보이게.
+                const double el = (g_want_since > 0) ? (ImGui::GetTime() - g_want_since) : 0.0;
+                frac = (float)std::min(0.30, el / kTleWaitSec * 0.30);
+                snprintf(ov, sizeof ov, "Getting orbit data %d%%", (int)(frac*100));
+            } else {
+                frac = 0.30f + st.progress*0.70f;
+                snprintf(ov, sizeof ov, "%s %d%%",
+                         st.stage[0] ? st.stage : "Scanning", (int)(frac*100));
+            }
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.30f,0.62f,0.85f,1.0f));
+            ImGui::ProgressBar(frac, ImVec2(-1, 16), ov);
+            ImGui::PopStyleColor();
+        } else if(g_have_match){
+            const double age = g_match.tle_age_days;
+            ImVec4 col = (age > 10.0) ? ImVec4(0.95f,0.35f,0.30f,1)
+                       : (age > 3.0)  ? ImVec4(0.95f,0.72f,0.25f,1)
+                                      : ImVec4(0.45f,0.75f,0.50f,1);
+            char ov[64];
+            if(age < 1.5) snprintf(ov, sizeof ov, "Orbit data: same day  (%d satellites)",
+                                   g_match.n_loaded);
+            else          snprintf(ov, sizeof ov, "Orbit data: %.0f days off  (%d satellites)",
+                                   age, g_match.n_loaded);
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, col);
+            ImGui::ProgressBar(1.0f, ImVec2(-1, 16), ov);
+            ImGui::PopStyleColor();
         }
-        ImGui::PopTextWrapPos();
     }
+
+    // 나이/진행 상태는 위 바 하나가 다 말한다 — 같은 내용을 문장으로 또 쓰지 않는다.
     // Starlink 는 항상 후보에서 뺀다 — 다운링크가 Ku 밴드(10.7~12.7 GHz)라 이 플랫폼이
     // 보는 대역(126~930 MHz)엔 안 나오는데, 카탈로그의 67% 를 차지하며 같은 셸 수십 개가
     // 분 단위로 지나가 분리도를 1 근처로 깎는다 (실측: 제외 시 sep 15.24 -> 57.17).
     // g_mp.include_starlink 는 기본 false 이고 이제 켤 수단이 없다.
     if(st.st == DopplerScan::State::Failed && !st.err.empty())
         ImGui::TextColored(ImVec4(0.95f,0.4f,0.35f,1), "%s", st.err.c_str());
-    if(!g_want_tle.empty())
-        ImGui::TextDisabled("Getting orbit data for this date from Central...");
     if(R.is_live())
         ImGui::TextDisabled("Recording still running - box a signal with Ctrl+drag, then REFINE");
 
@@ -375,10 +436,7 @@ float draw_panel(const HistReader& R, float h){
            && g_tracks[g_sel_track].fit.valid)
             sel_meas = g_tracks[g_sel_track].fit.rms_resid_hz;
         std::vector<int> vis;
-        for(size_t i = 0; i < g_match.cands.size(); i++){
-            if(g_filter[0] && !modview::ci_find(g_match.cands[i].name.c_str(), g_filter)) continue;
-            vis.push_back((int)i);
-        }
+        for(size_t i = 0; i < g_match.cands.size(); i++) vis.push_back((int)i);
         modview::sort_vis(vis, g_sort_col, g_sort_asc, [&](int col, int a, int b)->int{
             const auto& A = g_match.cands[a]; const auto& B = g_match.cands[b];
             switch(col){
@@ -596,13 +654,18 @@ void draw_overlay(ImDrawList* dl, const HistReader& R,
     }
 }
 
+// 패널만 접는다. 결과는 남긴다 — 같은 녹화를 다시 열었을 때 스캔을 또 돌리지 않기
+// 위해서다. 다른 녹화로 갈아타면 note_file_changed 가 버린다.
 void on_close(){
     g_open = false;
-    g_tracks.clear();
-    g_sel.clear();
-    g_sel_track = -1;
-    g_have_match = false;
-    g_match_of = 0xFFFFFFFFu;
+}
+
+// 뷰어를 완전히 닫을 때 (모달 종료). 여기서는 다 버린다 — 리더가 사라지므로
+// 트랙이 가리키는 파일도 없다.
+void on_viewer_closed(){
+    g_open = false;
+    wipe();
+    g_owner_path.clear(); g_owner_rows = 0;
 }
 
 } // namespace DopplerView
