@@ -194,6 +194,7 @@ else()
         src/doppler/sat_geom.cpp
         src/doppler/doppler_extract.cpp
         src/doppler/doppler_fit.cpp
+        src/doppler/doppler_match.cpp
         src/long_waterfall_view.cpp
         src/sig_lib_view.cpp
         src/mission_view.cpp
