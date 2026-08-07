@@ -11,6 +11,8 @@
 
 #include "long_waterfall.hpp"
 #include "hist_reader.hpp"
+#include "doppler/doppler_view.hpp"
+#include "doppler/doppler_scan.hpp"
 #include "fft_viewer.hpp"
 #include "bewe_paths.hpp"
 #include "net_protocol.hpp"
@@ -521,13 +523,18 @@ void draw_modal(FFTViewer& v, NetClient* cli){
     // S키 file-panel 토글 제거 (v4.0): mission 창에서 파일 선택해 진입.
     // 우측 file panel 자체도 항상 닫힌 채 — viewer는 viewer 본연만 담당.
     bool modal_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
-    // ESC로 모달 닫기 (titlebar X 없음 보완).
+    // ESC: 도플러 패널이 열려 있으면 그것부터 닫고, 아니면 모달을 닫는다
+    // (titlebar X 없음 보완).
     if(modal_focused && ImGui::IsKeyPressed(ImGuiKey_Escape, false)){
-        v.lwf_modal_open = false;
+        if(DopplerView::panel_open()) DopplerView::on_close();
+        else                          v.lwf_modal_open = false;
     }
 
     ImVec2 win_sz = ImGui::GetContentRegionAvail();
-    float view_w  = std::max(200.f, win_sz.x);
+    // 도플러 패널이 열려 있으면 그 폭을 미리 떼어 둔다 (아래 창을 쪼그라뜨리는 게
+    // 아니라 같은 오버레이 안에서 나눠 쓰는 것 — 메인페이지는 건드리지 않는다).
+    const float dop_w = DopplerView::panel_open() ? 460.0f + 8.0f : 0.0f;
+    float view_w  = std::max(200.f, win_sz.x - dop_w);
 
     // ── Left: viewer ─────────────────────────────────────────────────────
     // 정보 영역만 작은 패딩, 이미지는 child 가장자리까지 꽉 차게.
@@ -572,6 +579,34 @@ void draw_modal(FFTViewer& v, NetClient* cli){
         ImGui::Text("Stop  : %s", fmt_local_time(stop_utc, off_h).c_str());
         ImGui::Text("Color : %.1f / %.1f dB",
             g_file_db_min, g_file_db_max);
+        {   // 도플러 토글 — 정보줄 우측 정렬. Meas 영역이 있으면 REFINE 도 같이.
+            const float bw = ImGui::CalcTextSize("DOPPLER").x
+                           + ImGui::GetStyle().FramePadding.x*2;
+            float rx = view_w - bw - 22.0f;
+            if(g_meas.active){
+                const float rw = ImGui::CalcTextSize("REFINE").x
+                               + ImGui::GetStyle().FramePadding.x*2;
+                rx -= rw + 8.0f;
+                ImGui::SameLine(rx);
+                if(ImGui::Button("REFINE")){
+                    const uint32_t r0 = (uint32_t)std::max(0.0, std::min(g_meas.t0, g_meas.t1));
+                    const uint32_t r1 = (uint32_t)std::min((double)g_reader.num_rows(),
+                                                           std::max(g_meas.t0, g_meas.t1));
+                    const uint32_t l0 = (uint32_t)std::max(0.0, std::min(g_meas.f0, g_meas.f1));
+                    const uint32_t l1 = (uint32_t)std::min((double)g_reader.fft_size(),
+                                                           std::max(g_meas.f0, g_meas.f1));
+                    Doppler::ExtractParams P;
+                    DopplerView::start_refine(g_reader, r0, r1, l0, l1, P);
+                }
+                ImGui::SameLine(0, 8);
+            } else {
+                ImGui::SameLine(rx);
+            }
+            if(DopplerView::toolbar_button(g_reader)){
+                Doppler::ExtractParams P;
+                DopplerView::toggle(g_reader, P);
+            }
+        }
         ImGui::Unindent(10.0f);
         ImGui::Dummy(ImVec2(0, 2));
         ImGui::Separator();
@@ -741,6 +776,12 @@ void draw_modal(FFTViewer& v, NetClient* cli){
                                        IM_COL32(0,0,0,170));
                     dlf->AddText(ImVec2(tx, ty), IM_COL32(255,200,200,255), info);
                 };
+
+                // 도플러 트랙/적합곡선 — 측정박스보다 먼저 그려 박스가 위에 오게.
+                // 뷰어의 좌표 클로저를 그대로 넘겨 줌/팬 상태를 상속한다.
+                DopplerView::draw_overlay(ImGui::GetWindowDrawList(), g_reader,
+                                          [&](double r){ return t_to_px(r); },
+                                          [&](double l){ return f_to_py(l); });
 
                 // Render rectangle
                 if(g_meas.active || g_meas.selecting)
@@ -928,6 +969,12 @@ void draw_modal(FFTViewer& v, NetClient* cli){
     }
     ImGui::EndChild();
 
+    // ── Right: 도플러 패널 ───────────────────────────────────────────────
+    if(DopplerView::panel_open()){
+        ImGui::SameLine(0, 8);
+        DopplerView::draw_panel(g_reader, win_sz.y);
+    }
+
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();   // WindowRounding
@@ -935,6 +982,8 @@ void draw_modal(FFTViewer& v, NetClient* cli){
 }
 
 void close_modal(){
+    DopplerScan::shutdown();     // 스캔 중이면 취소 + join (워커가 리더를 물고 있다)
+    DopplerView::on_close();
     close_open();
     if(g_tex){ glDeleteTextures(1, &g_tex); g_tex = 0; }
 }
