@@ -41,6 +41,11 @@ DopplerMatch::Result            g_match;
 bool                            g_have_match = false;
 uint32_t                        g_match_of = 0xFFFFFFFFu;
 
+// 오버레이 라벨용 트랙별 1위 후보명. 매 프레임 match_of() 로 Result 전체(후보 20개)를
+// 복사하면 낭비라, 워커가 새 스냅샷을 낼 때만 이름을 받아 둔다. 스캔 중에는 매칭이
+// 트랙보다 늦게 채워지므로 빈 칸이 남을 수 있고, 다음 스냅샷에서 메워진다.
+std::vector<std::string> g_top_name;    // g_tracks 와 같은 길이
+
 std::string tle_dir(){ return BEWEPaths::assets_dir() + "/tle"; }
 
 std::string hhmmss(double t){
@@ -64,7 +69,14 @@ void cell_name(const char* s){
 
 void refresh_from_worker(){
     std::vector<Doppler::Candidate> t;
-    if(DopplerScan::results(t)) g_tracks = std::move(t);
+    if(DopplerScan::results(t)){
+        g_tracks = std::move(t);
+        // 오버레이 라벨 캐시 갱신. 위성으로 판정된 트랙만 이름을 붙인다.
+        g_top_name.assign(g_tracks.size(), std::string());
+        for(size_t i = 0; i < g_tracks.size(); i++)
+            if(g_tracks[i].score > 0.0f)
+                DopplerScan::top_name_of(g_tracks[i].id, g_top_name[i]);
+    }
     if(g_sel_track >= 0 && g_sel_track < (int)g_tracks.size()){
         const uint32_t id = g_tracks[g_sel_track].id;
         if(id != g_match_of){
@@ -431,10 +443,84 @@ float draw_panel(const HistReader& R, float h){
 void draw_overlay(ImDrawList* dl, const HistReader& R,
                   const std::function<float(double)>& row_to_px,
                   const std::function<float(double)>& lin_to_py){
-    if(!g_open || g_sel_track < 0 || g_sel_track >= (int)g_tracks.size()) return;
-    const Doppler::Candidate& c = g_tracks[g_sel_track];
+    if(!g_open || g_tracks.empty()) return;
     const double rr = (R.hdr().row_rate_hz > 0.0f) ? (double)R.hdr().row_rate_hz : 1.0;
     const double t0 = (double)R.hdr().start_utc_unix;
+
+    // ── 위성 판정 트랙마다 노란 박스 ─────────────────────────────────────
+    // 줌아웃하면 트랙 선이 1px 밑으로 눌려 안 보인다. 박스는 "이 근처에 뭐가 있다"를
+    // 한눈에 준다. 색은 노랑 — 빨강은 Ctrl+우드래그 측정영역이 이미 쓰고 있어
+    // 사용자가 친 박스와 헷갈리면 안 된다.
+    //
+    // 선택 트랙은 맨 나중에 그린다. 같은 패스의 이웃 채널은 몇 kHz 차이라 줌아웃에서
+    // 박스가 거의 포개지는데, 그때 선택한 것이 남의 박스에 덮이면 안 된다.
+    const ImVec2 clip0 = dl->GetClipRectMin();
+    std::vector<ImVec4> lab_rects;     // 이미 놓은 라벨 자리 (겹침 회피용)
+
+    auto draw_one = [&](size_t i){
+        const Doppler::Candidate& b = g_tracks[i];
+        double fmin = b.pts[0].f_hz, fmax = fmin;
+        for(const Doppler::TrackPoint& p : b.pts){
+            if(p.f_hz < fmin) fmin = p.f_hz;
+            if(p.f_hz > fmax) fmax = p.f_hz;
+        }
+        float x0 = row_to_px((b.t_start_utc - t0)*rr);
+        float x1 = row_to_px((b.t_end_utc   - t0)*rr);
+        float ylo = lin_to_py(R.linear_of_freq_hz(fmin));
+        float yhi = lin_to_py(R.linear_of_freq_hz(fmax));
+        if(x1 < x0)  std::swap(x0, x1);
+        if(yhi > ylo) std::swap(yhi, ylo);
+        // 화면 여유 — 줌아웃에서 박스가 선에 딱 붙어 안 보이는 걸 막는다.
+        const float pad = 3.0f;
+        x0 -= pad; x1 += pad; yhi -= pad; ylo += pad;
+        // 아주 작게 눌려도 시인성이 남게 최소 크기를 준다.
+        if(x1 - x0 < 6.0f){ const float m=(x0+x1)*0.5f; x0=m-3.0f; x1=m+3.0f; }
+        if(ylo - yhi < 6.0f){ const float m=(yhi+ylo)*0.5f; yhi=m-3.0f; ylo=m+3.0f; }
+
+        const bool sel = ((int)i == g_sel_track);
+        dl->AddRectFilled(ImVec2(x0,yhi), ImVec2(x1,ylo),
+                          sel ? IM_COL32(255,200,60,46) : IM_COL32(255,200,60,26));
+        dl->AddRect(ImVec2(x0,yhi), ImVec2(x1,ylo),
+                    IM_COL32(255,200,60, sel ? 255 : 190), 0.f, 0, sel ? 2.0f : 1.4f);
+
+        // 라벨: 번호 + 1위 위성 이름.
+        char lab[80];
+        const char* nm = (i < g_top_name.size() && !g_top_name[i].empty())
+                       ? g_top_name[i].c_str() : nullptr;
+        if(nm) snprintf(lab, sizeof lab, "%zu %s", i+1, nm);
+        else   snprintf(lab, sizeof lab, "%zu", i+1);
+        const ImVec2 ts = ImGui::CalcTextSize(lab);
+        float tx = x0, ty = yhi - ts.y - 3.0f;
+        if(ty < clip0.y + 2.0f) ty = ylo + 3.0f;   // 위가 막히면 박스 아래로
+        // 이미 놓인 라벨과 겹치면 한 줄씩 위로 민다. 같은 패스의 이웃 채널은 박스가
+        // 사실상 포개지므로, 밀지 않으면 글자끼리 겹쳐 둘 다 못 읽는다.
+        const float lh = ts.y + 4.0f;
+        for(int guard = 0; guard < 8; guard++){
+            bool hit = false;
+            for(const ImVec4& r : lab_rects)
+                if(tx-3 < r.z && tx+ts.x+3 > r.x && ty-2 < r.w && ty+ts.y+2 > r.y){
+                    hit = true; break;
+                }
+            if(!hit) break;
+            ty -= lh;
+            if(ty < clip0.y + 2.0f){ ty = clip0.y + 2.0f; break; }
+        }
+        lab_rects.push_back(ImVec4(tx-3, ty-2, tx+ts.x+3, ty+ts.y+2));
+        dl->AddRectFilled(ImVec2(tx-3, ty-2), ImVec2(tx+ts.x+3, ty+ts.y+2),
+                          IM_COL32(0,0,0,180));
+        dl->AddText(ImVec2(tx,ty), IM_COL32(255,225,140,255), lab);
+    };
+
+    for(size_t i = 0; i < g_tracks.size(); i++)
+        if(g_tracks[i].score > 0.0f && !g_tracks[i].pts.empty() && (int)i != g_sel_track)
+            draw_one(i);
+    if(g_sel_track >= 0 && g_sel_track < (int)g_tracks.size()
+       && g_tracks[g_sel_track].score > 0.0f && !g_tracks[g_sel_track].pts.empty())
+        draw_one((size_t)g_sel_track);
+
+    // ── 선택 트랙의 관측 트랙 + 적합 곡선 ────────────────────────────────
+    if(g_sel_track < 0 || g_sel_track >= (int)g_tracks.size()) return;
+    const Doppler::Candidate& c = g_tracks[g_sel_track];
 
     // 관측 트랙 (빨강). f -> 선형 인덱스는 HistReader 의 역변환을 그대로 쓴다.
     // **fftshift 언랩은 저장 접근에만 쓰고 축에는 안 쓴다** — 여기서 lin 은 이미 축이다.

@@ -186,6 +186,14 @@ bool match_of(uint32_t track_id, DopplerMatch::Result& out){
     return true;
 }
 
+bool top_name_of(uint32_t track_id, std::string& out){
+    std::lock_guard<std::mutex> lk(g_mtx);
+    auto it = g_match.find(track_id);
+    if(it == g_match.end() || it->second.cands.empty()) return false;
+    out = it->second.cands.front().name;
+    return true;
+}
+
 void shutdown(){
     g_cancel = true;
     if(g_th.joinable()) g_th.join();

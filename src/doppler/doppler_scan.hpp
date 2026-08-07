@@ -44,6 +44,9 @@ bool   busy();
 bool results(std::vector<Doppler::Candidate>& tracks);
 bool match_of(uint32_t track_id, DopplerMatch::Result& out);
 
+// 1위 후보 이름만. 오버레이 라벨용 — Result 전체(후보 20개)를 복사하지 않는다.
+bool top_name_of(uint32_t track_id, std::string& out);
+
 // 모달 닫을 때 반드시 호출 — 워커 join.
 void shutdown();
 
