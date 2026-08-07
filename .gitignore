@@ -25,6 +25,10 @@ assets/tle/starlink_tle.txt
 assets/tle/etc_tle.txt
 assets/tle/SOT_tle.txt
 assets/tle/leo_tle.txt
+# 스캔할 때마다 현재 카탈로그를 자기 에폭 날짜로 스냅샷해 쌓는다 (머신별 누적 데이터).
+# 과거 녹화를 그 시점 원소로 분석하려면 필요하다 — SGP4 오차는 에폭으로부터 |dt| 에만
+# 의존해 방향 대칭이라, 최신 TLE 를 과거로 되돌려도 묵은 TLE 를 앞으로 미는 것과 같다.
+assets/tle/archive/
 
 # Mission persistence (machine-local state)
 missions.json

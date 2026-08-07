@@ -39,8 +39,44 @@ double catalogue_age_days(double ref_utc){
 int catalogue_size(){ return (int)g_sats.size(); }
 const std::string& catalogue_src(){ return g_src; }
 
+// 현재 leo_tle.txt 를 **자기 에폭 날짜로** 아카이브에 스냅샷한다 (이미 있으면 그대로).
+//
+// 왜 필요한가 — 실측(2026-08-07, 양쪽 카탈로그에 다 있는 위성 8개, 38일 전파):
+//   궤도방향 오차 중앙값 570 km / TCA 오차 중앙값 75초 / 403MHz 도플러 오차 중앙값 330 Hz
+//   최악(ISS, reboost 하는 저궤도) 6172 km / 805초 / 3007 Hz
+// 측정 잔차가 15~50 Hz 인데 도플러 오차가 그 10~60배라 순위가 뒤집힌다.
+//
+// **오차는 에폭으로부터 |dt| 에만 의존하므로 방향 대칭이다** — 오늘 TLE 를 한 달 뒤로
+// 전파하는 것과 한 달 묵은 TLE 를 앞으로 전파하는 것이 같은 크기다. Celestrak GP 는
+// 현재 원소만 주므로, 과거 녹화를 제대로 보려면 그때 받아 둔 원소가 있어야 한다.
+// 이 스냅샷은 소급 적용이 안 된다 (지나간 날짜의 원소는 구할 수 없다) — 지금부터
+// 기록을 쌓기 시작하는 것뿐이다.
+static void archive_snapshot(const std::string& tle_dir){
+    const std::string live = tle_dir + "/leo_tle.txt";
+    std::vector<TleElem> v;
+    if(!tle_load(live, v) || v.empty()) return;
+    const double med = median_epoch_jd(v);
+    if(med <= 0) return;
+    const time_t t = (time_t)((med - 2440587.5)*86400.0);
+    struct tm g{}; gmtime_r(&t, &g);
+    char d[16]; snprintf(d, sizeof d, "%04d%02d%02d", g.tm_year+1900, g.tm_mon+1, g.tm_mday);
+    const std::string adir = tle_dir + "/archive";
+    ::mkdir(adir.c_str(), 0755);
+    const std::string dst = adir + "/leo_" + d + ".txt";
+    struct stat st{};
+    if(stat(dst.c_str(), &st) == 0) return;          // 이미 있음
+    FILE* in = fopen(live.c_str(), "rb");
+    if(!in) return;
+    FILE* out = fopen(dst.c_str(), "wb");
+    if(!out){ fclose(in); return; }
+    char buf[65536]; size_t n;
+    while((n = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, n, out);
+    fclose(in); fclose(out);
+}
+
 bool load_catalogue(const std::string& tle_dir, double for_utc, std::string& why){
     why.clear();
+    archive_snapshot(tle_dir);
     // 아카이브본 중 녹화 시각에 가장 가까운 에폭을 고른다. 오늘 TLE 를 3주 뒤로
     // 역전파하는 것은 3주 된 TLE 를 순전파하는 것과 정확히 똑같이 나쁘다 —
     // Celestrak GP 는 현재 원소만 주므로 과거 파일엔 과거 원소가 필요하다.
