@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 #include <sys/stat.h>
@@ -46,6 +47,19 @@ std::string hhmmss(double t){
     time_t s = (time_t)t; struct tm tv{}; KST::to_tm(s, tv);
     char b[16]; snprintf(b, sizeof b, "%02d:%02d:%02d", tv.tm_hour, tv.tm_min, tv.tm_sec);
     return b;
+}
+
+// 좌측정렬 셀. 열 폭을 넘치면 잘라 쓰고 hover 로 전체 이름을 준다 (이름은 데이터다).
+// modview::cell_left 를 안 고치는 이유: acars/ais/wifi 가 같이 쓰는 헬퍼다.
+void cell_name(const char* s){
+    const float av = ImGui::GetContentRegionAvail().x;
+    if(ImGui::CalcTextSize(s).x <= av){ ImGui::TextUnformatted(s); return; }
+    // 말줄임 없이 (non-ASCII 금지) 폭에 맞게 자른다.
+    const int n = (int)strlen(s);
+    int keep = n;
+    while(keep > 1 && ImGui::CalcTextSize(s, s+keep).x > av) keep--;
+    ImGui::TextUnformatted(s, s+keep);
+    if(ImGui::IsItemHovered()) ImGui::SetTooltip("%s", s);
 }
 
 void refresh_from_worker(){
@@ -230,25 +244,10 @@ float draw_panel(const HistReader& R, float h){
         }
         ImGui::PopTextWrapPos();
     }
-    // Starlink 는 다운링크가 Ku 밴드(10.7~12.7 GHz)라 이 플랫폼 대역엔 안 나온다.
-    // 기본 해제. 켜면 다음 스캔부터 반영된다.
-    {
-        // 고른 카탈로그에 Starlink 가 하나도 없으면(아카이브본은 저장 시 걸러진다)
-        // 켜도 바뀌는 게 없다 — 조용히 무시하지 말고 비활성으로 보여 준다.
-        const bool has = !g_have_match || g_match.n_starlink > 0;
-        if(!has) ImGui::BeginDisabled();
-        if(ImGui::Checkbox("Include Starlink", &g_mp.include_starlink)){
-            if(!DopplerScan::busy() && R.is_open() && !R.is_live()){
-                Doppler::ExtractParams P;
-                DopplerScan::start_full(R, P, g_mp, tle_dir());
-            }
-        }
-        if(!has) ImGui::EndDisabled();
-        if(g_have_match && g_match.n_starlink > 0){
-            ImGui::SameLine();
-            ImGui::TextDisabled("(+%d)", g_match.n_starlink);
-        }
-    }
+    // Starlink 는 항상 후보에서 뺀다 — 다운링크가 Ku 밴드(10.7~12.7 GHz)라 이 플랫폼이
+    // 보는 대역(126~930 MHz)엔 안 나오는데, 카탈로그의 67% 를 차지하며 같은 셸 수십 개가
+    // 분 단위로 지나가 분리도를 1 근처로 깎는다 (실측: 제외 시 sep 15.24 -> 57.17).
+    // g_mp.include_starlink 는 기본 false 이고 이제 켤 수단이 없다.
     if(st.st == DopplerScan::State::Failed && !st.err.empty())
         ImGui::TextColored(ImVec4(0.95f,0.4f,0.35f,1), "%s", st.err.c_str());
     if(!g_want_tle.empty())
@@ -263,11 +262,11 @@ float draw_panel(const HistReader& R, float h){
                ImGuiTableFlags_Borders|ImGuiTableFlags_RowBg|ImGuiTableFlags_ScrollY,
                ImVec2(0, th))){
             ImGui::TableSetupScrollFreeze(0,1);
-            ImGui::TableSetupColumn("#");
-            ImGui::TableSetupColumn("Time");
-            ImGui::TableSetupColumn("Length");
-            ImGui::TableSetupColumn("Frequency");
-            ImGui::TableSetupColumn("Satellite?");
+            ImGui::TableSetupColumn("#",          ImGuiTableColumnFlags_WidthFixed, 30.0f);
+            ImGui::TableSetupColumn("Time",       ImGuiTableColumnFlags_WidthFixed, 70.0f);
+            ImGui::TableSetupColumn("Length",     ImGuiTableColumnFlags_WidthFixed, 66.0f);
+            ImGui::TableSetupColumn("Frequency",  ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Satellite?", ImGuiTableColumnFlags_WidthFixed, 72.0f);
             ImGui::TableHeadersRow();
             for(size_t i = 0; i < g_tracks.size(); i++){
                 const Doppler::Candidate& c = g_tracks[i];
@@ -339,9 +338,14 @@ float draw_panel(const HistReader& R, float h){
                ImGuiTableFlags_Borders|ImGuiTableFlags_RowBg|ImGuiTableFlags_ScrollY,
                ImVec2(0, rest > 60 ? rest : 60))){
             ImGui::TableSetupScrollFreeze(0,1);
-            ImGui::TableSetupColumn("#");     ImGui::TableSetupColumn("SATELLITE");
-            ImGui::TableSetupColumn("ID");    ImGui::TableSetupColumn("FIT");
-            ImGui::TableSetupColumn("HEIGHT");ImGui::TableSetupColumn("DIRECTION");
+            // 폭을 명시하지 않으면 6열이 균등분배돼 순위 숫자가 위성 이름과 같은 폭을
+            // 먹는다. 숫자/등급/방위는 내용에 맞춰 고정하고 이름이 나머지를 다 갖는다.
+            ImGui::TableSetupColumn("#",         ImGuiTableColumnFlags_WidthFixed, 30.0f);
+            ImGui::TableSetupColumn("SATELLITE", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("ID",        ImGuiTableColumnFlags_WidthFixed, 52.0f);
+            ImGui::TableSetupColumn("FIT",       ImGuiTableColumnFlags_WidthFixed, 46.0f);
+            ImGui::TableSetupColumn("HEIGHT",    ImGuiTableColumnFlags_WidthFixed, 56.0f);
+            ImGui::TableSetupColumn("DIR",       ImGuiTableColumnFlags_WidthFixed, 40.0f);
             modview::sortable_headers(6, g_sort_col, g_sort_asc, 1);
             for(size_t k = 0; k < vis.size(); k++){
                 const DopplerMatch::Cand& c = g_match.cands[vis[k]];
@@ -367,14 +371,14 @@ float draw_panel(const HistReader& R, float h){
                     }
                 }
                 char b[32];
-                ImGui::TableSetColumnIndex(1); modview::cell_left(c.name.c_str());
+                ImGui::TableSetColumnIndex(1); cell_name(c.name.c_str());
                 ImGui::TableSetColumnIndex(2); snprintf(b,sizeof b,"%d",c.norad); modview::cell(b);
                 // FIT: 잔차를 이 관측의 측정잡음과 견준 말. 절대 Hz 는 대역마다 달라
                 // 비교가 안 되므로 숫자 대신 등급으로 준다 (상세창에 원값이 있다).
                 ImGui::TableSetColumnIndex(3);
                 { const double meas = (sel_meas > 0) ? sel_meas : c.rms_hz;
                   const double r = c.rms_hz / std::max(1.0, meas);
-                  const char*  w = (r < 1.5) ? "close" : (r < 3.0) ? "fair" : "poor";
+                  const char*  w = (r < 1.5) ? "BEST" : (r < 3.0) ? "GOOD" : "WEAK";
                   modview::cell(w, r < 1.5 ? ImVec4(0.55f,0.85f,0.55f,1)
                                 : r < 3.0 ? ImVec4(0.85f,0.85f,0.60f,1)
                                           : ImVec4(0.75f,0.60f,0.55f,1)); }
