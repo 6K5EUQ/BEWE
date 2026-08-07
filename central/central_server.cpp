@@ -76,6 +76,11 @@ static const char* db_subdir_for(const char* fn){
     size_t n = strlen(fn);
     if(n >= 9 && strcmp(fn + n - 9, ".bewehist") == 0) return "hist";
     if(strstr(fn, "_DE_")) return "audio";
+    // 궤도원소 스냅샷 (leo_YYYYMMDD.txt) — HIST 도플러 매칭이 녹화 시점 원소를
+    // 요구하는데, 그걸 기지마다 받으면 space-track 요청 제한(계정당)을 서로 잡아먹는다.
+    // Central 이 하루 한 번 모아 두고 기존 DB_DOWNLOAD_REQ 경로로 그대로 서빙한다
+    // (와이어 프로토콜 무변경).
+    if(strncmp(fn, "leo_", 4) == 0 && n > 4 && strcmp(fn + n - 4, ".txt") == 0) return "tle";
     return "iq";
 }
 

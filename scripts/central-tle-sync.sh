@@ -99,7 +99,10 @@ print((datetime.date.fromisoformat(sys.argv[1])+datetime.timedelta(days=1)).isof
   [ -e "$dst" ] && { log "$d already present, skip"; return 0; }
   log "space-track gp_history $d ..."
   local q="https://www.space-track.org/basicspacedata/query/class/gp_history"
-  q="$q/EPOCH/${d}--${nxt}/MEAN_MOTION/%3E11.25/OBJECT_NAME/%3C%3E~~STARLINK~~"
+  # OBJECT_TYPE=PAYLOAD — 파편·로켓잔해는 송신을 안 하므로 후보에 있으면 오탐만
+  # 늘린다. gp_history 는 안 거르면 전 카탈로그를 준다 (실측 14,116 vs 페이로드만 4,747).
+  q="$q/EPOCH/${d}--${nxt}/MEAN_MOTION/%3E11.25/OBJECT_TYPE/PAYLOAD"
+  q="$q/OBJECT_NAME/%3C%3E~~STARLINK~~"
   q="$q/orderby/NORAD_CAT_ID/format/3le"
   if ! curl -s -b "$TMP/ck" --max-time 300 -o "$TMP/raw" "$q"; then
     log "$d fetch failed"; return 1; fi
