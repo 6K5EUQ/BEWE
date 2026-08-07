@@ -28,6 +28,7 @@ namespace DopplerView {
 namespace {
 
 bool  g_open = false;
+bool  g_show_rejected = false;   // 위성이 아니라고 판정된 트랙까지 표에 낼까
 char  g_filter[64] = {0};
 int   g_sel_track = -1;
 int   g_sort_col  = -1;
@@ -86,12 +87,14 @@ void refresh_from_worker(){
     }
 }
 
-// 첫 통과 트랙을 자동 선택 (없으면 첫 트랙)
+// 첫 위성 트랙을 자동 선택. 위성이 하나도 없으면 아무것도 고르지 않는다 —
+// 표가 위성만 싣는데 거부 트랙을 골라 두면 표에 없는 행이 선택된 채로 아래
+// 요약이 그려진다 ("Show non-satellites" 를 켜면 그때 손으로 고를 수 있다).
 void auto_select(){
     if(g_sel_track >= 0 || g_tracks.empty()) return;
     for(size_t i = 0; i < g_tracks.size(); i++)
         if(g_tracks[i].score > 0.0f){ g_sel_track = (int)i; return; }
-    g_sel_track = 0;
+    if(g_show_rejected) g_sel_track = 0;
 }
 
 } // anon
@@ -206,7 +209,10 @@ float draw_panel(const HistReader& R, float h){
         ImGui::SetNextItemWidth(200);
         ImGui::InputText("##dopfilter", g_filter, sizeof g_filter);
         ImGui::SameLine(0, 8);
-        ImGui::Text(g_tracks.size()==1 ? "%zu signal" : "%zu signals", g_tracks.size());
+        // 세는 대상은 위성이다. 잡힌 트랙 수를 내면 지상 신호까지 성과처럼 보인다.
+        { int n_sat = 0;
+          for(const auto& t : g_tracks) if(t.score > 0.0f) n_sat++;
+          ImGui::Text(n_sat==1 ? "%d satellite" : "%d satellites", n_sat); }
         if(st.st == DopplerScan::State::Running){
             ImGui::SameLine(0, 8);
             ImGui::TextDisabled("%s", st.stage[0] ? st.stage : "scanning");
@@ -268,8 +274,33 @@ float draw_panel(const HistReader& R, float h){
         ImGui::TextDisabled("Recording still running - box a signal with Ctrl+drag, then REFINE");
 
     // ── 트랙 목록 ────────────────────────────────────────────────────────
-    if(g_tracks.size() > 1){
-        const float th = ImGui::GetTextLineHeightWithSpacing()*std::min<size_t>(6, g_tracks.size()) + 28;
+    // 이건 위성을 찾는 기능이다. 지상 신호로 표를 채우면 정작 위성이 묻힌다 (실측:
+    // 145MHz 1시간 파일에서 85건이 잡혔는데 전부 지상이었다). 기본은 위성만 보이고,
+    // "왜 이 신호가 안 잡혔나" 를 따질 때만 토글로 나머지를 꺼내 본다.
+    std::vector<int> vis_trk;
+    for(size_t i = 0; i < g_tracks.size(); i++)
+        if(g_show_rejected || g_tracks[i].score > 0.0f) vis_trk.push_back((int)i);
+    {
+        int n_sat = 0;
+        for(const auto& t : g_tracks) if(t.score > 0.0f) n_sat++;
+        const int n_rej = (int)g_tracks.size() - n_sat;
+        if(n_rej > 0){
+            if(ImGui::Checkbox("Show non-satellites", &g_show_rejected)){
+                // 끄면서 선택이 표 밖으로 나가면 놓아 준다 — 안 그러면 보이지도 않는
+                // 행의 요약이 아래에 계속 남는다.
+                if(!g_show_rejected && g_sel_track >= 0
+                   && g_sel_track < (int)g_tracks.size()
+                   && g_tracks[g_sel_track].score <= 0.0f){
+                    g_sel_track = -1; g_sel.clear();
+                    g_have_match = false; g_match_of = 0xFFFFFFFFu;
+                }
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%d)", n_rej);
+        }
+    }
+    if(vis_trk.size() > 1){
+        const float th = ImGui::GetTextLineHeightWithSpacing()*std::min<size_t>(6, vis_trk.size()) + 28;
         if(ImGui::BeginTable("##dop_trk", 5,
                ImGuiTableFlags_Borders|ImGuiTableFlags_RowBg|ImGuiTableFlags_ScrollY,
                ImVec2(0, th))){
@@ -280,12 +311,14 @@ float draw_panel(const HistReader& R, float h){
             ImGui::TableSetupColumn("Frequency",  ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("Satellite?", ImGuiTableColumnFlags_WidthFixed, 72.0f);
             ImGui::TableHeadersRow();
-            for(size_t i = 0; i < g_tracks.size(); i++){
+            for(size_t k = 0; k < vis_trk.size(); k++){
+                const int i = vis_trk[k];
                 const Doppler::Candidate& c = g_tracks[i];
                 ImGui::TableNextRow();
-                char idx[8]; snprintf(idx, sizeof idx, "%zu", i+1);
-                if(modview::row_col0((int)i, (int)i == g_sel_track, idx)){
-                    g_sel_track = (int)i; g_match_of = 0xFFFFFFFFu;
+                // 번호는 표에 보이는 순번이다 — 오버레이 박스 라벨도 같은 번호를 쓴다.
+                char idx[8]; snprintf(idx, sizeof idx, "%zu", k+1);
+                if(modview::row_col0(i, i == g_sel_track, idx)){
+                    g_sel_track = i; g_match_of = 0xFFFFFFFFu;
                 }
                 ImGui::TableSetColumnIndex(1); modview::cell(hhmmss(c.t_start_utc).c_str());
                 char b[32];
@@ -483,12 +516,16 @@ void draw_overlay(ImDrawList* dl, const HistReader& R,
         dl->AddRect(ImVec2(x0,yhi), ImVec2(x1,ylo),
                     IM_COL32(255,200,60, sel ? 255 : 190), 0.f, 0, sel ? 2.0f : 1.4f);
 
-        // 라벨: 번호 + 1위 위성 이름.
+        // 라벨: 번호 + 1위 위성 이름. 번호는 **표에 보이는 순번**이어야 한다 — 표가
+        // 위성만 싣는데 여기서 전체 인덱스를 쓰면 둘이 어긋나 서로 못 짚는다.
+        int shown = 0;
+        for(size_t q = 0; q <= i; q++)
+            if(g_show_rejected || g_tracks[q].score > 0.0f) shown++;
         char lab[80];
         const char* nm = (i < g_top_name.size() && !g_top_name[i].empty())
                        ? g_top_name[i].c_str() : nullptr;
-        if(nm) snprintf(lab, sizeof lab, "%zu %s", i+1, nm);
-        else   snprintf(lab, sizeof lab, "%zu", i+1);
+        if(nm) snprintf(lab, sizeof lab, "%d %s", shown, nm);
+        else   snprintf(lab, sizeof lab, "%d", shown);
         const ImVec2 ts = ImGui::CalcTextSize(lab);
         float tx = x0, ty = yhi - ts.y - 3.0f;
         if(ty < clip0.y + 2.0f) ty = ylo + 3.0f;   // 위가 막히면 박스 아래로

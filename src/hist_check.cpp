@@ -14,6 +14,7 @@
 #include <deque>
 #include <set>
 #include <vector>
+#include <algorithm>
 #include <string>
 #include <cstdio>
 #include <cstring>
@@ -36,6 +37,8 @@ std::thread             g_thr;
 std::mutex              g_q_mtx;
 std::condition_variable g_q_cv;
 std::deque<std::string> g_queue;          // 대조할 미션 hist dir 목록
+// 이번 회차에 Fix/Del 을 몇 줄 냈나. 큐가 비었을 때 0 이면 "nothing to do" 를 한 번 낸다.
+std::atomic<int> g_reported{0};
 
 // HIST_STAT 응답 대기 (req_id → 결과)
 std::mutex              g_stat_mtx;
@@ -336,14 +339,12 @@ int check_dir(const std::string& dir, int year, const std::string& code, bool lo
 
     // 결과를 채팅으로 보고한다. 로그는 HOST 에만 남으므로 JOIN 운용자는 이걸 본다.
     // ASCII 만 쓴다 — 한글 기호는 글꼴이 못 그려 '?' 로 깨진다.
-    if(log && g_v && g_v->net_srv){
-        if(report.empty()){
-            g_v->net_srv->broadcast_chat("SYSTEM", "HIST: nothing to do");
-        } else {
-            for(const auto& line : report)
-                g_v->net_srv->broadcast_chat("SYSTEM", line.c_str());
-        }
-    }
+    // 빈 결과는 여기서 알리지 않는다 — 한 번의 명령이 미션 여러 개를 도는데 미션마다
+    // "nothing to do" 를 뱉으면 채팅이 그 줄로 덮인다. 큐가 다 빈 뒤 워커가 한 번만 낸다.
+    if(log && g_v && g_v->net_srv)
+        for(const auto& line : report)
+            g_v->net_srv->broadcast_chat("SYSTEM", line.c_str());
+    if(!report.empty()) g_reported.fetch_add((int)report.size());
 
     // 대조 후에도 남아 있는 보존분 용량 감시.
     // 프레임당 1행 기록이라 한 시간이 ~540MB 다. Central 이 오래 죽어 있으면 Pi5 의
@@ -395,6 +396,14 @@ void worker(){
         int year = 0; std::string code;
         if(!parse_mission_path(dir + "/x", year, code)) continue;
         check_dir(dir, year, code, /*log=*/true);
+        // 큐를 다 비웠으면 이번 회차를 마무리 보고한다. 미션마다 내면 시끄럽다.
+        bool drained = false;
+        { std::lock_guard<std::mutex> lk(g_q_mtx); drained = g_queue.empty(); }
+        if(drained){
+            const int n = g_reported.exchange(0);
+            if(n == 0 && g_v && g_v->net_srv)
+                g_v->net_srv->broadcast_chat("SYSTEM", "HIST: nothing to do");
+        }
     }
 }
 
@@ -452,8 +461,53 @@ void notify_finalized(const std::string& path){
                   gb >= RETAIN_WARN_GB ? " (용량 주의)" : "");
 }
 
+// 로컬에 보존된 .bewehist 가 하나라도 있는 미션 hist dir 을 전부 모은다.
+// 활성 미션만 보면 지난 미션의 잔존본이 영영 안 올라간다 — 그 미션을 다시 ACTIVE 로
+// 만들 방법이 없으므로 로컬에 유일본으로 갇힌다 (실측 2026-08-07: DGS-2 에 G28 4개 +
+// G29 1개가 남아 있는데 H07 이 활성이라 /hist check 가 "nothing to do" 를 냈다).
+static void collect_mission_dirs(std::vector<std::string>& out){
+    const std::string root = BEWEPaths::missions_root();
+    DIR* ds = opendir(root.c_str());
+    if(!ds) return;
+    while(struct dirent* es = readdir(ds)){                 // <station>
+        if(es->d_name[0] == '.') continue;
+        const std::string sdir = root + "/" + es->d_name;
+        DIR* dy = opendir(sdir.c_str());
+        if(!dy) continue;
+        while(struct dirent* ey = readdir(dy)){             // <year>
+            if(ey->d_name[0] == '.') continue;
+            const std::string ydir = sdir + "/" + ey->d_name;
+            DIR* dc = opendir(ydir.c_str());
+            if(!dc) continue;
+            while(struct dirent* ec = readdir(dc)){         // <code>
+                if(ec->d_name[0] == '.') continue;
+                const std::string hdir = ydir + "/" + ec->d_name + "/hist";
+                // 보존분이 없는 미션은 큐에 넣지 않는다 — 빈 디렉토리에 워커를 돌리면
+                // Central 왕복만 쌓이고 보고가 시끄러워진다.
+                DIR* dh = opendir(hdir.c_str());
+                if(!dh) continue;
+                bool has = false;
+                while(struct dirent* ef = readdir(dh)){
+                    const char* n = ef->d_name;
+                    if(n[0] == '.') continue;
+                    const char* dot = strrchr(n, '.');
+                    if(!dot || strcmp(dot, ".bewehist") != 0) continue;
+                    if(strstr(n, "-LIVE.bewehist")) continue;
+                    has = true; break;
+                }
+                closedir(dh);
+                if(has) out.push_back(hdir);
+            }
+            closedir(dc);
+        }
+        closedir(dy);
+    }
+    closedir(ds);
+    std::sort(out.begin(), out.end());
+}
+
 void run_command(const char* args){
-    // 접속(로그인)한 기지의 활성 미션 dir 만 대상으로 한다. 다른 기지 아카이브는
+    // 이 기지에 남아 있는 **모든** 미션의 보존분을 대조한다. 다른 기지 아카이브는
     // 애초에 여기 로컬에 없고, Central 도 요청한 룸의 기지 것만 답한다.
     (void)args;
     // 시작하지 못한 이유는 JOIN 에게도 알린다 — 채팅에 아무 반응이 없으면 명령이
@@ -464,25 +518,41 @@ void run_command(const char* args){
     };
     if(!g_running.load()){ fail("HIST: worker not running"); return; }
     if(!g_v){ printf("[HIST] viewer 없음\n"); return; }
-    std::string dir = g_v->active_hist_dir();
-    if(dir.empty()){ fail("HIST: no active mission"); return; }
-    int year = 0; std::string code;
-    if(!parse_mission_path(dir + "/x", year, code)){
-        printf("[HIST] 미션 경로 파싱 실패: %s\n", dir.c_str());
-        fail("HIST: bad mission path");
-        return;
-    }
     if(!g_cli || !g_cli->is_central_connected()){ fail("HIST: Central not connected"); return; }
+
+    std::vector<std::string> dirs;
+    collect_mission_dirs(dirs);
+    // 활성 미션은 보존분이 아직 없어도 넣는다 — 대조 중에 회전이 일어나 새 파일이
+    // 닫힐 수 있고, 지금까지의 동작이기도 하다.
+    { const std::string cur = g_v->active_hist_dir();
+      if(!cur.empty() && std::find(dirs.begin(), dirs.end(), cur) == dirs.end())
+          dirs.push_back(cur); }
+    if(dirs.empty()){ fail("HIST: nothing retained"); return; }
+
+    int queued = 0;
     {
         std::lock_guard<std::mutex> lk(g_q_mtx);
-        for(const auto& q : g_queue)
-            if(q == dir){ fail("HIST: already running"); return; }
-        g_queue.push_back(dir);
+        for(const auto& dir : dirs){
+            int year = 0; std::string code;
+            if(!parse_mission_path(dir + "/x", year, code)){
+                printf("[HIST] 미션 경로 파싱 실패: %s\n", dir.c_str());
+                continue;
+            }
+            bool dup = false;
+            for(const auto& q : g_queue) if(q == dir){ dup = true; break; }
+            if(dup) continue;
+            g_queue.push_back(dir);
+            queued++;
+        }
     }
+    if(queued == 0){ fail("HIST: already running"); return; }
     g_q_cv.notify_one();
     // 파일당 최대 8초(Central 응답 대기) + 업로드 ACK 대기가 걸리므로 stdin 을 잡고
     // 있지 않는다. 결과(Fix/Del)는 워커가 끝난 뒤 로그와 채팅에 낸다.
-    printf("[HIST] check %04d/%s 시작 — 결과는 로그에 출력됩니다\n", year, code.c_str());
+    char line[96];
+    snprintf(line, sizeof line, "HIST: checking %d mission%s", queued, queued==1?"":"s");
+    printf("[HIST] %s — 결과는 로그에 출력됩니다\n", line);
+    if(g_v->net_srv) g_v->net_srv->broadcast_chat("SYSTEM", line);
 }
 
 } // namespace HistCheck
