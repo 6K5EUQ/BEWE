@@ -106,15 +106,65 @@ void run_job(HistReader reader, Doppler::ExtractParams P, DopplerMatch::Params M
             if(t.score <= 0.0f) continue;
             if(g_cancel){ err = "cancelled"; break; }
             DopplerMatch::Result r;
-            if(DopplerMatch::match(t, obs, MP, r, progress, cancelled)){
-                DopplerMatch::archive_scan(t, obs, MP, r);
+            if(DopplerMatch::match(t, obs, MP, r, progress, cancelled))
                 matches[t.id] = std::move(r);
+        }
+        if(g_cancel){ err = "cancelled"; break; }
+
+        // ── 같은 패스를 가리키는 중복 트랙 버리기 ────────────────────────
+        // 대역폭이 있는 신호는 위/아래 엣지가 각각 트랙으로 잡힌다. 피크 분리폭이
+        // 메인로브에서 유도되므로(실측 732 Hz) 그보다 넓게 벌어진 엣지는 정당하게
+        // 별개 피크가 된다 — 추출 단계에서 막을 수 있는 게 아니다.
+        // 실측(2026-07-29 DGS-2 464.5MHz): 두 트랙이 4.2 kHz 떨어져 나란히 갔고
+        // 둘 다 MALLIGYONG-1 을 1위로 냈다. 시간이 겹치면서 같은 위성을 가리키면
+        // 물리적으로 같은 패스이므로, 운용자에게는 신호 하나다.
+        //
+        // 대표는 score 높은 쪽, 동점이면 곡선 잔차가 작은 쪽, 그래도 같으면 앞선
+        // 트랙. 전순서라 한 그룹에서 정확히 하나만 살아남는다 (서로 지우는 일 없음).
+        auto better = [&](size_t x, size_t y){
+            if(tracks[x].score != tracks[y].score) return tracks[x].score > tracks[y].score;
+            const double rx = tracks[x].fit.rms_resid_hz, ry = tracks[y].fit.rms_resid_hz;
+            if(rx != ry) return rx < ry;
+            return x < y;
+        };
+        auto top_norad = [&](size_t i)->int{
+            if(tracks[i].score <= 0.0f) return 0;
+            auto it = matches.find(tracks[i].id);
+            if(it == matches.end() || it->second.cands.empty()) return 0;
+            return it->second.cands.front().norad;
+        };
+        std::vector<char> drop(tracks.size(), 0);
+        for(size_t a = 0; a < tracks.size(); a++){
+            const int na = top_norad(a);
+            if(na == 0) continue;
+            for(size_t b = 0; b < tracks.size(); b++){
+                if(b == a || top_norad(b) != na) continue;
+                const double ov = std::min(tracks[a].t_end_utc,   tracks[b].t_end_utc)
+                                - std::max(tracks[a].t_start_utc, tracks[b].t_start_utc);
+                if(ov <= 0.0) continue;      // 안 겹치면 같은 위성의 다른 패스다
+                if(better(b, a)){ drop[a] = 1; break; }
             }
         }
         {
-            std::lock_guard<std::mutex> lk(g_mtx);
-            g_match = std::move(matches);
+            std::vector<Doppler::Candidate> keep;
+            keep.reserve(tracks.size());
+            for(size_t i = 0; i < tracks.size(); i++){
+                if(drop[i]){ matches.erase(tracks[i].id); continue; }
+                keep.push_back(std::move(tracks[i]));
+            }
+            tracks.swap(keep);
         }
+        // 살아남은 것만 아카이브에 남긴다.
+        for(const auto& t : tracks){
+            auto it = matches.find(t.id);
+            if(it != matches.end()) DopplerMatch::archive_scan(t, obs, MP, it->second);
+        }
+        {
+            std::lock_guard<std::mutex> lk(g_mtx);
+            g_tracks = tracks;
+            g_match  = std::move(matches);
+        }
+        g_ntracks = (uint32_t)tracks.size();
     } while(false);
 
     {

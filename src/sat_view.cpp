@@ -424,11 +424,14 @@ void sat_view_draw(GlobeRenderer& globe, ImGuiIO& io, time_t now_utc) {
         float avail_w  = ImGui::GetContentRegionAvail().x;
         if (avail_w > row_w)
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail_w - row_w) * 0.5f);
-        ImGui::RadioButton("SOI", &g_mode, SAT_SOI);
+        // 모드를 고를 때마다 assets/tle 를 다시 읽는다. 카탈로그는 룸에서 /Update TLEs
+        // 로 받아 오므로 이 화면이 뜬 뒤에 도착하는데, 한 번 읽고 캐시해 두면 새로 받은
+        // 것이 영영 안 보인다. 도착을 감시하지 않고 버튼을 누른 그 순간에만 스캔한다.
+        if (ImGui::RadioButton("SOI", &g_mode, SAT_SOI)) sat_view_reload();
         ImGui::SameLine();
-        if (ImGui::RadioButton("LEO", &g_mode, SAT_LEO)) ensure_leo_loaded();
+        if (ImGui::RadioButton("LEO", &g_mode, SAT_LEO)) sat_view_reload();
         ImGui::SameLine();
-        if (ImGui::RadioButton("ALL", &g_mode, SAT_ALL)) { ensure_all_loaded(); ensure_leo_loaded(); }
+        if (ImGui::RadioButton("ALL", &g_mode, SAT_ALL)) sat_view_reload();
 
         // (Update TLE 버튼 제거 — chat 입력 `/Update TLEs` 명령어로 트리거)
         ImGui::End();
