@@ -383,6 +383,11 @@ static bool extract_range(HistReader& R, const ExtractParams& P, const Calib& C,
     const double dt = st.frame_dt_s;
     const float  w_sep = std::max(1.0f, std::ceil(1.5f * C.mainlobe_bins));
     const double slope_lim = cf_hz * V_OVER_C / TAU_MIN_S;      // Hz/s 물리 상한
+    // 갭 한도. 버스트에서만 프레임과 연동한다 — dt 가 파일마다 0.96~7.34s (7.6배) 라
+    // 고정 초로 두면 허용 miss 가 8~62 프레임으로 들쭉날쭉하다.
+    const double gap_lim = P.burst
+        ? std::max(P.max_gap_s, P.min_gap_frames * dt)
+        : P.max_gap_s;
 
     std::vector<double> acc(N);
     std::vector<float>  e(N);
@@ -442,7 +447,12 @@ static bool extract_range(HistReader& R, const ExtractParams& P, const Calib& C,
             const double f_pred = T.last_f + T.slope*dtl;
             // sigma_pred: 최근 점 시그마 + 기울기 불확실
             const double sig = T.pts.empty() ? bin_hz : std::max((double)T.pts.back().sigma_hz, 0.1*bin_hz);
-            const double gate = std::max({ 2.0*bin_hz, 3.0*sig, 0.5*std::fabs(T.slope)*dtl });
+            double gate = std::max({ 2.0*bin_hz, 3.0*sig, 0.5*std::fabs(T.slope)*dtl });
+            // 버스트: 갭에 비례하는 불확실도를 더한다. 위 항들 중 dtl 에 반응하는 건
+            // 0.5*|slope|*dtl 뿐인데 slope 는 점 3개 미만이면 0 이라(fit_slope) 침묵 뒤
+            // 재등장에 게이트가 전혀 안 열렸다. slope 를 모를 때도 물리 상한만큼은 연다.
+            if(P.burst)
+                gate = std::max(gate, (double)P.slope_unc_frac * slope_lim * dtl);
             int best = -1; double bestd = 1e300;
             for(size_t pi = 0; pi < peaks.size(); pi++){
                 if(used[pi]) continue;
@@ -452,7 +462,7 @@ static bool extract_range(HistReader& R, const ExtractParams& P, const Calib& C,
             }
             T.span++;
             if(best < 0){
-                if(dtl > P.max_gap_s) T.alive = false;    // coast 한도 초과 → 종료
+                if(dtl > gap_lim) T.alive = false;        // 갭 한도 초과 → 종료
                 continue;
             }
             used[best] = 1;
@@ -509,13 +519,19 @@ static bool extract_range(HistReader& R, const ExtractParams& P, const Calib& C,
     // ── 출력 조건 ────────────────────────────────────────────────────────
     const double min_dur = single_track ? 30.0 : P.min_dur_s;
     const float  min_occ = single_track ? 0.15f : P.min_occupancy;
+    // 버스트는 duty 대신 절대 점 개수로 거른다. 12점이 문턱인 이유는 mono_frac 이
+    // n>=12 에서 Spearman 순위상관을 쓰기 때문이다 — 그 경로는 점 사이 간격에 완전히
+    // 불변이라 버스트에 유리하고, n<12 인접차분 경로는 tot=n-1 이 작아 실패 한 번에
+    // 0.90 컷을 놓친다.
+    const size_t min_pts = P.burst ? P.min_points : 4;
     for(LiveTrack& T : done){
-        if(T.pts.size() < 4) continue;
+        if(T.pts.size() < min_pts) continue;
         const double dur = T.pts.back().t_utc - T.pts.front().t_utc;
         const float  occ = (T.span > 0) ? (float)T.seen/(float)T.span : 0.0f;
         if(dur < min_dur || occ < min_occ) continue;
         Candidate c;
         c.id = (uint32_t)out.size();
+        c.is_burst  = P.burst;
         c.file_path = R.path();
         c.station   = std::string(R.hdr().station_name,
                                   strnlen(R.hdr().station_name, sizeof(R.hdr().station_name)));
@@ -545,7 +561,6 @@ static bool extract_range(HistReader& R, const ExtractParams& P, const Calib& C,
         out.push_back(std::move(c));
         st.tracks_kept++;
     }
-    (void)dt;
     return true;
 }
 

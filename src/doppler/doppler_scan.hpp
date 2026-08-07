@@ -30,6 +30,11 @@ struct Status {
 void start_full(const HistReader& reader, const Doppler::ExtractParams& P,
                 const DopplerMatch::Params& MP, const std::string& tle_dir);
 
+// 버스트(간헐 송신) 2차 패스. 완화 프리셋으로 start_full 을 돌린다 — 연속신호용
+// 1차 결과와는 별개 실행이고, 1차 파라미터는 건드리지 않는다.
+void start_burst(const HistReader& reader, const DopplerMatch::Params& MP,
+                 const std::string& tle_dir);
+
 // Meas 박스 정밀분석. row/lin 범위는 뷰어의 Meas 가 그대로 준다.
 void start_refine(const HistReader& reader, uint32_t row_lo, uint32_t row_hi,
                   uint32_t lin_lo, uint32_t lin_hi,

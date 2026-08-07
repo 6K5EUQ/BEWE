@@ -209,6 +209,7 @@ bool fit_scurve(const std::vector<TrackPoint>& pts, double cf_hz, double bin_hz,
     }
     {   // 잔차 반대칭성 — TCA 대칭 위치의 잔차가 서로 부호 반대면 S 가 안 맞은 것
         double num = 0, d1 = 0, d2 = 0;
+        int npairs = 0;
         for(size_t i = 0; i < p.size(); i++){
             const double u = p[i].t - best_tca;
             if(u <= 0) continue;
@@ -226,8 +227,12 @@ bool fit_scurve(const std::vector<TrackPoint>& pts, double cf_hz, double bin_hz,
             };
             const double a = resid(i), b = -resid(j);
             num += a*b; d1 += a*a; d2 += b*b;
+            npairs++;
         }
         out.antisym = (d1 > 0 && d2 > 0) ? (float)(num/std::sqrt(d1*d2)) : 0.0f;
+        // 짝이 몇 개로 잰 값인지 남긴다. 0 이면 antisym 은 "대칭적"이 아니라
+        // "측정 못 함"이고, 그 둘은 같은 0.0 으로 보인다 — 채점이 구분해야 한다.
+        out.antisym_pairs = npairs;
     }
     {   double ss = 0, sy = 0, sw = 0, mean = 0;
         for(const Pt& q : p){ mean += q.w*q.y; sw += q.w; }
@@ -300,8 +305,15 @@ float score_candidate(Candidate& c, std::string& reason){
     s *= soft(F.mono_frac,   0.88, 0.97);
     s *= soft(F.lin_ratio,   3.0,  10.0);
     s *= soft(F.quad_ratio,  1.5,  4.0);
-    s *= soft(1.0-F.antisym, 0.5,  0.9);
-    s *= soft(c.occupancy,   0.4,  0.8);
+    // 버스트는 시간축이 비대칭이라 antisym 짝이 안 생길 수 있다. 그때 antisym 은 0 이고
+    // soft(1-0) = 만점이 되는데, 재지 못한 것이 최고점을 받으면 안 된다. 짝이 없으면
+    // 중립 감점으로 대신한다. (연속 트랙은 짝이 늘 충분해 이 분기를 안 탄다.)
+    if(c.is_burst && F.antisym_pairs < 3) s *= 0.7f;
+    else                                  s *= soft(1.0-F.antisym, 0.5, 0.9);
+    // occupancy 는 duty cycle 이다 — 신호 특성이지 품질이 아니다. 버스트(실측 0.08)를
+    // 여기서 재면 soft 램프 하한 0.4 에 걸려 score 가 통째로 0 이 된다. 곡선을 그리는
+    // 데 필요한 건 비율이 아니라 점 개수이고, 그건 추출의 min_points 가 보증한다.
+    if(!c.is_burst) s *= soft(c.occupancy, 0.4, 0.8);
     s *= soft(swing_bins,    4.0,  20.0);          // 저해상도는 감점만
     if(F.truncation) s *= 0.85f;
     c.score = std::max(0.0f, std::min(1.0f, s));

@@ -390,14 +390,26 @@ bool match(const Doppler::Candidate& trk, const Obs& obs, const Params& P, Resul
     // 최선 위성의 도플러 잔차가 그보다 몇 배 크면 궤도가 데이터를 설명 못 하는 것이다.
     // 절대 Hz 임계를 박으면 대역/설정마다 틀린다 (bin 폭이 49~3750 Hz 로 다르다).
     {
-        const double meas = (trk.fit.valid && trk.fit.rms_resid_hz > 0)
-                            ? trk.fit.rms_resid_hz : (trk.bin_hz > 0 ? trk.bin_hz : 1.0);
+        double meas = (trk.fit.valid && trk.fit.rms_resid_hz > 0)
+                      ? trk.fit.rms_resid_hz : (trk.bin_hz > 0 ? trk.bin_hz : 1.0);
+        // 이 비교는 자유도가 비대칭이다: meas 는 4파라미터 적합(A,B,t_tca,tau) 잔차,
+        // best 는 1파라미터(오프셋) 잔차인데 둘 다 보정이 없다. 점이 많으면 무해하지만
+        // 버스트처럼 점이 적으면 meas 가 훨씬 심하게 과소추정되어(n=8 이면 1.32배) 비율이
+        // 부풀고 정답 위성이 Unreliable 로 밀린다. 버스트에서만 보정한다.
+        if(trk.is_burst){
+            const size_t n = trk.pts.size();
+            if(n > 5) meas /= std::sqrt(1.0 - 4.0/(double)n);
+        }
         const double best = out.cands.empty() ? 1e300 : out.cands[0].rms_hz;
         const double sep2 = (out.cands.size() > 1) ? out.cands[1].sep : 1e300;
         char b[160];
         if(out.cands.empty()){
             out.verdict = Verdict::Unreliable;
-            out.verdict_why = "no candidate passed the geometry gates";
+            // 기하 게이트를 통과한 위성이 있었다면(n_stage[4]>0) 탈락한 곳은 기하가 아니라
+            // 도플러 단계다 (cov<0.80 이나 f0 정합성). 문구를 갈라 오진을 막는다.
+            out.verdict_why = (out.n_stage[4] > 0)
+                ? "orbits passed overhead but none matched the doppler curve"
+                : "no candidate passed the geometry gates";
         } else if(best > 6.0*meas){
             out.verdict = Verdict::Unreliable;
             snprintf(b, sizeof b,

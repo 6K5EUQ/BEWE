@@ -217,12 +217,22 @@ float draw_panel(const HistReader& R, float h){
             ImGui::SameLine(0, 8);
             ImGui::TextDisabled("%s", st.stage[0] ? st.stage : "scanning");
         }
-        const char* rl = (st.st == DopplerScan::State::Running) ? "CANCEL" : "RESCAN";
-        const float bw = ImGui::CalcTextSize(rl).x + ImGui::GetStyle().FramePadding.x*2;
-        ImGui::SameLine(W - bw - 12);
-        if(ImGui::Button(rl)){
-            if(st.st == DopplerScan::State::Running) DopplerScan::cancel();
-            else {
+        const bool running = (st.st == DopplerScan::State::Running);
+        const char* rl = running ? "CANCEL" : "RESCAN";
+        const float pad = ImGui::GetStyle().FramePadding.x*2;
+        const float bw  = ImGui::CalcTextSize(rl).x + pad;
+        if(running){
+            ImGui::SameLine(W - bw - 12);
+            if(ImGui::Button(rl)) DopplerScan::cancel();
+        } else {
+            // 버스트(간헐 송신) 2차 패스는 명시 실행이다. 자동으로 돌리면 스캔이 두 배
+            // 걸리는데, 대부분의 녹화에는 버스트 위성이 없다.
+            const float bb = ImGui::CalcTextSize("BURST").x + pad;
+            ImGui::SameLine(W - bw - bb - 20);
+            if(ImGui::Button("BURST"))
+                DopplerScan::start_burst(R, g_mp, tle_dir());
+            ImGui::SameLine(W - bw - 12);
+            if(ImGui::Button(rl)){
                 Doppler::ExtractParams P;
                 DopplerScan::start_full(R, P, g_mp, tle_dir());
             }
@@ -330,9 +340,11 @@ float draw_panel(const HistReader& R, float h){
                 ImGui::TableSetColumnIndex(3);
                 snprintf(b,sizeof b,"%.3f MHz", c.fit.f_center_hz/1e6); modview::cell(b);
                 ImGui::TableSetColumnIndex(4);
-                modview::cell(c.score > 0.0f ? "yes" : "no",
-                              c.score > 0.0f ? ImVec4(0.55f,0.85f,0.55f,1)
-                                             : ImVec4(0.6f,0.6f,0.6f,1));
+                // 버스트 패스에서 나온 위성은 yes* — 같은 표에 섞이므로 어느 패스가
+                // 찾았는지는 알 수 있어야 한다.
+                const char* yn = (c.score <= 0.0f) ? "no" : (c.is_burst ? "yes*" : "yes");
+                modview::cell(yn, c.score > 0.0f ? ImVec4(0.55f,0.85f,0.55f,1)
+                                                 : ImVec4(0.6f,0.6f,0.6f,1));
             }
             ImGui::EndTable();
         }

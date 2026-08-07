@@ -193,6 +193,24 @@ void start_full(const HistReader& reader, const Doppler::ExtractParams& P,
                        false, 0u, 0u, 0u, 0u);
 }
 
+void start_burst(const HistReader& reader, const DopplerMatch::Params& MP,
+                 const std::string& tle_dir){
+    // 버스트(간헐 송신) 프리셋. 큐브샛 비콘은 주기 30~120초로 짧게 쏘아 duty 가 0.1 도
+    // 안 되므로 기본 min_occupancy=0.55 로는 전멸한다. duty 대신 절대 점 개수로 거르고,
+    // 갭에서 트랙이 끊기지 않게 게이트와 갭 한도를 연다.
+    //
+    // 실측(2026-08-07, 파일 4개): 트랙은 85->127 로 늘지만 위성 판정은 0/2/1/0 그대로다.
+    // mono_frac 과 swing_ratio 가 방어선으로 버틴다 (145MHz 지상신호 실측 스윙 최대
+    // 820 Hz vs 그 대역 위성 하한 1451 Hz — 자릿수가 갈린다).
+    Doppler::ExtractParams P;
+    P.burst         = true;
+    P.max_gap_s     = 60.0;
+    P.min_occupancy = 0.05f;
+    P.min_points    = 12;
+    P.max_tracks    = 256;      // 트랙이 늘어난다 — 상한이 막으면 뒤쪽을 통째로 놓친다
+    start_full(reader, P, MP, tle_dir);
+}
+
 void start_refine(const HistReader& reader, uint32_t row_lo, uint32_t row_hi,
                   uint32_t lin_lo, uint32_t lin_hi,
                   const Doppler::ExtractParams& P, const DopplerMatch::Params& MP,

@@ -49,6 +49,11 @@ struct SCurveFit {
     float  lin_ratio   = 0;   // RMS_line / RMS_S — 선형 드리프트 배제
     float  quad_ratio  = 0;   // RMS_quad / RMS_S
     float  antisym     = 0;   // 잔차 반대칭성
+    // antisym 은 TCA 대칭점을 ±5초로 짝지어 재는데, 버스트는 시간축이 비대칭이라
+    // 짝이 하나도 안 생길 수 있다. 그러면 antisym 이 0 이 되어 게이트를 통과하고
+    // soft(1-0) 로 만점까지 받는다 — 계산 불능이 최고점으로 축퇴한다. 짝 수를 실어
+    // 채점이 그 상황을 구분할 수 있게 한다.
+    int    antisym_pairs = 0;
     float  mono_frac   = 0;   // 단조 감소 비율
     float  swing_ratio = 0;   // B / (A*v/c) — 지상 이동체 배제의 주력
     bool   tca_inside  = false;
@@ -69,6 +74,9 @@ struct Candidate {
     float       snr_med_db = 0, snr_max_db = 0, occupancy = 0;
     SCurveFit   fit;
     float       score = 0;
+    // 버스트 2차 패스에서 나온 트랙. 채점·판정이 duty 대신 점 개수를 보게 만드는
+    // 스위치이자, 표에서 1차 결과와 구분하는 표식이다.
+    bool        is_burst = false;
     std::string reject_reason;             // 비면 통과
     std::vector<TrackPoint> pts;
 };
@@ -98,6 +106,19 @@ struct ExtractParams {
     uint32_t dc_mask_bins = 16;     // DC 험프는 ±10bin 폭 +16dB — 기존 1bin 마스크는 부족
     float  edge_frac      = 0.015f; // 대역 양끝 컷
     uint32_t force_L      = 0;      // 0 = 자동 (정밀분석은 1)
+
+    // ── 버스트(간헐 송신) 2차 패스 ──────────────────────────────────────
+    // 큐브샛 비콘처럼 주기 30~120초로 짧게 쏘는 위성은 duty 가 낮아(실측 0.08) 위
+    // 기본값으로는 트랙이 갭에서 끊기고 min_occupancy 에도 걸린다. burst=true 인
+    // 경로에서만 아래 값들이 쓰이므로 연속신호 탐지 결과는 그대로다.
+    bool   burst          = false;
+    size_t min_points     = 12;     // 곡선 형상에 필요한 절대 점 수 (occupancy 대체)
+    // 갭이 길수록 예측 주파수가 불확실해지는데 기존 게이트엔 그 항이 slope 에만
+    // 있고 slope 는 점 3개 미만이면 0 이다 — 침묵 뒤 재등장에 게이트가 안 열린다.
+    float  slope_unc_frac = 0.15f;  // slope_lim 대비 불확실도 비율
+    // max_gap_s 를 프레임과 연동한다. frame_dt_s 가 파일마다 0.96~7.34s (7.6배) 라
+    // 고정 초는 허용 miss 프레임이 8~62 개로 들쭉날쭉하다.
+    double min_gap_frames = 10.0;
 };
 
 struct ExtractStats {
