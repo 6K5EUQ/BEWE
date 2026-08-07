@@ -128,7 +128,9 @@ bool calibrate(HistReader& R, const ExtractParams& P, Calib& out,
         }
         if(thr < 2.5f)  thr = 2.5f;
         if(thr > 12.0f) thr = 12.0f;
-        out.thr_db = thr + P.thr_relax_db;
+        // 완화 후에도 바닥 위 1.5 dB 는 남긴다. 느슨한 민감도(-2 dB)에서 임계가
+        // 잡음바닥에 닿으면 모든 bin 이 피크가 되어 트랙 추출이 폭주한다.
+        out.thr_db = std::max(1.5f, thr + P.thr_relax_db);
         if(!med_pool.empty()){
             std::nth_element(med_pool.begin(), med_pool.begin()+med_pool.size()/2, med_pool.end());
             out.sigma_db = med_pool[med_pool.size()/2] * 1.4826f;   // MAD → sigma

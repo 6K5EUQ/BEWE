@@ -95,6 +95,11 @@ struct Calib {
     bool  valid = false;
 };
 
+// 탐지 민감도. 약한 연속신호가 기본값에서 안 잡히는 경우가 있어 운용자가 고른다.
+// 값은 ExtractParams 의 세 축(임계 완화 / 최소 지속 / duty)을 함께 움직인다 —
+// 임계만 낮추면 짧은 잡음 조각이 트랙으로 승격돼 표가 쓰레기로 찬다.
+enum class Sensitivity { Loose = 0, Normal = 1, Strict = 2 };
+
 struct ExtractParams {
     // 자동 전수 스캔 기본값. 정밀분석(Meas 박스)은 호출부에서 완화한다.
     float  thr_relax_db   = 0.0f;   // 임계 완화량 (정밀분석에서 2.0)
@@ -119,6 +124,23 @@ struct ExtractParams {
     // max_gap_s 를 프레임과 연동한다. frame_dt_s 가 파일마다 0.96~7.34s (7.6배) 라
     // 고정 초는 허용 miss 프레임이 8~62 개로 들쭉날쭉하다.
     double min_gap_frames = 10.0;
+
+    // 민감도 적용. Normal 은 기본값 그대로라 종전 동작과 동일하다.
+    void apply(Sensitivity s){
+        switch(s){
+            case Sensitivity::Loose:                 // 약한 연속신호를 놓치지 않는다
+                thr_relax_db  = -2.0f;               // 임계를 바닥 쪽으로 2 dB
+                min_dur_s     = 60.0;
+                min_occupancy = 0.40f;
+                break;
+            case Sensitivity::Strict:                // 확실한 것만
+                thr_relax_db  = +2.0f;
+                min_dur_s     = 120.0;
+                min_occupancy = 0.70f;
+                break;
+            case Sensitivity::Normal: default: break; // 위 기본값 유지
+        }
+    }
 };
 
 struct ExtractStats {

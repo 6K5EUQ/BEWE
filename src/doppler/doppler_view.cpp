@@ -38,6 +38,8 @@ std::string g_want_tle;         // Central 에 요청해 놓은 파일명 (비�
 double g_want_since = 0.0;      // 그 요청을 건 시각 (타임아웃 판정용)
 bool   g_pending_scan = false;  // 열렸으니 스캔해야 한다 — 실행은 draw_panel 이 한다
 bool   g_auto_selected = false; // 이 결과에서 자동선택을 이미 했나 (해제 유지용)
+// 탐지 민감도. 파일을 바꿔도 유지한다 — 운용자가 고른 작업 방식이지 파일 속성이 아니다.
+Doppler::Sensitivity g_sens = Doppler::Sensitivity::Normal;
 
 // 분석 결과는 파일에 딸린 것이다. 다른 녹화를 열면 남의 트랙을 그리게 되므로 버리고,
 // 같은 녹화로 돌아오면 다시 스캔하지 않는다 (전 파일 스캔은 실측 최대 3.8초).
@@ -258,7 +260,7 @@ float draw_panel(const HistReader& R, float h){
     if(g_pending_scan && !DopplerScan::busy() && !R.is_live()){
         g_pending_scan = false;
         g_auto_selected = false;
-        Doppler::ExtractParams EP;
+        Doppler::ExtractParams EP; EP.apply(g_sens);
         DopplerScan::start_full(R, EP, g_mp, tle_dir());
     }
 
@@ -290,6 +292,22 @@ float draw_panel(const HistReader& R, float h){
             // 버스트(간헐 송신) 2차 패스는 명시 실행이다. 자동으로 돌리면 스캔이 두 배
             // 걸리는데, 대부분의 녹화에는 버스트 위성이 없다.
             const float bb = ImGui::CalcTextSize("BURST").x + pad;
+            // 민감도 — 약한 연속신호가 기본값에서 안 잡히는 경우가 있다. 고르면
+            // 그 자리에서 다시 스캔한다 (골라 놓고 RESCAN 을 또 누르게 하지 않는다).
+            const float sw = 74.0f;
+            ImGui::SameLine(availW - bw - bb - sw - rmargin - 16.0f);
+            ImGui::SetNextItemWidth(sw);
+            static const char* SENS[3] = {"LOOSE", "NORMAL", "STRICT"};
+            if(ImGui::BeginCombo("##dop_sens", SENS[(int)g_sens])){
+                for(int k = 0; k < 3; k++)
+                    if(ImGui::Selectable(SENS[k], (int)g_sens == k)){
+                        g_sens = (Doppler::Sensitivity)k;
+                        g_auto_selected = false;
+                        Doppler::ExtractParams P; P.apply(g_sens);
+                        DopplerScan::start_full(R, P, g_mp, tle_dir());
+                    }
+                ImGui::EndCombo();
+            }
             ImGui::SameLine(availW - bw - bb - rmargin - 8.0f);
             // 새 결과가 나오면 자동선택을 한 번 다시 허용한다.
             if(ImGui::Button("BURST")){
@@ -299,7 +317,7 @@ float draw_panel(const HistReader& R, float h){
             ImGui::SameLine(availW - bw - rmargin);
             if(ImGui::Button(rl)){
                 g_auto_selected = false;
-                Doppler::ExtractParams P;
+                Doppler::ExtractParams P; P.apply(g_sens);
                 DopplerScan::start_full(R, P, g_mp, tle_dir());
             }
         }
