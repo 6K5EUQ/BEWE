@@ -572,15 +572,11 @@ void draw_overlay(ImDrawList* dl, const HistReader& R,
     const double rr = (R.hdr().row_rate_hz > 0.0f) ? (double)R.hdr().row_rate_hz : 1.0;
     const double t0 = (double)R.hdr().start_utc_unix;
 
-    // ── 위성 판정 트랙마다 노란 박스 ─────────────────────────────────────
+    // ── 선택 트랙의 박스 ────────────────────────────────────────────────
     // 줌아웃하면 트랙 선이 1px 밑으로 눌려 안 보인다. 박스는 "이 근처에 뭐가 있다"를
-    // 한눈에 준다. 색은 노랑 — 빨강은 Ctrl+우드래그 측정영역이 이미 쓰고 있어
-    // 사용자가 친 박스와 헷갈리면 안 된다.
-    //
-    // 선택 트랙은 맨 나중에 그린다. 같은 패스의 이웃 채널은 몇 kHz 차이라 줌아웃에서
-    // 박스가 거의 포개지는데, 그때 선택한 것이 남의 박스에 덮이면 안 된다.
+    // 한눈에 준다. 색은 위성=노랑 / 위성아님=회색 — 빨강은 Ctrl+우드래그 측정영역이
+    // 이미 쓰고 있어 사용자가 친 박스와 헷갈리면 안 된다.
     const ImVec2 clip0 = dl->GetClipRectMin();
-    std::vector<ImVec4> lab_rects;     // 이미 놓은 라벨 자리 (겹침 회피용)
 
     auto draw_one = [&](size_t i){
         const Doppler::Candidate& b = g_tracks[i];
@@ -625,43 +621,24 @@ void draw_overlay(ImDrawList* dl, const HistReader& R,
         if(nm) snprintf(lab, sizeof lab, "%d %s", shown, nm);
         else   snprintf(lab, sizeof lab, "%d", shown);
         const ImVec2 ts = ImGui::CalcTextSize(lab);
-        float tx = x0, ty = yhi - ts.y - 3.0f;
+        const float tx = x0;
+        float ty = yhi - ts.y - 3.0f;
         if(ty < clip0.y + 2.0f) ty = ylo + 3.0f;   // 위가 막히면 박스 아래로
-        // 이미 놓인 라벨과 겹치면 한 줄씩 위로 민다. 같은 패스의 이웃 채널은 박스가
-        // 사실상 포개지므로, 밀지 않으면 글자끼리 겹쳐 둘 다 못 읽는다.
-        const float lh = ts.y + 4.0f;
-        for(int guard = 0; guard < 8; guard++){
-            bool hit = false;
-            for(const ImVec4& r : lab_rects)
-                if(tx-3 < r.z && tx+ts.x+3 > r.x && ty-2 < r.w && ty+ts.y+2 > r.y){
-                    hit = true; break;
-                }
-            if(!hit) break;
-            ty -= lh;
-            if(ty < clip0.y + 2.0f){ ty = clip0.y + 2.0f; break; }
-        }
-        lab_rects.push_back(ImVec4(tx-3, ty-2, tx+ts.x+3, ty+ts.y+2));
         dl->AddRectFilled(ImVec2(tx-3, ty-2), ImVec2(tx+ts.x+3, ty+ts.y+2),
                           IM_COL32(0,0,0,180));
         dl->AddText(ImVec2(tx,ty), is_sat ? IM_COL32(255,225,140,255)
                                           : IM_COL32(195,200,210,255), lab);
     };
 
-    // 표에 보이는 트랙은 이미지에도 보여야 한다 — 둘이 어긋나면 "no" 행을 골라도
-    // 어디가 잡힌 건지 알 수 없다. 그래서 판정이 아니라 **표와 같은 가시성 규칙**
-    // (`g_show_rejected || score>0`)을 쓴다. 체크박스를 끄면 박스도 같이 사라진다.
+    // **고른 것 하나만 그린다.** 전부 겹쳐 그리면 137.7MHz 대역처럼 트랙이 몰린
+    // 파일에서 박스와 라벨이 포개져 어느 게 어느 행인지 못 짚는다. 표에서 행을
+    // 누르면 그 항목만 뜨고, 다시 누르면(선택 해제) 이미지가 깨끗해진다.
     auto visible = [&](size_t i){
         return (g_show_rejected || g_tracks[i].score > 0.0f) && !g_tracks[i].pts.empty();
     };
-    for(size_t i = 0; i < g_tracks.size(); i++)
-        if(visible(i) && (int)i != g_sel_track)
-            draw_one(i);
-    if(g_sel_track >= 0 && g_sel_track < (int)g_tracks.size() && visible((size_t)g_sel_track))
-        draw_one((size_t)g_sel_track);
-
-    // ── 선택 트랙의 관측 트랙 + 적합 곡선 ────────────────────────────────
     if(g_sel_track < 0 || g_sel_track >= (int)g_tracks.size()) return;
     if(!visible((size_t)g_sel_track)) return;
+    draw_one((size_t)g_sel_track);
     const Doppler::Candidate& c = g_tracks[g_sel_track];
 
     // 관측 트랙 (빨강). f -> 선형 인덱스는 HistReader 의 역변환을 그대로 쓴다.
