@@ -30,6 +30,7 @@ int   g_sel_track = -1;
 int   g_sort_col  = -1;
 bool  g_sort_asc  = true;
 modview::Selection g_sel;
+DopplerMatch::Params g_mp;      // 검색 옵션 (Starlink 포함 여부 등)
 
 std::vector<Doppler::Candidate> g_tracks;
 DopplerMatch::Result            g_match;
@@ -97,8 +98,7 @@ void toggle(const HistReader& R, const Doppler::ExtractParams& P){
     if(!R.is_open() || !R.has_station_pos()) return;
     // LIVE 는 계속 자라서 선해제도 안 되고 행수가 스캔 중에 바뀐다 — 자동 스캔 대상 아님.
     if(R.is_live()) return;
-    DopplerMatch::Params MP;
-    DopplerScan::start_full(R, P, MP, tle_dir());
+    DopplerScan::start_full(R, P, g_mp, tle_dir());
 }
 
 void start_refine(const HistReader& R, uint32_t row_lo, uint32_t row_hi,
@@ -107,8 +107,7 @@ void start_refine(const HistReader& R, uint32_t row_lo, uint32_t row_hi,
     g_open = true;
     g_sel_track = -1; g_sel.clear(); g_have_match = false; g_match_of = 0xFFFFFFFFu;
     g_tracks.clear();
-    DopplerMatch::Params MP;
-    DopplerScan::start_refine(R, row_lo, row_hi, lin_lo, lin_hi, P, MP, tle_dir());
+    DopplerScan::start_refine(R, row_lo, row_hi, lin_lo, lin_hi, P, g_mp, tle_dir());
 }
 
 float draw_panel(const HistReader& R, float h){
@@ -133,7 +132,7 @@ float draw_panel(const HistReader& R, float h){
         ImGui::SetNextItemWidth(200);
         ImGui::InputText("##dopfilter", g_filter, sizeof g_filter);
         ImGui::SameLine(0, 8);
-        ImGui::Text("%zu trk", g_tracks.size());
+        ImGui::Text(g_tracks.size()==1 ? "%zu signal" : "%zu signals", g_tracks.size());
         if(st.st == DopplerScan::State::Running){
             ImGui::SameLine(0, 8);
             ImGui::TextDisabled("%s", st.stage[0] ? st.stage : "scanning");
@@ -145,8 +144,7 @@ float draw_panel(const HistReader& R, float h){
             if(st.st == DopplerScan::State::Running) DopplerScan::cancel();
             else {
                 Doppler::ExtractParams P;
-                DopplerMatch::Params MP;
-                DopplerScan::start_full(R, P, MP, tle_dir());
+                DopplerScan::start_full(R, P, g_mp, tle_dir());
             }
         }
         ImGui::EndChild();
@@ -159,28 +157,54 @@ float draw_panel(const HistReader& R, float h){
         ImVec4 col = (age > 10.0) ? ImVec4(0.95f,0.35f,0.30f,1)
                    : (age > 3.0)  ? ImVec4(0.95f,0.72f,0.25f,1)
                                   : ImVec4(0.65f,0.70f,0.78f,1);
-        ImGui::Text("TLE %s", g_match.tle_src.c_str());
+        ImGui::Text("Orbit data :");
         ImGui::SameLine();
-        ImGui::TextColored(col, "age %.1f d", age);
+        if(age < 1.5)      ImGui::TextColored(col, "same day as recording");
+        else               ImGui::TextColored(col, "%.0f days off from recording", age);
         ImGui::SameLine();
-        ImGui::TextDisabled("n=%d", g_match.n_loaded);
+        ImGui::TextDisabled("(%d satellites)", g_match.n_loaded);
     }
     // 신뢰도 판정 — 표보다 위에 둔다. 낡은 카탈로그는 순위표를 그럴듯하게 채우면서
     // 조용히 틀리므로(실측: 38일 낡음에서 6건 중 5건이 오답 1위), 표만 보면 속는다.
     if(g_have_match && g_match.verdict != DopplerMatch::Verdict::Reliable){
         const bool bad = (g_match.verdict == DopplerMatch::Verdict::Unreliable);
-        ImGui::TextColored(bad ? ImVec4(0.95f,0.35f,0.30f,1) : ImVec4(0.95f,0.72f,0.25f,1),
-                           "%s", bad ? "UNRELIABLE" : "AMBIGUOUS");
-        if(!g_match.verdict_why.empty()){
-            ImGui::PushTextWrapPos(0.0f);
-            ImGui::TextColored(ImVec4(0.78f,0.72f,0.62f,1), "%s", g_match.verdict_why.c_str());
-            ImGui::PopTextWrapPos();
+        ImGui::PushTextWrapPos(0.0f);
+        if(bad){
+            ImGui::TextColored(ImVec4(0.95f,0.35f,0.30f,1), "No good match");
+            ImGui::TextColored(ImVec4(0.78f,0.72f,0.62f,1),
+                g_match.tle_age_days > 3.0
+                  ? "None of these orbits fit the signal. The orbit data is too old for this recording."
+                  : "None of these orbits fit the signal. The satellite may not be in the list.");
+        } else {
+            ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1), "Several equally likely");
+            ImGui::TextColored(ImVec4(0.78f,0.72f,0.62f,1),
+                "These satellites fit about as well as each other.");
+        }
+        ImGui::PopTextWrapPos();
+    }
+    // Starlink 는 다운링크가 Ku 밴드(10.7~12.7 GHz)라 이 플랫폼 대역엔 안 나온다.
+    // 기본 해제. 켜면 다음 스캔부터 반영된다.
+    {
+        // 고른 카탈로그에 Starlink 가 하나도 없으면(아카이브본은 저장 시 걸러진다)
+        // 켜도 바뀌는 게 없다 — 조용히 무시하지 말고 비활성으로 보여 준다.
+        const bool has = !g_have_match || g_match.n_starlink > 0;
+        if(!has) ImGui::BeginDisabled();
+        if(ImGui::Checkbox("Include Starlink", &g_mp.include_starlink)){
+            if(!DopplerScan::busy() && R.is_open() && !R.is_live()){
+                Doppler::ExtractParams P;
+                DopplerScan::start_full(R, P, g_mp, tle_dir());
+            }
+        }
+        if(!has) ImGui::EndDisabled();
+        if(g_have_match && g_match.n_starlink > 0){
+            ImGui::SameLine();
+            ImGui::TextDisabled("(+%d)", g_match.n_starlink);
         }
     }
     if(st.st == DopplerScan::State::Failed && !st.err.empty())
         ImGui::TextColored(ImVec4(0.95f,0.4f,0.35f,1), "%s", st.err.c_str());
     if(R.is_live())
-        ImGui::TextDisabled("LIVE file - use Ctrl+drag then REFINE");
+        ImGui::TextDisabled("Recording still running - box a signal with Ctrl+drag, then REFINE");
 
     // ── 트랙 목록 ────────────────────────────────────────────────────────
     if(g_tracks.size() > 1){
@@ -190,10 +214,10 @@ float draw_panel(const HistReader& R, float h){
                ImVec2(0, th))){
             ImGui::TableSetupScrollFreeze(0,1);
             ImGui::TableSetupColumn("#");
-            ImGui::TableSetupColumn("Start");
-            ImGui::TableSetupColumn("Dur");
-            ImGui::TableSetupColumn("Pts");
-            ImGui::TableSetupColumn("Score");
+            ImGui::TableSetupColumn("Time");
+            ImGui::TableSetupColumn("Length");
+            ImGui::TableSetupColumn("Frequency");
+            ImGui::TableSetupColumn("Satellite?");
             ImGui::TableHeadersRow();
             for(size_t i = 0; i < g_tracks.size(); i++){
                 const Doppler::Candidate& c = g_tracks[i];
@@ -205,13 +229,16 @@ float draw_panel(const HistReader& R, float h){
                 ImGui::TableSetColumnIndex(1); modview::cell(hhmmss(c.t_start_utc).c_str());
                 char b[32];
                 ImGui::TableSetColumnIndex(2);
-                snprintf(b,sizeof b,"%.0fs", c.t_end_utc-c.t_start_utc); modview::cell(b);
+                { const double d = c.t_end_utc-c.t_start_utc;
+                  if(d >= 60) snprintf(b,sizeof b,"%dm %02ds",(int)(d/60),(int)d%60);
+                  else        snprintf(b,sizeof b,"%ds",(int)d);
+                  modview::cell(b); }
                 ImGui::TableSetColumnIndex(3);
-                snprintf(b,sizeof b,"%zu", c.pts.size()); modview::cell(b);
+                snprintf(b,sizeof b,"%.3f MHz", c.fit.f_center_hz/1e6); modview::cell(b);
                 ImGui::TableSetColumnIndex(4);
-                snprintf(b,sizeof b,"%.2f", c.score);
-                modview::cell(b, c.score > 0.0f ? ImVec4(0.55f,0.85f,0.55f,1)
-                                                : ImVec4(0.6f,0.6f,0.6f,1));
+                modview::cell(c.score > 0.0f ? "yes" : "no",
+                              c.score > 0.0f ? ImVec4(0.55f,0.85f,0.55f,1)
+                                             : ImVec4(0.6f,0.6f,0.6f,1));
             }
             ImGui::EndTable();
         }
@@ -221,18 +248,26 @@ float draw_panel(const HistReader& R, float h){
     if(g_sel_track >= 0 && g_sel_track < (int)g_tracks.size()){
         const Doppler::Candidate& c = g_tracks[g_sel_track];
         ImGui::Separator();
-        ImGui::Text("%s-%s  %.3f MHz", hhmmss(c.t_start_utc).c_str(),
-                    hhmmss(c.t_end_utc).c_str(), c.fit.f_center_hz/1e6);
-        ImGui::Text("swing %.1f kHz  tau %.0fs  slope %.1f Hz/s  rms %.2f bin",
-                    std::fabs(c.fit.half_swing_hz)/1000.0, c.fit.tau_s,
-                    c.fit.max_slope_hz_s, c.fit.rms_resid_bins);
+        ImGui::Text("Signal     : %.3f MHz", c.fit.f_center_hz/1e6);
+        ImGui::Text("Seen       : %s to %s", hhmmss(c.t_start_utc).c_str(),
+                    hhmmss(c.t_end_utc).c_str());
+        // 스윙은 "관측 중 주파수가 얼마나 흘렀나" 로 풀어 쓴다. 그게 위성 판별의
+        // 근거이므로 값 자체는 남긴다 (설명문이 아니라 정보다).
+        ImGui::Text("Drifted    : %.1f kHz down", std::fabs(c.fit.half_swing_hz)*2.0/1000.0);
+        ImGui::Text("Closest at : %s", hhmmss(c.fit.t_tca_utc).c_str());
         if(!c.reject_reason.empty())
-            ImGui::TextColored(ImVec4(0.9f,0.6f,0.3f,1), "%s", c.reject_reason.c_str());
+            ImGui::TextColored(ImVec4(0.9f,0.6f,0.3f,1), "Not a satellite - %s",
+                               c.reject_reason.c_str());
     }
 
     // ── 후보 표 ──────────────────────────────────────────────────────────
     if(g_have_match && !g_match.cands.empty()){
         ImGui::Separator();
+        // 이 관측의 측정잡음 = 트랙 자신의 곡선 적합 잔차. FIT 등급의 기준선이다.
+        double sel_meas = 0.0;
+        if(g_sel_track >= 0 && g_sel_track < (int)g_tracks.size()
+           && g_tracks[g_sel_track].fit.valid)
+            sel_meas = g_tracks[g_sel_track].fit.rms_resid_hz;
         std::vector<int> vis;
         for(size_t i = 0; i < g_match.cands.size(); i++){
             if(g_filter[0] && !modview::ci_find(g_match.cands[i].name.c_str(), g_filter)) continue;
@@ -244,23 +279,20 @@ float draw_panel(const HistReader& R, float h){
                 case 1: return A.name.compare(B.name);
                 case 2: return A.norad<B.norad?-1:(A.norad>B.norad?1:0);
                 case 3: return A.rms_hz<B.rms_hz?-1:(A.rms_hz>B.rms_hz?1:0);
-                case 4: return A.sep<B.sep?-1:(A.sep>B.sep?1:0);
-                case 5: return A.max_el_deg<B.max_el_deg?-1:(A.max_el_deg>B.max_el_deg?1:0);
-                case 6: return A.dtca_s<B.dtca_s?-1:(A.dtca_s>B.dtca_s?1:0);
-                case 7: return A.cov<B.cov?-1:(A.cov>B.cov?1:0);
+                case 4: return A.max_el_deg<B.max_el_deg?-1:(A.max_el_deg>B.max_el_deg?1:0);
+                case 5: return A.az_tca_deg<B.az_tca_deg?-1:(A.az_tca_deg>B.az_tca_deg?1:0);
                 default: return 0;
             }
         });
         const float rest = ImGui::GetContentRegionAvail().y - 100.0f;
-        if(ImGui::BeginTable("##dop_cand", 8,
+        if(ImGui::BeginTable("##dop_cand", 6,
                ImGuiTableFlags_Borders|ImGuiTableFlags_RowBg|ImGuiTableFlags_ScrollY,
                ImVec2(0, rest > 60 ? rest : 60))){
             ImGui::TableSetupScrollFreeze(0,1);
-            ImGui::TableSetupColumn("#");    ImGui::TableSetupColumn("NAME");
-            ImGui::TableSetupColumn("NORAD");ImGui::TableSetupColumn("RMS");
-            ImGui::TableSetupColumn("x");    ImGui::TableSetupColumn("MaxEl");
-            ImGui::TableSetupColumn("dTCA"); ImGui::TableSetupColumn("Cov");
-            modview::sortable_headers(8, g_sort_col, g_sort_asc, 1);
+            ImGui::TableSetupColumn("#");     ImGui::TableSetupColumn("SATELLITE");
+            ImGui::TableSetupColumn("ID");    ImGui::TableSetupColumn("FIT");
+            ImGui::TableSetupColumn("HEIGHT");ImGui::TableSetupColumn("DIRECTION");
+            modview::sortable_headers(6, g_sort_col, g_sort_asc, 1);
             for(size_t k = 0; k < vis.size(); k++){
                 const DopplerMatch::Cand& c = g_match.cands[vis[k]];
                 char key[24]; snprintf(key, sizeof key, "%d", c.norad);
@@ -287,14 +319,24 @@ float draw_panel(const HistReader& R, float h){
                 char b[32];
                 ImGui::TableSetColumnIndex(1); modview::cell_left(c.name.c_str());
                 ImGui::TableSetColumnIndex(2); snprintf(b,sizeof b,"%d",c.norad); modview::cell(b);
-                ImGui::TableSetColumnIndex(3); snprintf(b,sizeof b,"%.0f",c.rms_hz); modview::cell(b);
-                ImGui::TableSetColumnIndex(4); snprintf(b,sizeof b,"%.2f",c.sep);
-                modview::cell(b, c.sep >= 3.0 || vis[k] == 0 ? ImVec4(0.85f,0.85f,0.85f,1)
-                                                             : ImVec4(0.9f,0.7f,0.35f,1));
-                ImGui::TableSetColumnIndex(5);
+                // FIT: 잔차를 이 관측의 측정잡음과 견준 말. 절대 Hz 는 대역마다 달라
+                // 비교가 안 되므로 숫자 대신 등급으로 준다 (상세창에 원값이 있다).
+                ImGui::TableSetColumnIndex(3);
+                { const double meas = (sel_meas > 0) ? sel_meas : c.rms_hz;
+                  const double r = c.rms_hz / std::max(1.0, meas);
+                  const char*  w = (r < 1.5) ? "close" : (r < 3.0) ? "fair" : "poor";
+                  modview::cell(w, r < 1.5 ? ImVec4(0.55f,0.85f,0.55f,1)
+                                : r < 3.0 ? ImVec4(0.85f,0.85f,0.60f,1)
+                                          : ImVec4(0.75f,0.60f,0.55f,1)); }
+                // 하늘에서 얼마나 높이 떴나 — 90도가 머리 위.
+                ImGui::TableSetColumnIndex(4);
                 snprintf(b,sizeof b,"%.0f\xC2\xB0",c.max_el_deg); modview::cell(b);
-                ImGui::TableSetColumnIndex(6); snprintf(b,sizeof b,"%+.0fs",c.dtca_s); modview::cell(b);
-                ImGui::TableSetColumnIndex(7); snprintf(b,sizeof b,"%.2f",c.cov); modview::cell(b);
+                // 방위를 나침반 글자로. 각도는 상세창에 있다.
+                ImGui::TableSetColumnIndex(5);
+                { static const char* C16[16]={"N","NNE","NE","ENE","E","ESE","SE","SSE",
+                                              "S","SSW","SW","WSW","W","WNW","NW","NNW"};
+                  int q=(int)((c.az_tca_deg+11.25)/22.5)%16; if(q<0)q+=16;
+                  modview::cell(C16[q]); }
             }
             ImGui::EndTable();
         }
@@ -311,15 +353,16 @@ float draw_panel(const HistReader& R, float h){
             modview::detail_begin("dop", 0, 0, 92);
             const ImVec4 vc(0.80f,0.86f,0.95f,1);
             char b[48];
-            snprintf(b,sizeof b,"%d",c.norad);              modview::kv("NORAD",b,vc,false);
-            snprintf(b,sizeof b,"%.2f\xC2\xB0",c.incl_deg); modview::kv("Incl",b,vc);
-            snprintf(b,sizeof b,"%.0f km",c.alt_km);        modview::kv("Alt",b,vc);
-            snprintf(b,sizeof b,"%.4f MHz",c.f0_fit_hz/1e6);modview::kv("f0",b,vc,false);
-            snprintf(b,sizeof b,"%.1f\xC2\xB0",c.az_tca_deg);modview::kv("Az",b,vc);
-            snprintf(b,sizeof b,"%.1f\xC2\xB0",c.el_tca_deg);modview::kv("El",b,vc);
-            snprintf(b,sizeof b,"%.0f km",c.range_tca_km);  modview::kv("Range",b,vc);
-            snprintf(b,sizeof b,"%+.1f %%",c.slope_err_pct);modview::kv("Slope err",b,vc,false);
-            snprintf(b,sizeof b,"%.2f d",c.tle_age_days);   modview::kv("TLE age",b,vc);
+            snprintf(b,sizeof b,"%d",c.norad);               modview::kv("Catalog no",b,vc,false);
+            snprintf(b,sizeof b,"%.0f km",c.alt_km);         modview::kv("Orbit height",b,vc);
+            snprintf(b,sizeof b,"%.1f\xC2\xB0",c.incl_deg);  modview::kv("Orbit tilt",b,vc);
+            snprintf(b,sizeof b,"%.4f MHz",c.f0_fit_hz/1e6); modview::kv("Transmits at",b,vc,false);
+            snprintf(b,sizeof b,"%.0f km",c.range_tca_km);   modview::kv("Distance",b,vc);
+            snprintf(b,sizeof b,"%.0f\xC2\xB0 up, %.0f\xC2\xB0 az",
+                     c.el_tca_deg, c.az_tca_deg);            modview::kv("Position",b,vc);
+            snprintf(b,sizeof b,"%.0f Hz",c.rms_hz);         modview::kv("Curve error",b,vc,false);
+            snprintf(b,sizeof b,"%+.0f s",c.dtca_s);         modview::kv("Timing off by",b,vc);
+            snprintf(b,sizeof b,"%.0f%% of pass",c.cov*100.0); modview::kv("Visible",b,vc);
             modview::detail_end();
         }
     } else if(st.st == DopplerScan::State::Done && g_tracks.empty()){

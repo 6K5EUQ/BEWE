@@ -92,7 +92,7 @@ void run_job(HistReader reader, Doppler::ExtractParams P, DopplerMatch::Params M
         double ref = tracks.front().t_start_utc;
         for(const auto& t : tracks) if(t.score > 0.0f){ ref = t.fit.t_tca_utc; break; }
         std::string why;
-        if(!DopplerMatch::load_catalogue(tle_dir, ref, why)){ err = why; break; }
+        if(!DopplerMatch::load_catalogue(tle_dir, ref, MP.include_starlink, why)){ err = why; break; }
         if(g_cancel){ err = "cancelled"; break; }
 
         set_stage("match");

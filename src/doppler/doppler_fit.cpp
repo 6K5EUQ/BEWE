@@ -266,17 +266,17 @@ float score_candidate(Candidate& c, std::string& reason){
     // 싸고 선택적인 것부터. 2번(swing_ratio)이 주력 — 400 MHz 에서 지상 30m/s=40Hz,
     // 여객기 250m/s=333Hz, LEO=20kHz 라 이 하나가 지상 이동체를 전부 거른다.
     if(F.mono_frac < 0.90f){
-        snprintf(buf,sizeof buf,"not monotonic (%.2f)", F.mono_frac); reason=buf; return c.score=0.0f; }
+        snprintf(buf,sizeof buf,"%s","frequency does not fall steadily"); reason=buf; return c.score=0.0f; }
     if(F.swing_ratio < 0.5f || F.swing_ratio > 1.5f){
-        snprintf(buf,sizeof buf,"swing x%.2f of LEO", F.swing_ratio); reason=buf; return c.score=0.0f; }
+        snprintf(buf,sizeof buf,"frequency shift too %s for a satellite", F.swing_ratio < 1.0 ? "small" : "large"); reason=buf; return c.score=0.0f; }
     if(F.tau_s < 30.0 || F.tau_s > 600.0){
-        snprintf(buf,sizeof buf,"tau %.0f s", F.tau_s); reason=buf; return c.score=0.0f; }
+        snprintf(buf,sizeof buf,"pass too %s", F.tau_s < 30.0 ? "brief" : "long"); reason=buf; return c.score=0.0f; }
     if(F.lin_ratio < 3.0f){
-        snprintf(buf,sizeof buf,"line fits as well (x%.1f)", F.lin_ratio); reason=buf; return c.score=0.0f; }
+        snprintf(buf,sizeof buf,"%s","looks like a slow drift, not a pass"); reason=buf; return c.score=0.0f; }
     if(F.quad_ratio < 1.5f){
-        snprintf(buf,sizeof buf,"quadratic fits as well (x%.1f)", F.quad_ratio); reason=buf; return c.score=0.0f; }
+        snprintf(buf,sizeof buf,"%s","curve shape does not match a pass"); reason=buf; return c.score=0.0f; }
     if(F.antisym > 0.5f){
-        snprintf(buf,sizeof buf,"asymmetric residual (%.2f)", F.antisym); reason=buf; return c.score=0.0f; }
+        snprintf(buf,sizeof buf,"%s","curve is lopsided"); reason=buf; return c.score=0.0f; }
     {
         double med_sig = 0;
         if(!c.pts.empty()){
@@ -287,11 +287,11 @@ float score_candidate(Candidate& c, std::string& reason){
         }
         const double lim = std::max(1.5*c.bin_hz, 2.0*med_sig);
         if(F.rms_resid_hz > lim){
-            snprintf(buf,sizeof buf,"residual %.0f Hz > %.0f", F.rms_resid_hz, lim);
+            snprintf(buf,sizeof buf,"%s","does not follow a satellite curve");
             reason=buf; return c.score=0.0f; }
     }
     if(dur < 60.0 || dur > 1500.0){
-        snprintf(buf,sizeof buf,"duration %.0f s", dur); reason=buf; return c.score=0.0f; }
+        snprintf(buf,sizeof buf,"signal lasted %.0f min - too %s", dur/60.0, dur < 60.0 ? "short" : "long"); reason=buf; return c.score=0.0f; }
     // 8번(스윙 bin 수)은 **거부가 아니라 강등** — 30.72 Msps 같은 저해상도 설정에서
     // 전체 스윙이 12 bin 뿐이라 형상 판별력이 약할 뿐 신호는 진짜일 수 있다.
     // 10번(TCA 내부)도 거부 아님 — HIST 는 매시 회전해 실제 패스가 두 파일로 쪼개진다.

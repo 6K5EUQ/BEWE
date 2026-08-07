@@ -9,6 +9,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cctype>
+#include <iterator>
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -98,7 +100,8 @@ static void archive_snapshot(const std::string& tle_dir){
     if(kept == 0) ::remove(dst.c_str());     // 빈 파일을 남기면 로드가 실패한다
 }
 
-bool load_catalogue(const std::string& tle_dir, double for_utc, std::string& why){
+bool load_catalogue(const std::string& tle_dir, double for_utc, bool want_starlink,
+                    std::string& why){
     why.clear();
     archive_snapshot(tle_dir);
     // 아카이브본 중 녹화 시각에 가장 가까운 에폭을 고른다. 오늘 TLE 를 3주 뒤로
@@ -133,6 +136,26 @@ bool load_catalogue(const std::string& tle_dir, double for_utc, std::string& why
     }
     if(best_v.empty()){ why = "TLE load failed"; return false; }
     g_sats = std::move(best_v);
+    // Starlink 는 **별도 파일**에 있다 (/Update TLEs 가 GROUP=starlink 로 받아 둔 것).
+    // 자동 아카이브는 용량 정책상 Starlink 를 안 담으므로, 포함하려면 여기서 덧붙인다.
+    // Starlink 다운링크는 Ku 밴드(10.7~12.7 GHz)라 이 플랫폼 대역에선 사실상 안 나오고,
+    // 카탈로그의 3분의 2를 차지하며 같은 셸 수십 개가 분 단위로 지나가 분리도를 깎는다
+    // (실측: 제외 시 sep 15.24 -> 57.17). 그래서 기본 제외이고 켤 때만 읽는다.
+    if(want_starlink){
+        std::vector<TleElem> sl;
+        if(tle_load(tle_dir + "/starlink_tle.txt", sl) && !sl.empty())
+            g_sats.insert(g_sats.end(),
+                          std::make_move_iterator(sl.begin()),
+                          std::make_move_iterator(sl.end()));
+    }
+    // tle_load 는 분류를 하지 않는다 (sat_view.cpp:299,340 처럼 부르는 쪽이 채운다).
+    // 아카이브본은 이미 걸러져 있지만 leo_tle.txt 를 고른 경우엔 Starlink 가 섞여 있다.
+    for(TleElem& e : g_sats){
+        std::string up = e.name;
+        for(char& ch : up) ch = (char)toupper((unsigned char)ch);
+        e.is_starlink = (up.find("STARLINK") != std::string::npos);
+        e.is_leo      = (e.semi_major_km - A_E_KM) < 2000.0;
+    }
     g_src  = best_path.substr(best_path.rfind('/')+1);
     g_epoch_med_jd = median_epoch_jd(g_sats);
     return true;
@@ -167,6 +190,7 @@ bool match(const Doppler::Candidate& trk, const Obs& obs, const Params& P, Resul
     out = Result{};
     out.tle_src  = g_src;
     out.n_loaded = (int)g_sats.size();
+    for(const TleElem& e : g_sats) if(e.is_starlink) out.n_starlink++;
     if(g_sats.empty()){ out.error = "catalogue empty"; return false; }
     if(trk.pts.size() < 6){ out.error = "track too short"; return false; }
 
@@ -198,6 +222,7 @@ bool match(const Doppler::Candidate& trk, const Obs& obs, const Params& P, Resul
     w.reserve(g_sats.size());
     for(size_t i = 0; i < g_sats.size(); i++){
         const TleElem& s = g_sats[i];
+        if(s.is_starlink && !P.include_starlink) continue;
         const double n = s.satrec.no_kozai / 60.0;            // rad/min → rad/s
         if(!(n > 0)) continue;
         const double a = s.semi_major_km;
@@ -507,9 +532,9 @@ bool archive_scan(const Doppler::Candidate& trk, const Obs& obs, const Params& P
         fprintf(f, "\"verdict\":{\"level\":\"%s\",\"why\":\"%s\"},",
                 r.verdict==Verdict::Reliable?"reliable":
                 r.verdict==Verdict::Ambiguous?"ambiguous":"unreliable", vw.c_str()); }
-    fprintf(f, "\"search\":{\"el_min_deg\":%.1f,\"win_pad_s\":%.0f,"
+    fprintf(f, "\"search\":{\"starlink\":%d,\"el_min_deg\":%.1f,\"win_pad_s\":%.0f,"
                "\"n_stage\":[%d,%d,%d,%d,%d],\"ms\":%.0f},",
-            P.el_min_deg, P.win_pad_s,
+            P.include_starlink?1:0, P.el_min_deg, P.win_pad_s,
             r.n_stage[0], r.n_stage[1], r.n_stage[2], r.n_stage[3], r.n_stage[4], r.ms);
     fprintf(f, "\"cand\":[");
     const int n = std::min<int>(5, (int)r.cands.size());

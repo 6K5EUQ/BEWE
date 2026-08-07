@@ -18,6 +18,11 @@ struct Obs {
 };
 
 struct Params {
+    // Starlink 포함 여부. **기본 제외** — 다운링크가 Ku 밴드(10.7~12.7 GHz)라
+    // 이 플랫폼이 보는 대역(실측 파일 126~930 MHz)엔 애초에 안 나온다. 게다가 카탈로그의
+    // 67%(15,812 중 10,618)를 차지하면서 같은 셸 수십 개가 분 단위로 지나가 sep 를
+    // 1 근처로 깎는다 — 실측으로 제외 시 sep 15.24 -> 57.17 로 올랐다.
+    bool   include_starlink = false;
     double el_min_deg = 5.0;   // 지형 고려. 보수적으로 잡는 비용은 후보 300개·0.1초인데
                                // 정답을 놓치는 비용은 전부다.
     double win_pad_s  = 120.0;
@@ -65,6 +70,9 @@ struct Result {
     double   tle_age_days = 0;
     std::string tle_src;
     int      n_loaded = 0;
+    // 고른 카탈로그에 들어 있는 Starlink 수. 아카이브본은 저장 시점에 걸러져 0 이다 —
+    // 그 경우 include_starlink 를 켜도 바뀌는 게 없으므로 UI 가 알아야 한다.
+    int      n_starlink = 0;
     std::string error;
 };
 
@@ -73,7 +81,11 @@ using CancelFn   = std::function<bool()>;
 
 // 카탈로그 적재. for_utc 는 **파일 녹화 시각** — 벽시계가 아니다. 가장 가까운
 // 에폭의 아카이브본을 고른다.
-bool load_catalogue(const std::string& tle_dir, double for_utc, std::string& why);
+// want_starlink: Starlink 후보가 필요하면 true. 아카이브본은 저장 시점에 Starlink 를
+// 걸러내므로(용량 정책), 이 경우엔 에폭이 멀더라도 라이브 leo_tle.txt 를 써야 한다.
+// 안 그러면 아카이브가 라이브를 항상 가려서 체크박스가 무효가 된다.
+bool load_catalogue(const std::string& tle_dir, double for_utc, bool want_starlink,
+                    std::string& why);
 double catalogue_age_days(double ref_utc);
 int    catalogue_size();
 const std::string& catalogue_src();
