@@ -31,9 +31,11 @@ ImVec4 conf_col(float c){
 
 
 // ── 코어 STATUS 접이식 섹션 ─────────────────────────────────────────────────
-// AMC 를 켜 둔 채널마다 "지금 무엇으로 잡히는가"를 12클래스 막대로 보여준다.
-// 1위만 숫자로 보여주면 61% 와 95% 가 같은 무게로 읽힌다 — 막대를 다 그려야
-// 운용자가 판정이 아슬아슬한지 확실한지를 한눈에 안다.
+// AMC 를 켜 둔 채널마다 "지금 무엇으로 잡히는가"를 상위 후보 막대로 보여준다.
+// 1위만 숫자로 보여주면 61% 와 95% 가 같은 무게로 읽힌다 — 경쟁 후보까지 그려야
+// 운용자가 판정이 아슬아슬한지 확실한지를 한눈에 안다. 다만 12클래스를 전부
+// 그리면 채널 하나가 패널을 다 먹으므로 상위 AMC_TOP_N 만 남긴다.
+static constexpr int AMC_TOP_N = 5;
 void draw_panel(FFTViewer& v){
     const char* stn = bewe_mod_my_station();
 
@@ -122,7 +124,8 @@ void draw_panel(FFTViewer& v){
                 while(b>=0 && a.p[idx[b]] < pv){ idx[b+1]=idx[b]; b--; }
                 idx[b+1]=k;
             }
-            for(int r=0;r<AMC_NCLASS;r++){
+            const int nshow = (AMC_TOP_N < AMC_NCLASS) ? AMC_TOP_N : AMC_NCLASS;
+            for(int r=0;r<nshow;r++){
                 const int k = idx[r];
                 if(a.p[k] < 0.005f && r>0) continue;   // 0에 가까운 건 줄만 낭비
                 ImGui::Text("  %-6s", amc_class_name(k));
