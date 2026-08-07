@@ -49,7 +49,7 @@
 #include <sys/types.h>
 
 // ── autoscale dB 창 (HOST 실시간 / JOIN 실시간 / HIST 파일 공용) ─────────────
-// **노이즈플로어가 창 바닥 10% 에 오도록** 창을 잡는다. 예전엔 창을 peak 기준으로
+// **노이즈플로어가 창 바닥 25% 에 오도록** 창을 잡는다. 예전엔 창을 peak 기준으로
 // 잡았는데, 그러면 신호가 없는 대역에서 잡을 게 없어 최소 스팬(20 dB)에 걸리고
 // 노이즈가 화면의 4분의 1 높이까지 올라와 워터폴이 통짜 하늘색이 됐다. 반대로
 // 신호가 센 대역(FM 방송)에서는 우연히 창이 넓어져 보기 좋았는데, 그건 공식이
@@ -79,7 +79,7 @@ inline void autoscale_db_window(float noise, float peak, float lo,
     const float noise_top = noise + 2.2f * width;
 
     // 신호가 있느냐 없느냐로 창을 다르게 잡는다. 하나의 공식으로는 둘 다 만족할
-    // 수 없기 때문이다 — 잡음이 바닥 10% 를 차지하게 하면 창이 그만큼 넓어지고,
+    // 수 없기 때문이다 — 잡음이 바닥 25% 를 차지하게 하면 창이 그만큼 넓어지고,
     // 그 넓은 창 안에서 신호는 필연적으로 낮은 곳에 눌린다 (100 MHz 실측:
     // 잡음상단과 신호피크 간격이 34 dB 뿐이라 신호가 화면 32% 에 머물렀다).
     //
@@ -94,8 +94,11 @@ inline void autoscale_db_window(float noise, float peak, float lo,
         out_max = peak + headroom;
         if(out_max - out_min < 20.f) out_max = out_min + 20.f;
     } else {
-        // 신호 없음 — 잡음 전체가 바닥 10% 안에 들어오게 (워터폴 대비 우선).
-        float span = (noise_top - out_min) / 0.10f;
+        // 신호 없음 — 잡음 중심선이 화면 바닥 25% 에 오게 (워터폴 대비 우선).
+        // 기준을 noise_top 이 아니라 noise(하위 15% 분위수) 로 잡는 이유: noise_top 은
+        // width(=noise-lo) 에 2.2 배로 끌려가므로, 같은 상수를 써도 대역마다 눈에 보이는
+        // 잡음 띠의 높이가 제각각이 된다. 운용자가 실제로 보는 건 띠의 중심이다.
+        float span = (noise - out_min) / 0.25f;
         if(span < 20.f) span = 20.f;             // 너무 좁으면 색이 뭉갠다
         out_max = out_min + span;
         if(peak + 3.f > out_max) out_max = peak + 3.f;
