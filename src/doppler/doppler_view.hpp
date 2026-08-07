@@ -29,4 +29,15 @@ void  draw_overlay(ImDrawList* dl, const HistReader& R,
 
 void  on_close();
 
+// ── Central 에서 궤도원소 받아오기 ───────────────────────────────────────
+// 필요한 날짜의 원소가 로컬에 없으면 Central 에 요청한다. 기지마다 space-track
+// 계정을 두면 요청 제한(계정당)을 서로 잡아먹고 인터넷 없는 기지는 아예 불가라,
+// Central 이 하루 한 번 모아 두고 나눠 준다.
+// 파일명 규약: leo_YYYYMMDD.txt — Central 의 db_subdir_for() 가 "tle" 로 라우팅한다.
+std::string needed_tle_name(const HistReader& R);   // 비면 이미 있음/불필요
+// ui.cpp 가 NetClient 를 물려 준다 — doppler 모듈은 net 계층을 모른다.
+void  set_tle_requester(std::function<bool(const std::string&)> fn);
+bool  tle_pending();                                 // 요청해 놓고 기다리는 중
+void  note_tle_arrived(const std::string& filename); // 수신 완료 통보 (ui.cpp 에서)
+
 } // namespace DopplerView

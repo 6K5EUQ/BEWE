@@ -14,6 +14,7 @@
 #include "host_band_plan.hpp"
 #include "host_band_categories.hpp"
 #include "long_waterfall.hpp"
+#include "doppler/doppler_view.hpp"
 #include "hist_check.hpp"
 #include "sig_lib_view.hpp"
 #include "session_args.hpp"
@@ -3666,7 +3667,20 @@ void run_streaming_viewer(){
             size_t n = strlen(fn);
             if(n >= 9 && strcmp(fn + n - 9, ".bewehist") == 0) return "hist";
             if(strstr(fn, "_DE_")) return "audio";
+            // 궤도원소 스냅샷 — Central 의 db_subdir_for() 와 같은 규약.
+            if(strncmp(fn, "leo_", 4) == 0 && n > 4 && strcmp(fn + n - 4, ".txt") == 0) return "tle";
             return "iq";
+        };
+        // leo_*.txt 는 downloads/db 가 아니라 도플러 매칭이 읽는 자리로 바로 내린다.
+        auto db_dest_dir = [](const char* fn, const char* sub) -> std::string {
+            if(strcmp(sub, "tle") == 0){
+                std::string d = BEWEPaths::assets_dir() + "/tle/archive";
+                mkdir((BEWEPaths::assets_dir() + "/tle").c_str(), 0755);
+                mkdir(d.c_str(), 0755);
+                return d;
+            }
+            (void)fn;
+            return BEWEPaths::db_downloads_sub(sub);
         };
 
         // DB 다운로드 .info 수신 (Central → JOIN) — .wav 보다 먼저 도착
@@ -3689,11 +3703,18 @@ void run_streaming_viewer(){
         // DB 다운로드 데이터 수신 → downloads/db/<sub>/ 에 저장 (파일별 독립 핸들 — 동시 다운로드 지원)
         struct ActiveDl { FILE* fp=nullptr; std::string path; uint64_t recv=0; };
         static std::map<std::string, ActiveDl> db_dl_active;
-        cli->on_db_download_data = [&,db_classify](const PktDbDownloadData* d, const uint8_t* data, uint32_t data_len){
+        // 도플러 패널이 Central 에 원소를 요청할 수 있게 배선. doppler 모듈은 net 을
+        // 모르므로 여기서 클로저로 물려 준다.
+        DopplerView::set_tle_requester([cli,&v](const std::string& fn)->bool{
+            if(!cli) return false;
+            bewe_log_push(2,"[TLE] request %s from Central\n", fn.c_str());
+            return cli->cmd_db_download(fn.c_str(), cli->my_name);
+        });
+        cli->on_db_download_data = [&,db_classify,db_dest_dir](const PktDbDownloadData* d, const uint8_t* data, uint32_t data_len){
             std::string key(d->filename);
             if(d->is_first){
                 const char* sub = db_classify(d->filename);
-                std::string dir = BEWEPaths::db_downloads_sub(sub);
+                std::string dir = db_dest_dir(d->filename, sub);
                 mkdir(dir.c_str(), 0755);
                 ActiveDl dl;
                 dl.path = dir + "/" + key;
@@ -3729,6 +3750,7 @@ void run_streaming_viewer(){
                 std::string done_path = it->second.path;
                 db_dl_active.erase(it);
                 bewe_log_push(2,"[DB] Download done: %s\n", done_path.c_str());
+                DopplerView::note_tle_arrived(std::string(d->filename));
                 // 완료 표시
                 {
                     std::lock_guard<std::mutex> lk(v.file_xfer_mtx);

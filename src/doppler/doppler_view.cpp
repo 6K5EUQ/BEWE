@@ -19,6 +19,8 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+#include <sys/stat.h>
+#include <ctime>
 
 namespace DopplerView {
 
@@ -31,6 +33,7 @@ int   g_sort_col  = -1;
 bool  g_sort_asc  = true;
 modview::Selection g_sel;
 DopplerMatch::Params g_mp;      // 검색 옵션 (Starlink 포함 여부 등)
+std::string g_want_tle;         // Central 에 요청해 놓은 파일명 (비면 없음)
 
 std::vector<Doppler::Candidate> g_tracks;
 DopplerMatch::Result            g_match;
@@ -67,6 +70,23 @@ void auto_select(){
 
 } // anon
 
+// 이 녹화가 필요로 하는 원소 파일명. 이미 로컬에 있으면 빈 문자열.
+std::string needed_tle_name(const HistReader& R){
+    if(!R.is_open()) return "";
+    const time_t t = (time_t)R.hdr().start_utc_unix;
+    struct tm g{}; gmtime_r(&t, &g);
+    char nm[32];
+    snprintf(nm, sizeof nm, "leo_%04d%02d%02d.txt", g.tm_year+1900, g.tm_mon+1, g.tm_mday);
+    const std::string p = tle_dir() + "/archive/" + nm;
+    struct stat st{};
+    if(stat(p.c_str(), &st) == 0 && st.st_size > 0) return "";
+    return nm;
+}
+bool tle_pending(){ return !g_want_tle.empty(); }
+void note_tle_arrived(const std::string& filename){
+    if(!g_want_tle.empty() && filename == g_want_tle) g_want_tle.clear();
+}
+
 bool panel_open(){ return g_open; }
 
 bool toolbar_button(const HistReader& R){
@@ -90,6 +110,19 @@ bool toolbar_button(const HistReader& R){
     return hit && ok;
 }
 
+// Central 요청 훅 — ui.cpp 가 NetClient 를 물려 준다 (doppler 는 net 을 모른다).
+static std::function<bool(const std::string&)> g_req_tle;
+void set_tle_requester(std::function<bool(const std::string&)> fn){ g_req_tle = std::move(fn); }
+
+// 필요한 원소가 로컬에 없으면 Central 에 한 번 요청한다. true = 요청함(대기).
+static bool ensure_tle(const HistReader& R){
+    const std::string nm = needed_tle_name(R);
+    if(nm.empty()){ g_want_tle.clear(); return false; }
+    if(g_want_tle == nm) return true;              // 이미 대기 중
+    if(g_req_tle && g_req_tle(nm)){ g_want_tle = nm; return true; }
+    return false;
+}
+
 void toggle(const HistReader& R, const Doppler::ExtractParams& P){
     if(g_open){ g_open = false; return; }
     g_open = true;
@@ -98,6 +131,10 @@ void toggle(const HistReader& R, const Doppler::ExtractParams& P){
     if(!R.is_open() || !R.has_station_pos()) return;
     // LIVE 는 계속 자라서 선해제도 안 되고 행수가 스캔 중에 바뀐다 — 자동 스캔 대상 아님.
     if(R.is_live()) return;
+    // 원소가 없으면 먼저 받아 온다. 도착하면 draw_panel 이 자동으로 스캔을 건다 —
+    // 낡은 원소로 돌려 봐야 순위가 틀리므로(실측: 38일 낡으면 6건 중 5건 오답 1위)
+    // 기다리는 편이 낫다.
+    if(ensure_tle(R)) return;
     DopplerScan::start_full(R, P, g_mp, tle_dir());
 }
 
@@ -121,6 +158,15 @@ float draw_panel(const HistReader& R, float h){
     ImGui::PopStyleColor();
 
     const DopplerScan::Status st = DopplerScan::status();
+
+    // 원소가 도착했으면(파일이 생겼으면) 그때 스캔을 건다.
+    if(!g_want_tle.empty() && needed_tle_name(R).empty()){
+        g_want_tle.clear();
+        if(!DopplerScan::busy() && !R.is_live()){
+            Doppler::ExtractParams EP;
+            DopplerScan::start_full(R, EP, g_mp, tle_dir());
+        }
+    }
 
     // ── 헤더 (modview::header_bar 의 겉모습만 재현) ──────────────────────
     // header_bar 자체는 못 쓴다 — 시그니처가 모듈 프레임워크(bewe_mod_recv/hist_mode)에
@@ -203,6 +249,8 @@ float draw_panel(const HistReader& R, float h){
     }
     if(st.st == DopplerScan::State::Failed && !st.err.empty())
         ImGui::TextColored(ImVec4(0.95f,0.4f,0.35f,1), "%s", st.err.c_str());
+    if(!g_want_tle.empty())
+        ImGui::TextDisabled("Getting orbit data for this date from Central...");
     if(R.is_live())
         ImGui::TextDisabled("Recording still running - box a signal with Ctrl+drag, then REFINE");
 
