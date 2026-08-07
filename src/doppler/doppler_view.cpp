@@ -36,6 +36,8 @@ modview::Selection g_sel;
 DopplerMatch::Params g_mp;      // 검색 옵션 (Starlink 포함 여부 등)
 std::string g_want_tle;         // Central 에 요청해 놓은 파일명 (비면 없음)
 double g_want_since = 0.0;      // 그 요청을 건 시각 (타임아웃 판정용)
+bool   g_pending_scan = false;  // 열렸으니 스캔해야 한다 — 실행은 draw_panel 이 한다
+bool   g_auto_selected = false; // 이 결과에서 자동선택을 이미 했나 (해제 유지용)
 
 // 분석 결과는 파일에 딸린 것이다. 다른 녹화를 열면 남의 트랙을 그리게 되므로 버리고,
 // 같은 녹화로 돌아오면 다시 스캔하지 않는다 (전 파일 스캔은 실측 최대 3.8초).
@@ -96,8 +98,12 @@ void refresh_from_worker(){
 // 첫 위성 트랙을 자동 선택. 위성이 하나도 없으면 아무것도 고르지 않는다 —
 // 표가 위성만 싣는데 거부 트랙을 골라 두면 표에 없는 행이 선택된 채로 아래
 // 요약이 그려진다 ("Show non-satellites" 를 켜면 그때 손으로 고를 수 있다).
+//
+// **결과 한 벌에 딱 한 번만 고른다.** 매 프레임 돌면 사용자가 행을 다시 눌러
+// 선택을 푼 순간 곧바로 되살아나 해제가 불가능해진다.
 void auto_select(){
-    if(g_sel_track >= 0 || g_tracks.empty()) return;
+    if(g_auto_selected || g_sel_track >= 0 || g_tracks.empty()) return;
+    g_auto_selected = true;
     for(size_t i = 0; i < g_tracks.size(); i++)
         if(g_tracks[i].score > 0.0f){ g_sel_track = (int)i; return; }
     if(g_show_rejected) g_sel_track = 0;
@@ -138,17 +144,11 @@ bool panel_open(){ return g_open; }
 bool toolbar_button(const HistReader& R){
     // 좌표계 없는 파일(v2 헤더/미설정 기지)은 look-angle 을 못 구한다.
     const bool ok = R.is_open() && R.has_station_pos();
-    const DopplerScan::Status st = DopplerScan::status();
 
-    char label[32];
-    if(!g_want_tle.empty()){
-        snprintf(label, sizeof label, "ORBIT DATA...");
-    } else if(st.st == DopplerScan::State::Running){
-        if(st.stage[0]) snprintf(label, sizeof label, "%s %d%%", st.stage, (int)(st.progress*100));
-        else            snprintf(label, sizeof label, "SCAN %d%%", (int)(st.progress*100));
-    } else {
-        snprintf(label, sizeof label, "SAT SCAN");
-    }
+    // 라벨은 **항상 "SAT SCAN"** 이다. 진행 상태를 여기 싣지 않는다 — 버튼이
+    // 스캔 단계마다 이름이 바뀌면(CALIB/MATCH…) 딴 버튼처럼 보이고 폭도 흔들린다.
+    // 진행률은 패널 안 진행 바가 이미 전담한다.
+    const char* label = "SAT SCAN";
 
     if(!ok) ImGui::BeginDisabled();
     if(g_open) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f,0.42f,0.22f,1.0f));
@@ -192,6 +192,8 @@ static void wipe(){
     g_have_match = false; g_match_of = 0xFFFFFFFFu;
     g_tracks.clear(); g_top_name.clear();
     g_want_tle.clear(); g_want_since = 0.0;
+    g_pending_scan = false;
+    g_auto_selected = false;
 }
 
 // 다른 녹화가 열렸으면 이전 결과를 버린다. 같은 녹화면 그대로 둔다 — 껐다 다시 켜도
@@ -214,10 +216,11 @@ void toggle(const HistReader& R, const Doppler::ExtractParams& P){
     claim(R);
     // LIVE 는 계속 자라서 선해제도 안 되고 행수가 스캔 중에 바뀐다 — 자동 스캔 대상 아님.
     if(R.is_live()) return;
-    // 원소부터 확보하고 스캔한다. 도착하면 draw_panel 이 이어서 건다 — 낡은 원소로
-    // 돌려 봐야 순위가 틀린다 (실측: 38일 낡으면 6건 중 5건 오답 1위).
-    if(ensure_tle(R)) return;
-    DopplerScan::start_full(R, P, g_mp, tle_dir());
+    // 원소부터 확보한다. 요청을 보냈으면 도착을 기다렸다 돌고(낡은 원소로 돌리면
+    // 순위가 틀린다 — 실측 38일 낡음에서 6건 중 5건 오답 1위), 보낼 수단이 없으면
+    // 있는 원소로 바로 돈다. 어느 쪽이든 **스캔은 draw_panel 이 반드시 건다.**
+    ensure_tle(R);
+    g_pending_scan = (g_want_tle.empty());
 }
 
 void start_refine(const HistReader& R, uint32_t row_lo, uint32_t row_hi,
@@ -246,10 +249,17 @@ float draw_panel(const HistReader& R, float h){
     // 나이는 아래 바에 뜬다.
     if(!g_want_tle.empty() && (needed_tle_name(R).empty() || tle_wait_expired())){
         g_want_tle.clear(); g_want_since = 0.0;
-        if(!DopplerScan::busy() && !R.is_live()){
-            Doppler::ExtractParams EP;
-            DopplerScan::start_full(R, EP, g_mp, tle_dir());
-        }
+        g_pending_scan = true;
+    }
+    // 열자마자 한 번은 반드시 돈다. 예전에는 toggle() 이 스캔을 걸지 **못한** 경우
+    // (요청을 못 보냈다 = g_want_tle 이 빈 채로 남았다) 위 블록의 조건에도 안 걸려
+    // 아무도 스캔을 시작하지 않았고, 사용자가 RESCAN 을 손으로 눌러야 했다.
+    // 시작 책임을 여기 한 곳으로 모은다 — toggle 은 의사만 세우고 실행은 패널이 한다.
+    if(g_pending_scan && !DopplerScan::busy() && !R.is_live()){
+        g_pending_scan = false;
+        g_auto_selected = false;
+        Doppler::ExtractParams EP;
+        DopplerScan::start_full(R, EP, g_mp, tle_dir());
     }
 
     // ── 헤더 (modview::header_bar 의 겉모습만 재현) ──────────────────────
@@ -281,10 +291,14 @@ float draw_panel(const HistReader& R, float h){
             // 걸리는데, 대부분의 녹화에는 버스트 위성이 없다.
             const float bb = ImGui::CalcTextSize("BURST").x + pad;
             ImGui::SameLine(availW - bw - bb - rmargin - 8.0f);
-            if(ImGui::Button("BURST"))
+            // 새 결과가 나오면 자동선택을 한 번 다시 허용한다.
+            if(ImGui::Button("BURST")){
+                g_auto_selected = false;
                 DopplerScan::start_burst(R, g_mp, tle_dir());
+            }
             ImGui::SameLine(availW - bw - rmargin);
             if(ImGui::Button(rl)){
+                g_auto_selected = false;
                 Doppler::ExtractParams P;
                 DopplerScan::start_full(R, P, g_mp, tle_dir());
             }
@@ -388,8 +402,16 @@ float draw_panel(const HistReader& R, float h){
                 ImGui::TableNextRow();
                 // 번호는 표에 보이는 순번이다 — 오버레이 박스 라벨도 같은 번호를 쓴다.
                 char idx[8]; snprintf(idx, sizeof idx, "%zu", k+1);
+                // 같은 행을 다시 누르면 선택을 푼다 — 이미지의 강조(굵은 테두리 +
+                // 관측/적합 곡선)를 끄는 수단이 이것뿐이다.
                 if(modview::row_col0(i, i == g_sel_track, idx)){
-                    g_sel_track = i; g_match_of = 0xFFFFFFFFu;
+                    if(i == g_sel_track){
+                        g_sel_track = -1; g_sel.clear();
+                        g_have_match = false;
+                    } else {
+                        g_sel_track = i;
+                    }
+                    g_match_of = 0xFFFFFFFFu;
                 }
                 ImGui::TableSetColumnIndex(1); modview::cell(hhmmss(c.t_start_utc).c_str());
                 char b[32];
@@ -581,10 +603,16 @@ void draw_overlay(ImDrawList* dl, const HistReader& R,
         if(ylo - yhi < 6.0f){ const float m=(yhi+ylo)*0.5f; yhi=m-3.0f; ylo=m+3.0f; }
 
         const bool sel = ((int)i == g_sel_track);
-        dl->AddRectFilled(ImVec2(x0,yhi), ImVec2(x1,ylo),
-                          sel ? IM_COL32(255,200,60,46) : IM_COL32(255,200,60,26));
-        dl->AddRect(ImVec2(x0,yhi), ImVec2(x1,ylo),
-                    IM_COL32(255,200,60, sel ? 255 : 190), 0.f, 0, sel ? 2.0f : 1.4f);
+        // 위성은 노랑, 위성 아님은 회색. 같은 노랑으로 그리면 "Show non-satellites"
+        // 를 켠 순간 지상 신호가 위성처럼 보인다. (빨강은 Ctrl+우드래그 측정영역이
+        // 이미 쓰고 있어 못 쓴다 — 사용자가 친 박스와 헷갈리면 안 된다.)
+        const bool is_sat = (b.score > 0.0f);
+        const ImU32 fill = is_sat ? (sel ? IM_COL32(255,200,60,46) : IM_COL32(255,200,60,26))
+                                  : (sel ? IM_COL32(170,175,185,42) : IM_COL32(170,175,185,22));
+        const ImU32 line = is_sat ? IM_COL32(255,200,60, sel ? 255 : 190)
+                                  : IM_COL32(170,175,185, sel ? 235 : 150);
+        dl->AddRectFilled(ImVec2(x0,yhi), ImVec2(x1,ylo), fill);
+        dl->AddRect(ImVec2(x0,yhi), ImVec2(x1,ylo), line, 0.f, 0, sel ? 2.0f : 1.4f);
 
         // 라벨: 번호 + 1위 위성 이름. 번호는 **표에 보이는 순번**이어야 한다 — 표가
         // 위성만 싣는데 여기서 전체 인덱스를 쓰면 둘이 어긋나 서로 못 짚는다.
@@ -615,18 +643,25 @@ void draw_overlay(ImDrawList* dl, const HistReader& R,
         lab_rects.push_back(ImVec4(tx-3, ty-2, tx+ts.x+3, ty+ts.y+2));
         dl->AddRectFilled(ImVec2(tx-3, ty-2), ImVec2(tx+ts.x+3, ty+ts.y+2),
                           IM_COL32(0,0,0,180));
-        dl->AddText(ImVec2(tx,ty), IM_COL32(255,225,140,255), lab);
+        dl->AddText(ImVec2(tx,ty), is_sat ? IM_COL32(255,225,140,255)
+                                          : IM_COL32(195,200,210,255), lab);
     };
 
+    // 표에 보이는 트랙은 이미지에도 보여야 한다 — 둘이 어긋나면 "no" 행을 골라도
+    // 어디가 잡힌 건지 알 수 없다. 그래서 판정이 아니라 **표와 같은 가시성 규칙**
+    // (`g_show_rejected || score>0`)을 쓴다. 체크박스를 끄면 박스도 같이 사라진다.
+    auto visible = [&](size_t i){
+        return (g_show_rejected || g_tracks[i].score > 0.0f) && !g_tracks[i].pts.empty();
+    };
     for(size_t i = 0; i < g_tracks.size(); i++)
-        if(g_tracks[i].score > 0.0f && !g_tracks[i].pts.empty() && (int)i != g_sel_track)
+        if(visible(i) && (int)i != g_sel_track)
             draw_one(i);
-    if(g_sel_track >= 0 && g_sel_track < (int)g_tracks.size()
-       && g_tracks[g_sel_track].score > 0.0f && !g_tracks[g_sel_track].pts.empty())
+    if(g_sel_track >= 0 && g_sel_track < (int)g_tracks.size() && visible((size_t)g_sel_track))
         draw_one((size_t)g_sel_track);
 
     // ── 선택 트랙의 관측 트랙 + 적합 곡선 ────────────────────────────────
     if(g_sel_track < 0 || g_sel_track >= (int)g_tracks.size()) return;
+    if(!visible((size_t)g_sel_track)) return;
     const Doppler::Candidate& c = g_tracks[g_sel_track];
 
     // 관측 트랙 (빨강). f -> 선형 인덱스는 HistReader 의 역변환을 그대로 쓴다.

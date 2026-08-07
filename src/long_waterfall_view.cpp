@@ -566,6 +566,9 @@ void draw_modal(FFTViewer& v, NetClient* cli){
 
         unsigned fft_disp = h.fft_input_size > 0 ? h.fft_input_size : h.fft_size;
         ImGui::Dummy(ImVec2(0, 4));
+        // 정보 블록의 좌상단. 버튼은 이 y 를 기준으로 **창 우상단**에 붙는다 —
+        // 텍스트 줄 수와 무관해야 하므로 여기서 잡아 둔다.
+        const ImVec2 info_top = ImGui::GetCursorScreenPos();
         ImGui::Indent(10.0f);
         ImGui::Text("CF : %.3f MHz   SR : %.2f MSPS   FFT : %u   Duration : %s   Size : %.1f MB",
             h.center_freq_hz / 1e6,
@@ -582,17 +585,37 @@ void draw_modal(FFTViewer& v, NetClient* cli){
         ImGui::Text("Stop  : %s", fmt_local_time(stop_utc, off_h).c_str());
         ImGui::Text("Color : %.1f / %.1f dB",
             g_file_db_min, g_file_db_max);
-        {   // 위성 스캔 토글 — 정보줄 우측 정렬. Meas 영역이 있으면 REFINE 도 같이.
-            // 폭은 가장 긴 라벨("ORBIT DATA..." = 원소 수신 대기) 기준 — 짧은 걸로
-            // 잡으면 스캔이 시작될 때 버튼이 늘어나며 우측으로 삐져나간다.
-            const float bw = ImGui::CalcTextSize("ORBIT DATA...").x
-                           + ImGui::GetStyle().FramePadding.x*2;
-            float rx = view_w - bw - 22.0f;
+        {   // ── 우상단 조작 버튼 (df_view.cpp 의 SETUP 오버레이와 같은 방식) ──
+            // SameLine 을 쓰지 않는다: 그건 마지막 텍스트 줄(Color:)의 baseline 에
+            // 붙어서 정보 줄 수가 바뀌면 버튼이 같이 내려가고, 우상단이 아니라
+            // "글줄 오른쪽"에 어정쩡하게 놓인다.
+            //
+            // 기준은 창 오른쪽 끝이고, 오른쪽에서 왼쪽으로 쌓는다 — 새 버튼이
+            // 생기면 기존 것이 왼쪽으로 밀릴 뿐 우상단 여백은 그대로다.
+            const ImVec2 save = ImGui::GetCursorScreenPos();
+            const float PAD = 10.0f, GAPB = 6.0f;
+            const float right_edge = info_top.x + view_w;
+            const float by = info_top.y;
+            float bx = right_edge - PAD;
+
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.f);
+            // 1) SAT SCAN — 가장 오른쪽 고정
+            {
+                const float bw = ImGui::CalcTextSize("SAT SCAN").x
+                               + ImGui::GetStyle().FramePadding.x*2;
+                bx -= bw;
+                ImGui::SetCursorScreenPos(ImVec2(bx, by));
+                if(DopplerView::toolbar_button(g_reader)){
+                    Doppler::ExtractParams P;
+                    DopplerView::toggle(g_reader, P);
+                }
+            }
+            // 2) REFINE — Meas 영역이 있을 때만. SAT SCAN 왼쪽으로 밀려 들어간다.
             if(g_meas.active){
                 const float rw = ImGui::CalcTextSize("REFINE").x
                                + ImGui::GetStyle().FramePadding.x*2;
-                rx -= rw + 8.0f;
-                ImGui::SameLine(rx);
+                bx -= rw + GAPB;
+                ImGui::SetCursorScreenPos(ImVec2(bx, by));
                 if(ImGui::Button("REFINE")){
                     const uint32_t r0 = (uint32_t)std::max(0.0, std::min(g_meas.t0, g_meas.t1));
                     const uint32_t r1 = (uint32_t)std::min((double)g_reader.num_rows(),
@@ -603,14 +626,10 @@ void draw_modal(FFTViewer& v, NetClient* cli){
                     Doppler::ExtractParams P;
                     DopplerView::start_refine(g_reader, r0, r1, l0, l1, P);
                 }
-                ImGui::SameLine(0, 8);
-            } else {
-                ImGui::SameLine(rx);
             }
-            if(DopplerView::toolbar_button(g_reader)){
-                Doppler::ExtractParams P;
-                DopplerView::toggle(g_reader, P);
-            }
+            ImGui::PopStyleVar();
+            // 텍스트 흐름을 원래대로 돌려 놓는다 — 아래 Separator/이미지가 이어진다.
+            ImGui::SetCursorScreenPos(save);
         }
         ImGui::Unindent(10.0f);
         ImGui::Dummy(ImVec2(0, 2));
