@@ -277,14 +277,23 @@ float score_candidate(Candidate& c, std::string& reason, Sensitivity sens){
         snprintf(buf,sizeof buf,"%s","frequency does not fall steadily"); reason=buf; return c.score=0.0f; }
     if(F.swing_ratio < swing_lo || F.swing_ratio > 1.5f){
         snprintf(buf,sizeof buf,"frequency shift too %s for a satellite", F.swing_ratio < 1.0 ? "small" : "large"); reason=buf; return c.score=0.0f; }
-    if(F.tau_s < 30.0 || F.tau_s > 600.0){
-        snprintf(buf,sizeof buf,"pass too %s", F.tau_s < 30.0 ? "brief" : "long"); reason=buf; return c.score=0.0f; }
-    if(F.lin_ratio < 3.0f){
-        snprintf(buf,sizeof buf,"%s","looks like a slow drift, not a pass"); reason=buf; return c.score=0.0f; }
-    if(F.quad_ratio < 1.5f){
-        snprintf(buf,sizeof buf,"%s","curve shape does not match a pass"); reason=buf; return c.score=0.0f; }
-    if(F.antisym > 0.5f){
-        snprintf(buf,sizeof buf,"%s","curve is lopsided"); reason=buf; return c.score=0.0f; }
+    // burst 트랙은 점이 min_points(기본 12)개뿐이고 최대 gap(60s)로 듬성듬성 찍혀
+    // S커브 곱합이 과소구속된다 — tau_s/lin_ratio/quad_ratio/antisym 은 촘촘한
+    // 연속 패스를 가정한 곡선모양 지표라, 점이 성기면 진짜 위성도 노이즈만큼
+    // 그럴듯한 짧고 뾰족한 가짜 곡선에 맞아버려 랜덤하게 거부될 수 있다(실측:
+    // 3m38s 구간·8점대 트랙이 tau_s<30 로 거부됨). 지상 이동체 배제는 swing_ratio
+    // 하나로 충분하므로(자릿수가 갈린다 — 위 주석) burst 는 곡선모양 게이트를
+    // 건너뛰고 mono_frac + swing_ratio 만 본다.
+    if(!c.is_burst){
+        if(F.tau_s < 30.0 || F.tau_s > 600.0){
+            snprintf(buf,sizeof buf,"pass too %s", F.tau_s < 30.0 ? "brief" : "long"); reason=buf; return c.score=0.0f; }
+        if(F.lin_ratio < 3.0f){
+            snprintf(buf,sizeof buf,"%s","looks like a slow drift, not a pass"); reason=buf; return c.score=0.0f; }
+        if(F.quad_ratio < 1.5f){
+            snprintf(buf,sizeof buf,"%s","curve shape does not match a pass"); reason=buf; return c.score=0.0f; }
+        if(F.antisym > 0.5f){
+            snprintf(buf,sizeof buf,"%s","curve is lopsided"); reason=buf; return c.score=0.0f; }
+    }
     {
         double med_sig = 0;
         if(!c.pts.empty()){
@@ -306,13 +315,15 @@ float score_candidate(Candidate& c, std::string& reason, Sensitivity sens){
 
     float s = 1.0f;
     s *= soft(F.mono_frac,   0.88, 0.97);
-    s *= soft(F.lin_ratio,   3.0,  10.0);
-    s *= soft(F.quad_ratio,  1.5,  4.0);
-    // 버스트는 시간축이 비대칭이라 antisym 짝이 안 생길 수 있다. 그때 antisym 은 0 이고
-    // soft(1-0) = 만점이 되는데, 재지 못한 것이 최고점을 받으면 안 된다. 짝이 없으면
-    // 중립 감점으로 대신한다. (연속 트랙은 짝이 늘 충분해 이 분기를 안 탄다.)
-    if(c.is_burst && F.antisym_pairs < 3) s *= 0.7f;
-    else                                  s *= soft(1.0-F.antisym, 0.5, 0.9);
+    // burst 는 곡선모양 지표(lin_ratio/quad_ratio/antisym) 를 채점에도 안 쓴다 —
+    // 위 하드게이트와 같은 이유(점이 성기면 과소구속돼 신뢰 못 함).
+    if(!c.is_burst){
+        s *= soft(F.lin_ratio,   3.0,  10.0);
+        s *= soft(F.quad_ratio,  1.5,  4.0);
+        // 버스트는 시간축이 비대칭이라 antisym 짝이 안 생길 수 있다. 그때 antisym 은
+        // 0 이고 soft(1-0) = 만점이 되는데, 재지 못한 것이 최고점을 받으면 안 된다.
+        s *= soft(1.0-F.antisym, 0.5, 0.9);
+    }
     // occupancy 는 duty cycle 이다 — 신호 특성이지 품질이 아니다. 버스트(실측 0.08)를
     // 여기서 재면 soft 램프 하한 0.4 에 걸려 score 가 통째로 0 이 된다. 곡선을 그리는
     // 데 필요한 건 비율이 아니라 점 개수이고, 그건 추출의 min_points 가 보증한다.
