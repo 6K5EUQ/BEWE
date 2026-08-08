@@ -22,7 +22,14 @@
 #   central-tle-sync.sh 2026-05-16 2026-07-29   구간 소급
 #
 # cron:
-#   23 4 * * *  /home/central/BEWE/scripts/central-tle-sync.sh >> /var/log/bewe-tle.log 2>&1
+#   10 9 * * *  /home/central/BEWE/scripts/central-tle-sync.sh >> /var/log/bewe-tle.log 2>&1
+#   KST 09:10 인 이유 — UTC 자정(=KST 09:00) 직후에 돌아야 한다. JOIN 이 요청하는
+#   파일명은 녹화의 **UTC 날짜**(needed_tle_name(), start_utc_unix 기준)라, 그보다
+#   일찍(예 04:23 KST = UTC 전날 19:23) 돌면 UTC 날짜가 아직 하루 안 넘어가 있어
+#   파일명이 통째로 하루 밀린다 — KST 당일 녹화를 스캔할 때마다 그 날짜 파일이
+#   없어 Central 무응답 20초를 매번 태우고 로컬 최신(전날)으로 폴백했다(v15.27.1
+#   이전). UTC 자정 이후로 옮기면 그날 KST 09:00~다음날 08:59 녹화가 전부 그 시각
+#   이후 생긴 파일과 UTC 날짜가 맞아떨어진다.
 set -u
 
 DB="${BEWE_DB:-$HOME/BEWE/DataBase}"
@@ -70,12 +77,13 @@ fetch_today(){
        'https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle' \
        -o "$TMP/raw"; then log "celestrak fetch failed"; return 1; fi
   # gp.php 는 2줄 앞에 이름 줄이 오는 3줄 포맷 (0 접두어 없음) — 그대로 먹인다.
+  # med(중앙값 epoch) 는 filter_dedup 의 "위성별 가장 가까운 TLE 고르기" 기준으로만
+  # 쓴다. 파일명은 이걸로 역산하지 않는다 — Celestrak 위성별 epoch 가 제각각이라
+  # 중앙값이 fetch 시각보다 보통 하루 정도 뒤처지고, JOIN 은 fetch 날짜(=녹화 UTC
+  # 날짜와 맞아야 할 값)를 기대하므로 그 하루 밀림이 그대로 "파일 없음"이 됐었다
+  # (v15.27.1 이전 사고 — GETTING ORBIT DATA 가 항상 20초 타임아웃).
   local med; med="$(awk 'NR%3==2{print substr($0,19,14)+0}' "$TMP/raw" | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')"
-  local date; date="$(python3 -c "
-import datetime,sys
-v=float(sys.argv[1]); yy=int(v//1000); ddd=v-yy*1000
-y=1900+yy if yy>=57 else 2000+yy
-print((datetime.date(y,1,1)+datetime.timedelta(days=ddd-1)).strftime('%Y%m%d'))" "$med")"
+  local date; date="$(date -u +%Y%m%d)"
   # leo_ : LEO 페이로드, Starlink 제외 — 도플러 매칭 기본값 (작고 분리도가 좋다)
   filter_dedup "$TMP/raw" "$TMP/f" "$med" 1 1
   install_out "$TMP/f" "$date" leo
