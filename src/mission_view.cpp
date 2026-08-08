@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <set>
@@ -378,6 +379,9 @@ static double       g_dl_speed_bps = 0.0;   // EWMA bytes/sec
 // UI 스레드의 poll_dl_speed() 에서 수행한다.
 static std::string  g_dl_open_after_path;
 static std::atomic<bool> g_dl_open_ready{false};
+// 현재 다운로드 중일 때 더 누른 파일 — 대기열. g_dl_mtx 로 보호.
+// 완료되면 poll_dl_speed() (UI 스레드) 가 하나씩 꺼내 이어서 시작한다.
+static std::deque<std::pair<CentralFileRow, bool /*open_when_done*/>> g_dl_queue;
 
 // ── 로컬 파일시스템 변경 세대 — LOCAL by[] 스캔 / already_dl 캐시 무효화용 ──
 // 다운로드 완료 콜백(on_mission_file_dl_data_recv)은 NetClient recv 스레드에서
@@ -949,9 +953,26 @@ static void process_delete_key(NetClient* cli){
         g_sel_kind = SelKind::NONE;
 }
 
-// 다운로드 진행률 폴링 (UI 스레드 — main).
-static void poll_dl_speed(){
-    if(!g_dl_active) return;
+static bool start_download(NetClient* cli, const CentralFileRow& row, bool open_when_done);
+
+// 다운로드 진행률 폴링 + 대기열 이어서 시작 (UI 스레드 — main).
+static void poll_dl_speed(NetClient* cli){
+    if(!g_dl_active){
+        // 방금 끝났고 대기열이 있으면 다음 파일을 이어서 시작.
+        // start_download() 가 자체적으로 g_dl_mtx 를 잠그므로 여기서는 먼저 뺀 뒤 잠금 밖에서 호출.
+        std::pair<CentralFileRow, bool> next;
+        bool have_next = false;
+        {
+            std::lock_guard<std::mutex> lk(g_dl_mtx);
+            if(!g_dl_queue.empty()){
+                next = g_dl_queue.front();
+                g_dl_queue.pop_front();
+                have_next = true;
+            }
+        }
+        if(have_next) start_download(cli, next.first, next.second);
+        return;
+    }
     double now = ImGui::GetTime();
     double dt = now - g_dl_last_sample_t;
     if(dt < 0.2) return;
@@ -1059,8 +1080,26 @@ static bool start_download(NetClient* cli, const CentralFileRow& row,
     if(!cli) return false;
     std::lock_guard<std::mutex> lk(g_dl_mtx);
     if(g_dl_active){
-        MissionView::show_toast("Download already in progress");
-        return false;
+        // 이미 이 파일이 진행중/대기열에 있으면 중복 추가하지 않는다.
+        if(g_dl_filename == row.filename){
+            MissionView::show_toast("Already downloading");
+            return false;
+        }
+        for(auto& q : g_dl_queue){
+            if(strncmp(q.first.filename, row.filename, sizeof(q.first.filename)) == 0
+               && strncmp(q.first.station, row.station, sizeof(q.first.station)) == 0
+               && q.first.year == row.year && q.first.subdir == row.subdir
+               && strncmp(q.first.code, row.code, sizeof(q.first.code)) == 0){
+                MissionView::show_toast("Already queued");
+                return false;
+            }
+        }
+        g_dl_queue.emplace_back(row, open_when_done);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "Queued (waiting): %s [%d in queue]",
+                 row.filename, (int)g_dl_queue.size());
+        MissionView::show_toast(msg);
+        return true;
     }
     // 미션별 다운로드 폴더 (station/year/code/{iq,audio,hist}) 에 저장 — Central archive 와 동일 레이아웃.
     const char* sub_name = (row.subdir == MFS_IQ)    ? "iq"
@@ -1539,7 +1578,7 @@ static void draw_central_list(FFTViewer& v, NetClient* cli, uint8_t subdir){
         ImGui::TextDisabled("  (no files in Central archive)");
         return;
     }
-    poll_dl_speed();
+    poll_dl_speed(cli);
     // row별 (already_dl, actual_path) 캐시 — 매 프레임 access()×1-2 + 경로 string
     // 빌드 방지 (~1초 TTL). 로컬 파일 변경 시 g_local_fs_gen 증가로 무효화.
     // map 재빌드는 렌더 스레드에서만 수행.
@@ -1602,6 +1641,7 @@ static void draw_central_list(FFTViewer& v, NetClient* cli, uint8_t subdir){
             dl_cache.emplace(ckey, std::make_pair(already_dl, actual_path));
         }
         bool downloading = false;
+        bool queued = false;
         double frac = 0.0;
         uint64_t dl_total_now = 0, dl_written_now = 0;
         {
@@ -1611,6 +1651,16 @@ static void draw_central_list(FFTViewer& v, NetClient* cli, uint8_t subdir){
                 dl_total_now = g_dl_total;
                 dl_written_now = g_dl_written;
                 if(g_dl_total > 0) frac = (double)g_dl_written / (double)g_dl_total;
+            } else {
+                for(auto& q : g_dl_queue){
+                    if(strncmp(q.first.filename, r.filename, sizeof(q.first.filename)) == 0
+                       && strncmp(q.first.station, r.station, sizeof(q.first.station)) == 0
+                       && q.first.year == r.year && q.first.subdir == r.subdir
+                       && strncmp(q.first.code, r.code, sizeof(q.first.code)) == 0){
+                        queued = true;
+                        break;
+                    }
+                }
             }
         }
 
@@ -1691,9 +1741,9 @@ static void draw_central_list(FFTViewer& v, NetClient* cli, uint8_t subdir){
         central_context_menu(cli, r);
 
         // 우측 표시: 다운로드 중이면 진행률+속도, 아니면 [operator] + 크기 두 컬럼.
-        ImVec4 info_col = downloading
-            ? ImVec4(0.4f, 0.85f, 1.0f, 1.f)
-            : ImVec4(0.6f, 0.6f, 0.6f, 1.f);
+        ImVec4 info_col = downloading ? ImVec4(0.4f, 0.85f, 1.0f, 1.f)
+                        : queued     ? ImVec4(0.85f, 0.7f, 0.3f, 1.f)
+                                     : ImVec4(0.6f, 0.6f, 0.6f, 1.f);
         if(downloading){
             char info[80], sp[24];
             fmt_speed(g_dl_speed_bps, sp, sizeof(sp));
@@ -1703,6 +1753,11 @@ static void draw_central_list(FFTViewer& v, NetClient* cli, uint8_t subdir){
                 snprintf(info, sizeof(info), "%.1f MB  %s",
                          dl_written_now / 1048576.0, sp);
             }
+            float tw = ImGui::CalcTextSize(info).x;
+            ImGui::SameLine(pw - tw - 4.f);
+            ImGui::TextColored(info_col, "%s", info);
+        } else if(queued){
+            const char* info = "Waiting";
             float tw = ImGui::CalcTextSize(info).x;
             ImGui::SameLine(pw - tw - 4.f);
             ImGui::TextColored(info_col, "%s", info);
