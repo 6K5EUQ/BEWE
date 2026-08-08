@@ -101,6 +101,8 @@ struct Calib {
 enum class Sensitivity { Loose = 0, Normal = 1, Strict = 2 };
 
 struct ExtractParams {
+    // apply() 가 채운다 — score_candidate() 의 swing_ratio 하한(Loose 완화)이 참조.
+    Sensitivity sens = Sensitivity::Normal;
     // 자동 전수 스캔 기본값. 정밀분석(Meas 박스)은 호출부에서 완화한다.
     float  thr_relax_db   = 0.0f;   // 임계 완화량 (정밀분석에서 2.0)
     double max_gap_s      = 20.0;   // 이 시간 매칭 없으면 트랙 종료
@@ -127,6 +129,7 @@ struct ExtractParams {
 
     // 민감도 적용. Normal 은 기본값 그대로라 종전 동작과 동일하다.
     void apply(Sensitivity s){
+        sens = s;
         switch(s){
             case Sensitivity::Loose:                 // 약한 연속신호를 놓치지 않는다
                 thr_relax_db  = -2.0f;               // 임계를 바닥 쪽으로 2 dB

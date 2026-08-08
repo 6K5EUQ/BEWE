@@ -15,6 +15,8 @@ bool fit_scurve(const std::vector<TrackPoint>& pts, double cf_hz, double bin_hz,
                 double row_rate_hz, SCurveFit& out);
 
 // 게이트 10종 + 점수. 통과면 reason 이 비고 score>0.
-float score_candidate(Candidate& c, std::string& reason);
+// sens=Loose 면 swing_ratio 하한을 완화 (짧은/가장자리 관측 패스 구제).
+float score_candidate(Candidate& c, std::string& reason,
+                      Sensitivity sens = Sensitivity::Normal);
 
 } // namespace Doppler

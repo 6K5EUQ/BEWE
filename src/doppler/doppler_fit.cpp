@@ -260,7 +260,7 @@ static float soft(double v, double lo, double hi){
     return (float)std::max(0.0, std::min(1.0, t));
 }
 
-float score_candidate(Candidate& c, std::string& reason){
+float score_candidate(Candidate& c, std::string& reason, Sensitivity sens){
     reason.clear();
     const SCurveFit& F = c.fit;
     if(!F.valid){ reason = "fit failed"; return c.score = 0.0f; }
@@ -270,9 +270,12 @@ float score_candidate(Candidate& c, std::string& reason){
 
     // 싸고 선택적인 것부터. 2번(swing_ratio)이 주력 — 400 MHz 에서 지상 30m/s=40Hz,
     // 여객기 250m/s=333Hz, LEO=20kHz 라 이 하나가 지상 이동체를 전부 거른다.
+    // Loose 모드는 하한을 0.3 까지 완화 — TCA 에서 먼 가장자리만 잡힌 짧은 패스는
+    // 점근 스윙이 과소추정되는데, 지상 이동체(0.004~0.03대)와는 여전히 구분된다.
+    const float swing_lo = (sens == Sensitivity::Loose) ? 0.3f : 0.5f;
     if(F.mono_frac < 0.90f){
         snprintf(buf,sizeof buf,"%s","frequency does not fall steadily"); reason=buf; return c.score=0.0f; }
-    if(F.swing_ratio < 0.5f || F.swing_ratio > 1.5f){
+    if(F.swing_ratio < swing_lo || F.swing_ratio > 1.5f){
         snprintf(buf,sizeof buf,"frequency shift too %s for a satellite", F.swing_ratio < 1.0 ? "small" : "large"); reason=buf; return c.score=0.0f; }
     if(F.tau_s < 30.0 || F.tau_s > 600.0){
         snprintf(buf,sizeof buf,"pass too %s", F.tau_s < 30.0 ? "brief" : "long"); reason=buf; return c.score=0.0f; }

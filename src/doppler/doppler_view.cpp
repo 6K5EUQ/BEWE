@@ -312,7 +312,7 @@ float draw_panel(const HistReader& R, float h){
             // 새 결과가 나오면 자동선택을 한 번 다시 허용한다.
             if(ImGui::Button("BURST")){
                 g_auto_selected = false;
-                DopplerScan::start_burst(R, g_mp, tle_dir());
+                DopplerScan::start_burst(R, g_mp, tle_dir(), g_sens);
             }
             ImGui::SameLine(availW - bw - rmargin);
             if(ImGui::Button(rl)){

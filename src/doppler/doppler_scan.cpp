@@ -74,7 +74,7 @@ void run_job(HistReader reader, Doppler::ExtractParams P, DopplerMatch::Params M
             tracks[i].id = (uint32_t)i;
             Doppler::fit_scurve(tracks[i].pts, cf, reader.bin_hz(),
                                 reader.hdr().row_rate_hz, tracks[i].fit);
-            Doppler::score_candidate(tracks[i], tracks[i].reject_reason);
+            Doppler::score_candidate(tracks[i], tracks[i].reject_reason, P.sens);
         }
         {
             std::lock_guard<std::mutex> lk(g_mtx);
@@ -194,7 +194,7 @@ void start_full(const HistReader& reader, const Doppler::ExtractParams& P,
 }
 
 void start_burst(const HistReader& reader, const DopplerMatch::Params& MP,
-                 const std::string& tle_dir){
+                 const std::string& tle_dir, Doppler::Sensitivity sens){
     // 버스트(간헐 송신) 프리셋. 큐브샛 비콘은 주기 30~120초로 짧게 쏘아 duty 가 0.1 도
     // 안 되므로 기본 min_occupancy=0.55 로는 전멸한다. duty 대신 절대 점 개수로 거르고,
     // 갭에서 트랙이 끊기지 않게 게이트와 갭 한도를 연다.
@@ -202,7 +202,12 @@ void start_burst(const HistReader& reader, const DopplerMatch::Params& MP,
     // 실측(2026-08-07, 파일 4개): 트랙은 85->127 로 늘지만 위성 판정은 0/2/1/0 그대로다.
     // mono_frac 과 swing_ratio 가 방어선으로 버틴다 (145MHz 지상신호 실측 스윙 최대
     // 820 Hz vs 그 대역 위성 하한 1451 Hz — 자릿수가 갈린다).
+    //
+    // apply(sens) 를 burst 필드 설정 *전에* 호출 — Normal/Strict 는 min_dur_s/
+    // min_occupancy 를 burst 전용값으로 덮어써야 하므로 순서가 중요하다 (apply 가
+    // min_occupancy=0.40/0.70 등으로 먼저 채우고, 아래서 0.05f 로 다시 덮는다).
     Doppler::ExtractParams P;
+    P.apply(sens);
     P.burst         = true;
     P.max_gap_s     = 60.0;
     P.min_occupancy = 0.05f;
