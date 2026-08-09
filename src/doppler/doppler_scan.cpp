@@ -177,6 +177,25 @@ void run_job(HistReader reader, Doppler::ExtractParams P, DopplerMatch::Params M
                 if(better(b, a)){ drop[a] = 1; break; }
             }
         }
+        // 위성이 아닌 트랙은 NORAD 가 없어 위 규칙이 건드리지 못한다. 그런데 두
+        // 패스를 합쳐 돌리면서 같은 지상 신호가 연속파·버스트 양쪽에서 하나씩
+        // 잡혀 표에 쌍으로 쌓이게 됐다. 주파수가 거의 같고 시간이 겹치면 같은
+        // 신호로 보고 하나만 남긴다 (기준은 위와 같이 score->잔차->순서).
+        for(size_t a = 0; a < tracks.size(); a++){
+            if(drop[a] || top_norad(a) != 0) continue;
+            for(size_t b = 0; b < tracks.size(); b++){
+                if(b == a || drop[b] || top_norad(b) != 0) continue;
+                const double ov = std::min(tracks[a].t_end_utc,   tracks[b].t_end_utc)
+                                - std::max(tracks[a].t_start_utc, tracks[b].t_start_utc);
+                if(ov <= 0.0) continue;
+                // 중심주파수 차이를 bin 으로 잰다 — 절대 Hz 는 설정마다 뜻이 달라진다.
+                const double bin = (tracks[a].bin_hz > 0) ? tracks[a].bin_hz : 1.0;
+                const double df  = std::fabs(tracks[a].fit.f_center_hz
+                                           - tracks[b].fit.f_center_hz) / bin;
+                if(df > 4.0) continue;
+                if(better(b, a)){ drop[a] = 1; break; }
+            }
+        }
         {
             std::vector<Doppler::Candidate> keep;
             keep.reserve(tracks.size());

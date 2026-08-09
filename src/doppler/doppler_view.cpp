@@ -38,17 +38,12 @@ std::string g_want_tle;         // Central 에 요청해 놓은 파일명 (비�
 double g_want_since = 0.0;      // 그 요청을 건 시각 (타임아웃 판정용)
 bool   g_pending_scan = false;  // 열렸으니 스캔해야 한다 — 실행은 draw_panel 이 한다
 bool   g_auto_selected = false; // 이 결과에서 자동선택을 이미 했나 (해제 유지용)
-// 지금 가진 결과가 SAT SCAN(연속파+버스트 양 패스)으로 나온 것인가. BURST 단독
-// 결과를 재진입 캐시로 재사용하면 연속파 위성이 빠진 표가 그대로 뜬다.
-bool   g_cache_full = false;
 // 방향키로 옮긴 선택을 표가 따라 스크롤하게 한다 (표는 6행만 보인다).
 bool   g_scroll_to_sel = false;
 // 탐지 민감도. 파일을 바꿔도 유지한다 — 운용자가 고른 작업 방식이지 파일 속성이 아니다.
 Doppler::Sensitivity g_sens = Doppler::Sensitivity::Normal;
 
-// 분석 결과는 파일에 딸린 것이다. 다른 녹화를 열면 남의 트랙을 그리게 되므로 버리고,
-// 같은 녹화로 돌아오면 다시 스캔하지 않는다 (전 파일 스캔은 실측 최대 3.8초).
-// 행수까지 보는 이유: LIVE 가 자랐으면 뒤쪽이 미분석이라 결과가 반쪽이다.
+// 분석 결과가 어느 녹화 것인지. 파일을 열 때마다 비우므로 캐시가 아니라 소유 표시다.
 std::string g_owner_path;
 uint64_t    g_owner_rows = 0;
 
@@ -187,15 +182,7 @@ static bool ensure_tle(const HistReader& R){
     return false;
 }
 
-// 지금 열린 녹화가 결과의 주인인가. 아니면 남의 트랙을 그리게 된다.
-static bool owns(const HistReader& R){
-    if(!R.is_open() || g_owner_path != R.path()) return false;
-    // LIVE 는 매 프레임 자란다 — 행수를 그대로 견주면 언제나 "다른 파일"이 된다.
-    // 어차피 LIVE 는 자동 스캔 대상이 아니고(REFINE 으로만 본다) 결과는 사용자가
-    // 박스 친 구간의 것이므로, 자란 것을 갈아탄 것으로 치지 않는다.
-    if(R.is_live()) return true;
-    return g_owner_rows == R.num_rows();
-}
+// 결과가 어느 녹화 것인지 기록해 둔다 (오버레이가 남의 트랙을 그리지 않게).
 static void claim(const HistReader& R){
     g_owner_path = R.is_open() ? R.path() : std::string();
     g_owner_rows = R.is_open() ? R.num_rows() : 0;
@@ -207,14 +194,13 @@ static void wipe(){
     g_want_tle.clear(); g_want_since = 0.0;
     g_pending_scan = false;
     g_auto_selected = false;
-    g_cache_full = false;
 }
 
-// 다른 녹화가 열렸으면 이전 결과를 버린다. 같은 녹화면 그대로 둔다 — 껐다 다시 켜도
-// 스캔이 남아 있어야 한다 (전 파일 스캔은 실측 최대 3.8초).
+// HIST 파일을 열면 **언제나** 이전 분석을 버린다. 같은 파일을 다시 열어도 마찬가지다 —
+// 남겨 두면 그 결과가 어느 패스·어느 민감도로 나온 것인지 알 수 없어, SAT SCAN 을
+// 눌렀는데 옛 표가 뜨고 스캔은 안 도는 상태로 되돌아간다.
 void note_file_changed(const HistReader& R){
-    if(g_owner_path.empty()) return;
-    if(owns(R)) return;
+    (void)R;
     DopplerScan::shutdown();     // 옛 리더를 문 워커부터 세운다
     wipe();
     g_owner_path.clear(); g_owner_rows = 0;
@@ -224,11 +210,10 @@ void toggle(const HistReader& R, const Doppler::ExtractParams& P){
     if(g_open){ g_open = false; return; }
     g_open = true;
     if(!R.is_open() || !R.has_station_pos()) return;
-    // 같은 녹화로 돌아왔고 **그 결과가 SAT SCAN(양 패스)으로 나온 것**이면 다시
-    // 돌리지 않는다. BURST 단독으로 만든 결과가 남아 있으면 재사용하지 않는다 —
-    // 그러면 SAT SCAN 을 눌렀는데 연속파 위성이 빠진 옛 표가 그대로 떠서, 버튼이
-    // 아무 일도 안 한 것처럼 보인다 (실제로 그렇게 보였다).
-    if(owns(R) && !g_tracks.empty() && g_cache_full) return;
+    // **캐시 재사용 없음 — 열면 언제나 새로 스캔한다.**
+    // 결과를 아껴 두는 최적화는 "버튼을 눌렀는데 아무 일도 안 일어난다" 로 계속
+    // 되돌아왔다 (남아 있던 결과가 어느 패스 것인지에 따라 표가 반쪽이 되거나
+    // 통째로 옛것이었다). 스캔이 2~8초라 아껴서 얻는 것보다 잃는 신뢰가 크다.
     wipe();
     claim(R);
     // LIVE 는 계속 자라서 선해제도 안 되고 행수가 스캔 중에 바뀐다 — 자동 스캔 대상 아님.
@@ -275,7 +260,6 @@ float draw_panel(const HistReader& R, float h){
     if(g_pending_scan && !DopplerScan::busy() && !R.is_live()){
         g_pending_scan = false;
         g_auto_selected = false;
-        g_cache_full = true;          // start_full 은 양 패스를 다 돈다
         Doppler::ExtractParams EP; EP.apply(g_sens);
         DopplerScan::start_full(R, EP, g_mp, tle_dir());
     }
@@ -319,7 +303,6 @@ float draw_panel(const HistReader& R, float h){
                     if(ImGui::Selectable(SENS[k], (int)g_sens == k)){
                         g_sens = (Doppler::Sensitivity)k;
                         g_auto_selected = false;
-                        g_cache_full = true;
                         Doppler::ExtractParams P; P.apply(g_sens);
                         DopplerScan::start_full(R, P, g_mp, tle_dir());
                     }
@@ -329,13 +312,11 @@ float draw_panel(const HistReader& R, float h){
             // 새 결과가 나오면 자동선택을 한 번 다시 허용한다.
             if(ImGui::Button("BURST")){
                 g_auto_selected = false;
-                g_cache_full = false;     // 버스트 단독 — 재진입 시 다시 전체를 돈다
                 DopplerScan::start_burst(R, g_mp, tle_dir(), g_sens);
             }
             ImGui::SameLine(availW - bw - rmargin);
             if(ImGui::Button(rl)){
                 g_auto_selected = false;
-                g_cache_full = true;
                 Doppler::ExtractParams P; P.apply(g_sens);
                 DopplerScan::start_full(R, P, g_mp, tle_dir());
             }
@@ -451,7 +432,9 @@ float draw_panel(const HistReader& R, float h){
             ImGui::TableSetupColumn("Time",       ImGuiTableColumnFlags_WidthFixed, 70.0f);
             ImGui::TableSetupColumn("Length",     ImGuiTableColumnFlags_WidthFixed, 66.0f);
             ImGui::TableSetupColumn("Frequency",  ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableSetupColumn("Satellite?", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+            // "continuous" 가 잘리지 않을 만큼. modview::cell 이 중앙정렬이라
+            // 좁으면 양끝이 먹힌다.
+            ImGui::TableSetupColumn("Type",       ImGuiTableColumnFlags_WidthFixed, 88.0f);
             ImGui::TableHeadersRow();
             for(size_t k = 0; k < vis_trk.size(); k++){
                 const int i = vis_trk[k];
@@ -482,10 +465,12 @@ float draw_panel(const HistReader& R, float h){
                 ImGui::TableSetColumnIndex(3);
                 snprintf(b,sizeof b,"%.3f MHz", c.fit.f_center_hz/1e6); modview::cell(b);
                 ImGui::TableSetColumnIndex(4);
-                // 버스트 패스에서 나온 위성은 yes* — 같은 표에 섞이므로 어느 패스가
-                // 찾았는지는 알 수 있어야 한다.
-                const char* yn = (c.score <= 0.0f) ? "no" : (c.is_burst ? "yes*" : "yes");
-                modview::cell(yn, c.score > 0.0f ? ImVec4(0.55f,0.85f,0.55f,1)
+                // 어느 패스가 찾았나. 두 패스가 같은 신호를 잡으면 중복제거가 점수
+                // 높은 쪽만 남기므로, 살아남은 트랙의 플래그가 곧 "더 잘 맞은 쪽"이다.
+                // 위성이 아니면 종류를 따질 게 없어 그대로 no 를 쓴다.
+                const char* ty = (c.score <= 0.0f) ? "no"
+                               : (c.is_burst ? "burst" : "continuous");
+                modview::cell(ty, c.score > 0.0f ? ImVec4(0.55f,0.85f,0.55f,1)
                                                  : ImVec4(0.6f,0.6f,0.6f,1));
             }
             ImGui::EndTable();
