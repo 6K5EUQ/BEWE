@@ -38,6 +38,11 @@ std::string g_want_tle;         // Central 에 요청해 놓은 파일명 (비�
 double g_want_since = 0.0;      // 그 요청을 건 시각 (타임아웃 판정용)
 bool   g_pending_scan = false;  // 열렸으니 스캔해야 한다 — 실행은 draw_panel 이 한다
 bool   g_auto_selected = false; // 이 결과에서 자동선택을 이미 했나 (해제 유지용)
+// 지금 가진 결과가 SAT SCAN(연속파+버스트 양 패스)으로 나온 것인가. BURST 단독
+// 결과를 재진입 캐시로 재사용하면 연속파 위성이 빠진 표가 그대로 뜬다.
+bool   g_cache_full = false;
+// 방향키로 옮긴 선택을 표가 따라 스크롤하게 한다 (표는 6행만 보인다).
+bool   g_scroll_to_sel = false;
 // 탐지 민감도. 파일을 바꿔도 유지한다 — 운용자가 고른 작업 방식이지 파일 속성이 아니다.
 Doppler::Sensitivity g_sens = Doppler::Sensitivity::Normal;
 
@@ -143,6 +148,12 @@ void note_tle_arrived(const std::string& filename){
 
 bool panel_open(){ return g_open; }
 
+// 상하 방향키를 이 패널이 가져갈 상황인가 — 뷰어의 주파수 팬과 겹치므로 뷰어가
+// 물어본다. 트랙을 고른 상태에서만 가져간다 (안 골랐으면 팬이 정상 동작).
+bool wants_updown(){
+    return g_open && g_sel_track >= 0 && !g_tracks.empty();
+}
+
 bool toolbar_button(const HistReader& R){
     // 좌표계 없는 파일(v2 헤더/미설정 기지)은 look-angle 을 못 구한다.
     const bool ok = R.is_open() && R.has_station_pos();
@@ -196,6 +207,7 @@ static void wipe(){
     g_want_tle.clear(); g_want_since = 0.0;
     g_pending_scan = false;
     g_auto_selected = false;
+    g_cache_full = false;
 }
 
 // 다른 녹화가 열렸으면 이전 결과를 버린다. 같은 녹화면 그대로 둔다 — 껐다 다시 켜도
@@ -212,8 +224,11 @@ void toggle(const HistReader& R, const Doppler::ExtractParams& P){
     if(g_open){ g_open = false; return; }
     g_open = true;
     if(!R.is_open() || !R.has_station_pos()) return;
-    // 같은 녹화로 돌아온 것이면 이미 있는 결과를 그대로 보여 준다.
-    if(owns(R) && !g_tracks.empty()) return;
+    // 같은 녹화로 돌아왔고 **그 결과가 SAT SCAN(양 패스)으로 나온 것**이면 다시
+    // 돌리지 않는다. BURST 단독으로 만든 결과가 남아 있으면 재사용하지 않는다 —
+    // 그러면 SAT SCAN 을 눌렀는데 연속파 위성이 빠진 옛 표가 그대로 떠서, 버튼이
+    // 아무 일도 안 한 것처럼 보인다 (실제로 그렇게 보였다).
+    if(owns(R) && !g_tracks.empty() && g_cache_full) return;
     wipe();
     claim(R);
     // LIVE 는 계속 자라서 선해제도 안 되고 행수가 스캔 중에 바뀐다 — 자동 스캔 대상 아님.
@@ -260,6 +275,7 @@ float draw_panel(const HistReader& R, float h){
     if(g_pending_scan && !DopplerScan::busy() && !R.is_live()){
         g_pending_scan = false;
         g_auto_selected = false;
+        g_cache_full = true;          // start_full 은 양 패스를 다 돈다
         Doppler::ExtractParams EP; EP.apply(g_sens);
         DopplerScan::start_full(R, EP, g_mp, tle_dir());
     }
@@ -303,6 +319,7 @@ float draw_panel(const HistReader& R, float h){
                     if(ImGui::Selectable(SENS[k], (int)g_sens == k)){
                         g_sens = (Doppler::Sensitivity)k;
                         g_auto_selected = false;
+                        g_cache_full = true;
                         Doppler::ExtractParams P; P.apply(g_sens);
                         DopplerScan::start_full(R, P, g_mp, tle_dir());
                     }
@@ -312,11 +329,13 @@ float draw_panel(const HistReader& R, float h){
             // 새 결과가 나오면 자동선택을 한 번 다시 허용한다.
             if(ImGui::Button("BURST")){
                 g_auto_selected = false;
+                g_cache_full = false;     // 버스트 단독 — 재진입 시 다시 전체를 돈다
                 DopplerScan::start_burst(R, g_mp, tle_dir(), g_sens);
             }
             ImGui::SameLine(availW - bw - rmargin);
             if(ImGui::Button(rl)){
                 g_auto_selected = false;
+                g_cache_full = true;
                 Doppler::ExtractParams P; P.apply(g_sens);
                 DopplerScan::start_full(R, P, g_mp, tle_dir());
             }
@@ -402,7 +421,27 @@ float draw_panel(const HistReader& R, float h){
             ImGui::TextDisabled("(%d)", n_rej);
         }
     }
-    if(vis_trk.size() > 1){
+    // 한 건이어도 표를 낸다 — 그 한 줄이 시각·길이·주파수를 담고 있고, 행을 눌러야
+    // 이미지에 영역이 그려진다. (>1 조건이던 시절엔 1건일 때 표가 통째로 사라졌다.)
+    if(!vis_trk.empty()){
+        // ── 방향키로 행 이동 ────────────────────────────────────────────
+        // 표에 보이는 순서(vis_trk) 기준이다. g_tracks 인덱스로 움직이면 숨겨진
+        // 행을 밟아 선택이 표 밖으로 나간다.
+        if(g_sel_track >= 0 && !ImGui::IsAnyItemActive()){
+            int cur = -1;
+            for(size_t k = 0; k < vis_trk.size(); k++)
+                if(vis_trk[k] == g_sel_track){ cur = (int)k; break; }
+            if(cur >= 0){
+                int nxt = cur;
+                if(ImGui::IsKeyPressed(ImGuiKey_DownArrow)) nxt = cur + 1;
+                if(ImGui::IsKeyPressed(ImGuiKey_UpArrow))   nxt = cur - 1;
+                if(nxt != cur && nxt >= 0 && nxt < (int)vis_trk.size()){
+                    g_sel_track = vis_trk[nxt];
+                    g_match_of = 0xFFFFFFFFu;
+                    g_scroll_to_sel = true;
+                }
+            }
+        }
         const float th = ImGui::GetTextLineHeightWithSpacing()*std::min<size_t>(6, vis_trk.size()) + 28;
         if(ImGui::BeginTable("##dop_trk", 5,
                ImGuiTableFlags_Borders|ImGuiTableFlags_RowBg|ImGuiTableFlags_ScrollY,
@@ -431,6 +470,8 @@ float draw_panel(const HistReader& R, float h){
                     }
                     g_match_of = 0xFFFFFFFFu;
                 }
+                // 방향키로 옮겨 왔으면 그 행이 보이도록 표를 따라 스크롤한다.
+                if(g_scroll_to_sel && i == g_sel_track) ImGui::SetScrollHereY(0.5f);
                 ImGui::TableSetColumnIndex(1); modview::cell(hhmmss(c.t_start_utc).c_str());
                 char b[32];
                 ImGui::TableSetColumnIndex(2);
@@ -449,6 +490,7 @@ float draw_panel(const HistReader& R, float h){
             }
             ImGui::EndTable();
         }
+        g_scroll_to_sel = false;
     }
 
     // ── 선택 트랙 요약 ───────────────────────────────────────────────────

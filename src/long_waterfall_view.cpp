@@ -706,13 +706,17 @@ void draw_modal(FFTViewer& v, NetClient* cli){
                 double ftotal = (double)h.fft_size;
                 double fstep = fspan * 0.5;
                 // Up = 주파수 위로(높은 쪽), Down = 아래로
-                if(ImGui::IsKeyPressed(ImGuiKey_UpArrow, false)){
+                // 단 도플러 패널에서 트랙을 고른 상태면 상하는 그쪽이 가져간다
+                // (행 이동). 안 그러면 한 번 눌렀을 때 행도 바뀌고 화면도 팬된다.
+                // 좌우(시간 팬)는 언제나 여기 것이다.
+                const bool dop_rows = DopplerView::wants_updown();
+                if(!dop_rows && ImGui::IsKeyPressed(ImGuiKey_UpArrow, false)){
                     double f1 = g_f1 + fstep;
                     if(f1 > ftotal) f1 = ftotal;
                     g_f0 = f1 - fspan; g_f1 = f1;
                     g_tex_dirty = true;
                 }
-                if(ImGui::IsKeyPressed(ImGuiKey_DownArrow, false)){
+                if(!dop_rows && ImGui::IsKeyPressed(ImGuiKey_DownArrow, false)){
                     double f0 = g_f0 - fstep;
                     if(f0 < 0) f0 = 0;
                     g_f0 = f0; g_f1 = f0 + fspan;

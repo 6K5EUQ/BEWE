@@ -10,6 +10,9 @@ class HistReader;
 namespace DopplerView {
 
 bool  panel_open();
+// 상하 방향키를 패널이 쓰는 중인가 (트랙 행 이동). 뷰어의 주파수 팬과 겹쳐서
+// 뷰어가 이걸 보고 비켜 준다.
+bool  wants_updown();
 
 // 정보줄에 그리는 토글 버튼. 눌렸으면 true (좌표 없는 파일이면 비활성).
 bool  toolbar_button(const HistReader& R);

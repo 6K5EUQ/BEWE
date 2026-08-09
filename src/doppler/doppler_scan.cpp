@@ -36,10 +36,25 @@ void join_prev(){
     g_cancel = false;
 }
 
+// 연속파 프리셋에서 버스트 프리셋을 만든다. start_burst 와 같은 값이어야 하므로
+// 한 곳에 둔다 — 두 벌로 두면 한쪽만 고쳐져 패스마다 다른 기준으로 돈다.
+Doppler::ExtractParams burst_preset(const Doppler::ExtractParams& base){
+    Doppler::ExtractParams P;
+    P.apply(base.sens);          // 민감도가 먼저, 아래 버스트 전용값이 덮어쓴다
+    P.burst         = true;
+    P.max_gap_s     = 60.0;
+    P.min_occupancy = 0.05f;
+    P.min_points    = 12;
+    P.max_tracks    = 256;
+    return P;
+}
+
 // 공통 몸통. reader 는 이미 워커 소유 사본이다.
+// both_passes = 연속파 + 버스트를 이어 돌려 한 결과로 합친다 (SAT SCAN 기본).
 void run_job(HistReader reader, Doppler::ExtractParams P, DopplerMatch::Params MP,
              std::string tle_dir, bool refine,
-             uint32_t row_lo, uint32_t row_hi, uint32_t lin_lo, uint32_t lin_hi){
+             uint32_t row_lo, uint32_t row_hi, uint32_t lin_lo, uint32_t lin_hi,
+             bool both_passes){
     auto cancelled = [](){ return g_cancel.load(); };
     auto progress  = [](float f, const char* s){ g_prog = f; set_stage(s); };
 
@@ -66,6 +81,23 @@ void run_job(HistReader reader, Doppler::ExtractParams P, DopplerMatch::Params M
             Doppler::extract_tracks(reader, P, C, tracks, st, progress, cancelled);
         }
         if(g_cancel){ err = "cancelled"; break; }
+
+        // ── 버스트 2차 패스 ─────────────────────────────────────────────
+        // 두 패스는 임계(thr_relax_db)가 달라 보정을 공유할 수 없다 — 프리셋마다
+        // 다시 잰다. 합친 뒤 아래 적합·매칭·중복제거를 **한 번에** 태우므로, 두
+        // 패스가 같은 신호를 잡으면 NORAD+시간겹침 규칙이 알아서 하나로 줄인다.
+        if(both_passes && !refine){
+            set_stage("burst");
+            const Doppler::ExtractParams BP = burst_preset(P);
+            Doppler::Calib BC;
+            std::vector<Doppler::Candidate> btracks;
+            if(Doppler::calibrate(reader, BP, BC, progress, cancelled) && !g_cancel){
+                Doppler::ExtractStats bst;
+                Doppler::extract_tracks(reader, BP, BC, btracks, bst, progress, cancelled);
+                for(auto& t : btracks) tracks.push_back(std::move(t));
+            }
+            if(g_cancel){ err = "cancelled"; break; }
+        }
 
         // 적합 + 점수. 통과 못한 트랙도 남긴다 — reject_reason 을 UI 가 보여준다.
         set_stage("fit");
@@ -180,6 +212,9 @@ void run_job(HistReader reader, Doppler::ExtractParams P, DopplerMatch::Params M
 
 } // anon
 
+// 연속파 + 버스트를 한 번에. SAT SCAN 이 쓰는 기본 경로다 — 스캔이 빠르므로
+// (실측 2~8초) 두 패스를 굳이 나눠 시킬 이유가 없고, 나눠 두면 "SAT SCAN 을
+// 눌렀는데 버스트 위성이 안 보인다" 가 된다.
 void start_full(const HistReader& reader, const Doppler::ExtractParams& P,
                 const DopplerMatch::Params& MP, const std::string& tle_dir){
     join_prev();
@@ -190,30 +225,28 @@ void start_full(const HistReader& reader, const Doppler::ExtractParams& P,
     g_ntracks = 0; g_prog = 0.0f;
     g_state = (int)State::Running; g_running = true;
     g_th = std::thread(run_job, reader.clone_for_thread(), P, MP, tle_dir,
-                       false, 0u, 0u, 0u, 0u);
+                       false, 0u, 0u, 0u, 0u, /*both_passes=*/true);
 }
 
 void start_burst(const HistReader& reader, const DopplerMatch::Params& MP,
                  const std::string& tle_dir, Doppler::Sensitivity sens){
-    // 버스트(간헐 송신) 프리셋. 큐브샛 비콘은 주기 30~120초로 짧게 쏘아 duty 가 0.1 도
-    // 안 되므로 기본 min_occupancy=0.55 로는 전멸한다. duty 대신 절대 점 개수로 거르고,
-    // 갭에서 트랙이 끊기지 않게 게이트와 갭 한도를 연다.
+    // 버스트 단독 패스. SAT SCAN 이 이미 둘 다 돌리므로 평소엔 쓸 일이 없고,
+    // "버스트만 다시 보고 싶다" 는 명시적 요구에만 쓴다.
     //
-    // 실측(2026-08-07, 파일 4개): 트랙은 85->127 로 늘지만 위성 판정은 0/2/1/0 그대로다.
-    // mono_frac 과 swing_ratio 가 방어선으로 버틴다 (145MHz 지상신호 실측 스윙 최대
-    // 820 Hz vs 그 대역 위성 하한 1451 Hz — 자릿수가 갈린다).
-    //
-    // apply(sens) 를 burst 필드 설정 *전에* 호출 — Normal/Strict 는 min_dur_s/
-    // min_occupancy 를 burst 전용값으로 덮어써야 하므로 순서가 중요하다 (apply 가
-    // min_occupancy=0.40/0.70 등으로 먼저 채우고, 아래서 0.05f 로 다시 덮는다).
-    Doppler::ExtractParams P;
-    P.apply(sens);
-    P.burst         = true;
-    P.max_gap_s     = 60.0;
-    P.min_occupancy = 0.05f;
-    P.min_points    = 12;
-    P.max_tracks    = 256;      // 트랙이 늘어난다 — 상한이 막으면 뒤쪽을 통째로 놓친다
-    start_full(reader, P, MP, tle_dir);
+    // 프리셋은 run_job 과 같은 burst_preset() 에서 나온다 — 값이 두 벌로 갈리면
+    // 같은 버튼이 패스마다 다른 기준으로 도는 사고가 난다.
+    Doppler::ExtractParams base;
+    base.apply(sens);
+    const Doppler::ExtractParams P = burst_preset(base);
+    join_prev();
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_tracks.clear(); g_match.clear(); g_err.clear();
+    }
+    g_ntracks = 0; g_prog = 0.0f;
+    g_state = (int)State::Running; g_running = true;
+    g_th = std::thread(run_job, reader.clone_for_thread(), P, MP, tle_dir,
+                       false, 0u, 0u, 0u, 0u, /*both_passes=*/false);
 }
 
 void start_refine(const HistReader& reader, uint32_t row_lo, uint32_t row_hi,
@@ -228,7 +261,7 @@ void start_refine(const HistReader& reader, uint32_t row_lo, uint32_t row_hi,
     g_ntracks = 0; g_prog = 0.0f;
     g_state = (int)State::Running; g_running = true;
     g_th = std::thread(run_job, reader.clone_for_thread(), P, MP, tle_dir,
-                       true, row_lo, row_hi, lin_lo, lin_hi);
+                       true, row_lo, row_hi, lin_lo, lin_hi, /*both_passes=*/false);
 }
 
 void cancel(){ g_cancel = true; }
