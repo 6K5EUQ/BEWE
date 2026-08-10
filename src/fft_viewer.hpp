@@ -1299,6 +1299,14 @@ struct CapLifeGuard {
 // ui.cpp 의 /rx start 경로는 BLADERF/else 만 분기해서 Pluto 에서 RTL 루프가
 // 떴다. 한 곳으로 모아 그런 사고가 구조적으로 안 나게 한다.
 inline void bewe_spawn_capture(FFTViewer& v, std::thread& cap){
+    // std::thread::operator= 는 대상이 joinable 이면 std::terminate 를 부른다.
+    // 호출자가 어느 경로로 오든(스레드가 자연 종료했지만 아직 join 안 한 경우,
+    // 앞선 정리가 조기 return 한 경우) 여기서 한 번은 반드시 정리해야 한다.
+    // (2026-08-11 DGS-2: 죽은 SDR 에 /rx start 를 쳤더니 SIGABRT/core-dump.)
+    if(cap.joinable()){
+        if(v.cap_exited.load()) cap.join();
+        else                    cap.detach();
+    }
     switch(v.hw.type){
         case HWType::BLADERF: cap = std::thread(&FFTViewer::capture_and_process,        &v); return;
         case HWType::PLUTO:   cap = std::thread(&FFTViewer::capture_and_process_pluto,  &v); return;
