@@ -1022,7 +1022,15 @@ void run_cli_host(){
     // HOST 자체(net_srv·Central 룸·채널 필터·미션 상태)는 건드리지 않는다. SDR 만
     // 내려가므로 JOIN 은 접속을 유지한 채 하트비트의 sdr_st 로 상태를 본다.
     auto sdr_down = [&](const char* why){
-        if(v.rx_stopped.load() || !(v.is_running || cap.joinable())) return false;
+        // 이미 멈춰 있으면 거절하되 조용히 끝내지 않는다 — JOIN 은 명령이 접수만 되고
+        // 아무 응답이 없으면 기지가 죽은 것으로 오해한다.
+        if(v.rx_stopped.load()){
+            bewe_log_push(0,"[CLI] RX stop (%s): already stopped\n", why);
+            if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM", "RX already stopped");
+            return false;
+        }
+        // is_running 이 이미 false 여도(스트림 사망) 정리는 해야 한다. 예전 조건은
+        // 여기서 return 해 버려 죽은 SDR 을 치울 수단이 없었다.
         bewe_log_push(0,"[CLI] RX stop (%s)\n", why);
         if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM", "RX stop");
         if(v.rec_on.load()) v.stop_rec();
@@ -1032,7 +1040,26 @@ void run_cli_host(){
         if(v.dev_rtl) rtlsdr_cancel_async(v.dev_rtl);
         v.mix_stop.store(true);
         if(v.mix_thr.joinable()) v.mix_thr.join();
-        if(cap.joinable()) cap.join();
+        // 여기서 그냥 join 하면 캡처가 블로킹 read 에 갇혀 있을 때 메인 루프가 통째로
+        // 멈춘다 — 그러면 이후 /rx start·/chassis·/powercycle 이 플래그만 세운 채
+        // 영영 소비되지 않아 JOIN 에서 "명령이 접수만 되고 아무 일도 안 일어나는"
+        // 상태가 된다 (2026-08-11 DGS-2: BladeRF RX 사망 후 복구 명령 4개 전부 무반응).
+        // stop_sdr_and_reenumerate 는 같은 함정을 이미 USB reset + detach 로 막고
+        // 있었는데 이쪽만 빠져 있었다.
+        if(cap.joinable()){
+            uint16_t dvid = 0, dpid = 0; const char* dlabel = "SDR";
+            sdr_usb_ids(v.hw.type, &dvid, &dpid, &dlabel);
+            for(int attempt = 0; attempt < 5 && !v.cap_exited.load(); attempt++){
+                if(dvid) usb_reset_vidpid(dvid, dpid, dlabel);   // 블로킹 read 깨우기
+                std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            }
+            if(v.cap_exited.load()){
+                cap.join();
+            } else {
+                bewe_log_push(2,"[CLI] RX stop: capture thread stuck - detaching\n");
+                cap.detach();   // joinable 인 채로 재대입하면 std::terminate
+            }
+        }
         Mission::stop_utc0_worker();
         LongWaterfall::stop_worker();
         if(v.fft_plan){ fftwf_destroy_plan(v.fft_plan); v.fft_plan=nullptr; }
@@ -1063,7 +1090,18 @@ void run_cli_host(){
         return true;
     };
     auto sdr_up = [&](const char* why){
-        if(!v.rx_stopped.load()) return false;
+        // rx_stopped(의도적 정지) 뿐 아니라 sdr_stream_error(스트림 사망) 에서도
+        // 받아 준다. 예전엔 전자만 허용해서, /rx stop 을 안 친 채 SDR 이 죽으면
+        // /rx start 가 조용히 거절됐다 — 운용자에겐 "명령이 안 먹는" 것으로 보인다.
+        const bool dead = v.sdr_stream_error.load();
+        if(!v.rx_stopped.load() && !dead){
+            bewe_log_push(0,"[CLI] RX start (%s): already running\n", why);
+            if(v.net_srv) v.net_srv->broadcast_chat("SYSTEM", "RX already running");
+            return false;
+        }
+        // 죽은 스트림 위에 새로 올리려면 옛 캡처 스레드·장치 핸들을 먼저 치운다.
+        // 안 그러면 initialize() 가 이미 열린 장치를 다시 열려다 실패한다.
+        if(dead && !v.rx_stopped.load()) sdr_down(why);
         bewe_log_push(0,"[CLI] RX start (%s) - detecting SDR ...\n", why);
         v.rx_stopped.store(false);
         float cur_cf = (float)(v.header.center_frequency / 1e6);
