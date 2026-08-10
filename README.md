@@ -25,7 +25,7 @@ In the modern battlefield, the first thing to arrive is not the weapon — it is
 
 ## Why SIGINT — From Defense to Pre-emption
 
-THAAD · Patriot · Hyunmoo — all of these activate **after** an attack has begun.
+THAAD · Patriot · Hyunmoo — all of these activate after an attack has begun.
 No defensive system, however capable, achieves 100% interception.
 
 The world's intelligence services operate a three-pillar collection model for pre-emptive warning: **HUMINT · IMINT · SIGINT**.
