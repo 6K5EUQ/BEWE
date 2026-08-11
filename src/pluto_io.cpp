@@ -189,9 +189,23 @@ void FFTViewer::capture_and_process_pluto(){
     // 내부 RX 버퍼 내 포지션
     int rx_pos = 0, rx_avail = 0;
 
+    // 온도는 iio 핸들을 소유한 이 스레드에서만 읽는다 (fft_viewer.hpp 의 sdr_temp_c 주석
+    // 참조). pluto_release() 가 컨텍스트를 파괴하면 phy 포인터가 그대로 dangling 이라,
+    // 하트비트에서 부르면 BladeRF 와 같은 부류의 사고가 난다.
+    auto temp_last = std::chrono::steady_clock::now() - std::chrono::seconds(2);
+
     // sdr_stream_error 를 루프 조건에 포함: watchdog 등 외부에서 에러를 세팅했을 때
     // 캡처 스레드가 스스로 빠져나와야 재연결 경로의 cap.join() 이 영구 블록되지 않는다.
     while(is_running && !sdr_stream_error.load(std::memory_order_relaxed)){
+        {
+            auto now_t = std::chrono::steady_clock::now();
+            if(std::chrono::duration<float>(now_t - temp_last).count() >= 2.0f){
+                temp_last = now_t;
+                float _t = pluto_get_temp_c();
+                if(_t > 0.f) sdr_temp_c.store((uint8_t)std::min(255.f, _t),
+                                              std::memory_order_relaxed);
+            }
+        }
         if(capture_pause.load(std::memory_order_relaxed)){
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             rx_pos=0; rx_avail=0;
@@ -465,6 +479,7 @@ void FFTViewer::pluto_release(){
     if(pluto_rx_buf){ iio_buffer_destroy((struct iio_buffer*)pluto_rx_buf); pluto_rx_buf=nullptr; }
     if(pluto_ctx){ iio_context_destroy((struct iio_context*)pluto_ctx); pluto_ctx=nullptr; }
     pluto_phy_dev=nullptr; pluto_rx_dev=nullptr; pluto_rx_i_ch=nullptr; pluto_rx_q_ch=nullptr;
+    sdr_temp_c.store(0, std::memory_order_relaxed);
 }
 
 // ── AD9361 내부 온도 읽기 ────────────────────────────────────────────────

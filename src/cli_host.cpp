@@ -1046,6 +1046,7 @@ void run_cli_host(){
         // 상태가 된다 (2026-08-11 DGS-2: BladeRF RX 사망 후 복구 명령 4개 전부 무반응).
         // stop_sdr_and_reenumerate 는 같은 함정을 이미 USB reset + detach 로 막고
         // 있었는데 이쪽만 빠져 있었다.
+        bool cap_abandoned = false;
         if(cap.joinable()){
             uint16_t dvid = 0, dpid = 0; const char* dlabel = "SDR";
             sdr_usb_ids(v.hw.type, &dvid, &dpid, &dlabel);
@@ -1058,6 +1059,7 @@ void run_cli_host(){
             } else {
                 bewe_log_push(2,"[CLI] RX stop: capture thread stuck - detaching\n");
                 cap.detach();   // joinable 인 채로 재대입하면 std::terminate
+                cap_abandoned = true;
             }
         }
         Mission::stop_utc0_worker();
@@ -1067,13 +1069,18 @@ void run_cli_host(){
         if(v.fft_out) { fftwf_free(v.fft_out);  v.fft_out=nullptr; }
         // 장치 핸들은 4종 전부 닫는다. 하나라도 남기면 그 USB 를 뽑았을 때 커널
         // 쪽에 좀비 핸들이 남아 재삽입 시 열리지 않는다.
-        if(v.dev_blade){
-            bladerf_enable_module(v.dev_blade, BLADERF_CHANNEL_RX(0), false);
-            bladerf_close(v.dev_blade); v.dev_blade=nullptr;
+        // 단 캡처 스레드를 버렸다면 손대지 않는다 — 핸들 소유자는 그 스레드이고,
+        // 빠져나오는 즉시 자기 손으로 닫는다. 여기서 또 닫으면 이중 close 이고,
+        // 그 스레드가 장치 락을 쥔 채라면 이 close 가 영영 반환하지 않는다.
+        if(!cap_abandoned){
+            if(v.dev_blade){
+                bladerf_enable_module(v.dev_blade, BLADERF_CHANNEL_RX(0), false);
+                bladerf_close(v.dev_blade); v.dev_blade=nullptr;
+            }
+            if(v.dev_rtl){ rtlsdr_close(v.dev_rtl); v.dev_rtl=nullptr; }
+            v.pluto_release();  // Pluto: iio buffer/context 해제 (idempotent)
         }
-        if(v.dev_rtl){ rtlsdr_close(v.dev_rtl); v.dev_rtl=nullptr; }
         v.df_stop_engine();     // Kraken: Heimdall DAQ 연결 해제 (다른 SDR 이면 no-op)
-        v.pluto_release();      // Pluto: iio buffer/context 해제 (idempotent)
         // Kraken 은 소켓을 닫아도 동글이 DAQ 손에 남는다 — 유닛까지 내려야 진짜로
         // 뽑을 수 있다. 다른 SDR 은 위 close 로 이미 놓았으므로 여기 안 들어온다.
         const bool kraken_daq_down = is_kraken_station() && kraken_daq_ctl("stop", "RX stop");
@@ -2751,15 +2758,13 @@ void run_cli_host(){
             bool cur_sdr_err = v.sdr_stream_error.load();
             if(el >= 1.0f){
                 heartbeat_last = clk::now();
-                uint8_t sdr_t_hb = 0;
-                if(v.dev_blade){
-                    float _t = 0.f;
-                    if(bladerf_get_rfic_temperature(v.dev_blade, &_t) == 0)
-                        sdr_t_hb = (uint8_t)std::min(255.f, std::max(0.f, _t));
-                } else if(v.pluto_ctx){
-                    float _t = v.pluto_get_temp_c();
-                    if(_t > 0.f) sdr_t_hb = (uint8_t)std::min(255.f, _t);
-                }
+                // 장치 API 를 여기서 부르지 않는다. 핸들 수명이 캡처 스레드 것이라,
+                // 포인터를 확인한 뒤 API 안에서 락을 기다리는 사이 그 스레드가 close 로
+                // 구조체를 해제하면 이 루프가 free 된 뮤텍스에 영구히 갇힌다 — 그러면
+                // /rx stop·/chassis 1 reset·/powercycle 이 플래그만 세운 채 소비되지
+                // 않아 기지가 통째로 명령 무반응이 된다 (2026-08-11 DGS-2: 14시간).
+                // 캡처 스레드가 발행한 값만 읽는다.
+                uint8_t sdr_t_hb = v.sdr_temp_c.load(std::memory_order_relaxed);
                 uint8_t hst = v.spectrum_pause.load() ? 2 : 0;
                 // sdr_st: 0=OK(스트리밍 정상) 1=중단·SDR 없음(빨강) 2=중단·SDR 감지됨(노랑, /rx start 대기)
                 //         3=스트림 에러(빨강, 뽑힘/초기화실패 아닌 런타임 오류) — 구 JOIN 은 !=0 이면 전부 빨강 취급
@@ -2889,6 +2894,7 @@ void run_cli_host(){
             // 그래도 안 빠지면 detach 해서 버린다 — 계속 기다리느니 재열거를 진행하는
             // 편이 낫다. 재열거가 끝나면 그 스레드의 read 는 어차피 에러로 리턴하고
             // 루프가 종료된다(is_running=false).
+            bool cap_abandoned = false;
             if(cap.joinable()){
                 for(int attempt = 0; attempt < 5 && !v.cap_exited.load(); attempt++){
                     if(vid) usb_reset_vidpid(vid, pid, pc_label);   // 블로킹 read 깨우기
@@ -2900,18 +2906,24 @@ void run_cli_host(){
                     bewe_log_push(2,"[CLI] %s: capture thread stuck - "
                                     "detaching and proceeding with re-enumeration\n", tag);
                     cap.detach();   // joinable 인 채로 재대입하면 std::terminate
+                    cap_abandoned = true;
                 }
             }
 
-            // 핸들을 닫아야 커널이 deauthorize 할 때 걸리지 않는다.
-            if(v.dev_blade){
-                bladerf_close(v.dev_blade); v.dev_blade = nullptr;
+            // 핸들을 닫아야 커널이 deauthorize 할 때 걸리지 않는다. 단 캡처 스레드를
+            // 버렸다면 그쪽이 소유자다 — 여기서 닫으면 이중 close 이고, 그 스레드가
+            // 장치 락을 쥔 채라면 이 close 가 반환하지 않아 정작 재열거에 도달을 못 한다.
+            // 어차피 바로 뒤 재열거가 장치를 무효화하므로 남은 핸들은 커널이 회수한다.
+            if(!cap_abandoned){
+                if(v.dev_blade){
+                    bladerf_close(v.dev_blade); v.dev_blade = nullptr;
+                }
+                if(v.dev_rtl){ rtlsdr_close(v.dev_rtl); v.dev_rtl = nullptr; }
+                // Pluto: 정상 종료면 캡처 루프가 이미 정리했지만, 캡처가 뜨기 전에
+                // 명령이 들어온 경우엔 컨텍스트가 살아 있다. 남으면 libiio 의 USB 클레임
+                // 때문에 deauthorize 가 깨끗하게 안 된다.
+                v.pluto_release();
             }
-            if(v.dev_rtl){ rtlsdr_close(v.dev_rtl); v.dev_rtl = nullptr; }
-            // Pluto: 정상 종료면 캡처 루프가 이미 정리했지만, 캡처가 뜨기 전에
-            // 명령이 들어온 경우엔 컨텍스트가 살아 있다. 남으면 libiio 의 USB 클레임
-            // 때문에 deauthorize 가 깨끗하게 안 된다.
-            v.pluto_release();
 
             return std::make_tuple(vid, pid, pc_label);
         };

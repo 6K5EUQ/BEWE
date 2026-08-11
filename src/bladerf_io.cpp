@@ -305,15 +305,32 @@ void FFTViewer::capture_and_process(){
             bladerf_close(dev_blade);
         }
         dev_blade = nullptr;
+        sdr_temp_c.store(0, std::memory_order_relaxed);
     };
     // sync_rx 연속 타임아웃 상한 (3s x 3 = 9s). FFT-stall watchdog(10s)보다 먼저 스스로 감지.
     static constexpr int RX_TIMEOUT_MAX = 3;
     int rx_timeouts = 0;
+    // 온도는 장치를 소유한 이 스레드에서만 읽는다 (fft_viewer.hpp 의 sdr_temp_c 주석 참조).
+    auto temp_last = std::chrono::steady_clock::now() - std::chrono::seconds(2);
 
     // sdr_stream_error 를 루프 조건에 포함: watchdog 등 외부에서 에러를 세팅했을 때
     // 캡처 스레드가 스스로 빠져나와야 cap.join() 이 걸리지 않는다 (안 그러면 재연결
     // 스레드가 join 에서 영구 블록 → USB reset/재초기화가 아예 실행되지 않음).
     while(is_running && !sdr_stream_error.load(std::memory_order_relaxed)){
+        // ── RFIC 온도 발행 (2s) ───────────────────────────────────────────
+        // 하트비트가 부르던 것을 여기로 옮겼다. 제어 전송이 sync_rx 와 같은 스레드에서
+        // 직렬화되므로 스트리밍 중 동시 접근도 사라진다.
+        {
+            auto now_t = std::chrono::steady_clock::now();
+            if(std::chrono::duration<float>(now_t - temp_last).count() >= 2.0f){
+                temp_last = now_t;
+                float _t = 0.f;
+                if(bladerf_get_rfic_temperature(dev_blade, &_t) == 0)
+                    sdr_temp_c.store((uint8_t)std::min(255.f, std::max(0.f, _t)),
+                                     std::memory_order_relaxed);
+            }
+        }
+
         // ── Pause (타임머신 모드) ─────────────────────────────────────────
         if(capture_pause.load(std::memory_order_relaxed)){
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -591,6 +608,7 @@ void FFTViewer::capture_and_process(){
         bladerf_close(dev_blade);
         dev_blade = nullptr;
     }
+    sdr_temp_c.store(0, std::memory_order_relaxed);
 }
 // ── 캡처 공용: 누적 파워(pacc,fcnt) → dB 행 커밋 ─────────────────────────
 // 4개 SDR 백엔드(rtlsdr/bladerf/pluto/kraken)에 바이트동일하게 복붙돼 있던 블록의

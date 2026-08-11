@@ -301,6 +301,12 @@ public:
     // 캡처 스레드가 루프를 빠져나왔는지. /powercycle 이 join 을 무한정 기다리지 않고
     // (블로킹 read 에 갇혔을 수 있다) 포기 시점을 판단하는 데 쓴다.
     std::atomic<bool> cap_exited{false};
+    // SDR 내부 온도 °C. 장치를 소유한 캡처 스레드만 쓰고, 하트비트는 이 값만 읽는다.
+    // 하트비트가 장치 API 를 직접 부르면 안 된다 — 핸들의 수명이 캡처 스레드 것이라
+    // 포인터를 확인한 뒤 API 안에서 락을 기다리는 사이 그 스레드가 close 로 구조체를
+    // 해제하면, 메인 루프가 이미 free 된 뮤텍스에 갇혀 기지 전체가 명령 무반응이 된다
+    // (2026-08-11 DGS-2: bladerf_get_rfic_temperature 에서 14시간 정지). 0 = 값 없음.
+    std::atomic<uint8_t> sdr_temp_c{0};
     std::atomic<bool> dem_restart_needed{false}; // SR 변경 후 demod 재시작 필요
     std::atomic<bool> wf_area_visible{true};    // 워터폴 영역 실제 표시 여부 (수평바 포함)
     bool tm_iq_was_stopped=false;
