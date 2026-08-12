@@ -3244,12 +3244,23 @@ void run_cli_host(){
                 bg_join_started = true;
                 cap_joined.store(false);
                 usb_reset_done = false;
-                std::thread([&cap, &cap_joined](){
-                    if(cap.joinable()) cap.join();
+                // 스레드 객체를 넘겨준다 — 참조로 캡처하면 이 헬퍼와 메인 루프가
+                // 같은 std::thread 를 동시에 만진다. std::thread 는 그런 접근에
+                // 안전하지 않아서, 둘 다 joinable() 을 참으로 본 뒤 각자 join 하면
+                // 뒤쪽이 std::system_error 를 던지고 아무도 안 잡아 std::terminate
+                // 로 간다 (2026-08-12 DGS-2: RX 에러 2초 뒤 SIGABRT + core-dump,
+                // 로그에 "terminate called after throwing an instance of
+                // 'std::system_error'"). 힙이 깨져 tcache 진단이 뜬 것도 같은 뿌리다.
+                // move 하면 메인 루프의 cap 은 non-joinable 이 되어 재대입이 안전하고,
+                // 넘겨받은 스레드는 이 헬퍼만 소유한다.
+                std::thread([t = std::move(cap), &cap_joined]() mutable {
+                    if(t.joinable()) t.join();
                     std::this_thread::sleep_for(std::chrono::milliseconds(1500));
                     cap_joined.store(true);
                 }).detach();
-            } else if(!cap.joinable()){
+            } else if(!bg_join_started && !cap.joinable()){
+                // bg_join_started 를 함께 보지 않으면, 위에서 move 로 비워진 cap 을
+                // 다음 루프에서 보고 곧바로 cap_joined 를 세워 대기가 무력화된다.
                 cap_joined.store(true);
             }
 
