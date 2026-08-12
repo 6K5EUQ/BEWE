@@ -7,6 +7,7 @@
 #include "amc_module.hpp"
 #include "amc_ai.hpp"
 #include "module_api.hpp"
+#include "symrate.hpp"   // 심볼율 자동 추정 (코어)
 #include <cmath>
 #include <algorithm>
 #include <chrono>
@@ -241,6 +242,14 @@ void worker(FFTViewer& v, int ch_idx){
                             cls, conf, cls2, conf2, m.model, sizeof(m.model),
                             m.p, AMC_NCLASS)){
                 m.cls=cls; m.conf=conf; m.cls2=cls2; m.conf2=conf2;
+                // 심볼율. 방금 캡처한 그 버퍼를 그대로 쓴다 — 새 탭도, 새 트리거도
+                // 필요 없다. 판정된 변조가 연속형이면 건너뛴다: 값이 정의되지
+                // 않을뿐더러 최악 1.5 ms 를 헛되이 쓴다.
+                if(!amc_class_continuous(m.cls)){
+                    symrate::Result sr = symrate::estimate(cap.data(), AMC_CAP, fs_out);
+                    m.sym_rate_hz = sr.rate_hz;
+                    m.sym_conf    = sr.conf;
+                }
                 host_emit(v, m);
             }
             // 판정 실패(데몬 없음/타임아웃)면 레코드를 만들지 않는다 — 빈 줄이 쌓이면

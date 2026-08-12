@@ -9,6 +9,7 @@
 #include <cmath>
 #include <string>
 #include <vector>
+#include <algorithm>   // std::nth_element (심볼율 중앙값)
 #include <ctime>
 
 namespace amc_mod {
@@ -58,6 +59,11 @@ void draw_panel(FFTViewer& v){
         int64_t t_ms = 0;          // 가장 최근 측정 시각
         float   freq = 0, bw = 0;
         char    model[16] = {};
+        // 심볼율은 확률처럼 평균내지 않고 **중앙값**을 쓴다. 물리적으로 하나뿐인
+        // 값이라 평균할 이유가 없고, 어쩌다 한 번 어긋난 버스트가 평균을 끌고
+        // 가는 것만 손해다. 미측정(0)은 아예 안 담는다.
+        float   sr[32] = {};
+        int     nsr = 0;
     };
     Agg agg[MAX_CHANNELS];
     bool has[MAX_CHANNELS] = {};
@@ -84,6 +90,8 @@ void draw_panel(FFTViewer& v){
                 if(a.bw > 0 && fabsf(m.bw_khz - a.bw) > a.bw*0.02f) continue;
             }
             for(int k=0;k<AMC_NCLASS;k++) a.p[k] += m.p[k];
+            if(m.sym_rate_hz > 0.f && a.nsr < (int)(sizeof(a.sr)/sizeof(a.sr[0])))
+                a.sr[a.nsr++] = m.sym_rate_hz;
             a.n++;
         }
         for(int c=0;c<MAX_CHANNELS;c++)
@@ -114,7 +122,15 @@ void draw_panel(FFTViewer& v){
             // 헤더는 "어느 채널의 언제 측정인가"만. 판정 결과는 바로 아래 막대가
             // 이미 말하고 있어서 같은 값을 두 번 쓰면 줄만 시끄러워진다.
             ImGui::Text("[%2d] %9.4f MHz", v.freq_sorted_display_num(ci), cf);
-            ImGui::SameLine(); ImGui::TextDisabled("%s  n=%d", ts, a.n);
+            ImGui::SameLine();
+            if(a.nsr > 0){
+                float sv[32];
+                memcpy(sv, a.sr, sizeof(float)*(size_t)a.nsr);
+                std::nth_element(sv, sv+a.nsr/2, sv+a.nsr);
+                ImGui::TextDisabled("%s  n=%d  %.0f Bd", ts, a.n, sv[a.nsr/2]);
+            } else {
+                ImGui::TextDisabled("%s  n=%d", ts, a.n);
+            }
 
             // 막대는 확률 내림차순 — 가장 유력한 후보가 항상 맨 위에 온다.
             int idx[AMC_NCLASS];

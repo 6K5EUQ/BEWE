@@ -1,4 +1,5 @@
 #include "fft_viewer.hpp"
+#include "frame_analyze.hpp"   // Bits 뷰 프레임 구조 자동 추출
 #include "detect_base.hpp"
 #include "iq_filename.hpp"
 #include "sigmf.hpp"
@@ -9276,10 +9277,25 @@ void run_streaming_viewer(){
                     }
                     fg->AddRectFilled(ImVec2(ea_x0,ea_y0),ImVec2(ea_x1,ea_y1),IM_COL32(8,8,12,255));
                     fg->AddRect(ImVec2(ea_x0,ea_y0),ImVec2(ea_x1,ea_y1),IM_COL32(60,60,80,255));
-                    const char* hint = "Set baud lines (B) and baseline (right-click > Make Baseline) in Amp/Freq/Phase tab";
-                    ImVec2 hsz=ImGui::CalcTextSize(hint);
-                    fg->AddText(ImVec2(ea_x0+(ea_w-hsz.x)*0.5f, ea_y0+(ea_h-hsz.y)*0.5f),
-                                IM_COL32(120,120,140,255), hint);
+                    // 가운데 AUTO 버튼 하나. 예전엔 여기에 "baud 선을 B 로 찍고
+                    // baseline 을 우클릭으로 만들라"는 사용법 안내가 박혀 있었는데,
+                    // 그건 UI 설명문 금지 규칙에 걸리는 문장이었다. 이제 그 작업을
+                    // 자동으로 하므로 문장 자체가 필요 없다.
+                    {
+                        const char* ab = "AUTO";
+                        ImVec2 asz = ImGui::CalcTextSize(ab);
+                        float bx0 = ea_x0+(ea_w-asz.x)*0.5f - 10.f;
+                        float by0 = ea_y0+(ea_h-asz.y)*0.5f - 5.f;
+                        float bx1 = bx0 + asz.x + 20.f, by1 = by0 + asz.y + 10.f;
+                        bool ahov = io.MousePos.x>=bx0 && io.MousePos.x<=bx1 &&
+                                    io.MousePos.y>=by0 && io.MousePos.y<=by1;
+                        fg->AddRect(ImVec2(bx0,by0),ImVec2(bx1,by1),
+                                    ahov?IM_COL32(255,255,255,255):IM_COL32(140,180,220,255));
+                        fg->AddText(ImVec2(bx0+10.f,by0+5.f),
+                                    ahov?IM_COL32(255,255,255,255):IM_COL32(140,180,220,255), ab);
+                        if(ahov && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+                            v.eid_auto_baud();
+                    }
                 } else {
                     // ── 비트 추출 ──
                     uint32_t sr=v.eid_sample_rate>0?v.eid_sample_rate:1;
@@ -9333,15 +9349,48 @@ void run_streaming_viewer(){
                             int BPR = v.eid_bits_per_row;
                             int bit_off = std::max(0, std::min(v.eid_bits_offset, n_bits-1));
 
+                            // ── 프레임 구조 자동 추출 ──
+                            // 비트열이 실제로 다시 뽑힌 프레임에서만 돌린다.
+                            // eid_edit_gen(IQ 편집 세대)로 게이트하면 안 된다 —
+                            // 운용자가 baud 선이나 baseline 을 옮기면 비트열은
+                            // 바뀌는데 그 값은 그대로라 결과가 낡은 채 남는다.
+                            // bits_ok 는 캐시 적중 여부라 정확히 그 조건이다.
+                            if(!bits_ok || !v.eid_frm_valid){
+                                frame_analyze::Result fr = frame_analyze::analyze(bits);
+                                v.eid_frm_pre_len   = fr.preamble_len;
+                                v.eid_frm_pre_unit  = fr.preamble_unit;
+                                v.eid_frm_pre_pat   = fr.preamble_pat;
+                                v.eid_frm_period    = fr.period;
+                                v.eid_frm_sync_off  = fr.sync_off;
+                                v.eid_frm_sync_len  = fr.sync_len;
+                                v.eid_frm_sync_bits = fr.sync_bits;
+                                v.eid_frm_payload   = fr.payload_len;
+                                v.eid_frm_frames    = fr.frames;
+                                v.eid_frm_valid     = true;
+                            }
+
                             // ── 헤더 바 (다른 탭과 동일 위치) ──
                             {
                                 char sig_len_str[32];
                                 if(sig_len_s >= 1.0) snprintf(sig_len_str,sizeof(sig_len_str),"%.1f s",sig_len_s);
                                 else snprintf(sig_len_str,sizeof(sig_len_str),"%.1f ms",sig_len_s*1000.0);
-                                char hdr[320];
+                                // 프레임 값은 검출된 것만 붙인다. 미검출을 "-" 로 채우면
+                                // 줄만 길어지고 읽을 게 없다.
+                                char frm[160]; frm[0]=0; size_t fo=0;
+                                if(v.eid_frm_pre_len > 0)
+                                    fo += snprintf(frm+fo,sizeof(frm)-fo," | Pre: %db",v.eid_frm_pre_len);
+                                if(v.eid_frm_sync_len > 0)
+                                    fo += snprintf(frm+fo,sizeof(frm)-fo," | Sync: %d'h%llX",
+                                        v.eid_frm_sync_len,(unsigned long long)v.eid_frm_sync_bits);
+                                if(v.eid_frm_period > 0)
+                                    fo += snprintf(frm+fo,sizeof(frm)-fo," | Frame: %db x%d",
+                                        v.eid_frm_period, v.eid_frm_frames);
+                                if(v.eid_frm_payload > 0)
+                                    snprintf(frm+fo,sizeof(frm)-fo," | Payload: %db",v.eid_frm_payload);
+                                char hdr[520];
                                 snprintf(hdr,sizeof(hdr),
-                                    "Baud: %.0f | Bits: %d | Bytes: %d | %s",
-                                    baud_rate, n_bits, n_bits/8, sig_len_str);
+                                    "Baud: %.0f | Bits: %d | Bytes: %d | %s%s",
+                                    baud_rate, n_bits, n_bits/8, sig_len_str, frm);
                                 fg->AddText(ImVec2(ea_x0, ca_y0+4), IM_COL32(160,160,180,220), hdr);
                                 if(!v.sa_temp_path.empty()){
                                     const char* fn=v.sa_temp_path.c_str();

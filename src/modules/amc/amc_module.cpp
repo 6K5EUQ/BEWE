@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>   // std::min (on_data 길이 게이트)
 #include <thread>
 
 namespace amc_mod {
@@ -149,10 +150,14 @@ void store_append(const AmcRecord& m){
     mkdir(store_dir().c_str(),0755);
     FILE* f=fopen(store_path(m.t_ms).c_str(),"ab"); if(!f) return;
     char mv[24]; json_escape(m.model,mv,sizeof(mv));
+    // sr/sc 는 말미 추가 키다. 파서가 키 기반이라 구버전 줄에 없어도 0 으로 읽히고,
+    // 구버전 파서는 모르는 키를 그냥 지나친다 — 양방향 호환.
     fprintf(f,"{\"t\":%lld,\"ch\":%d,\"f\":%.4f,\"bw\":%.2f,\"cls\":%d,\"cf\":%.4f,"
-              "\"cls2\":%d,\"cf2\":%.4f,\"snr\":%.1f,\"tg\":%d,\"mv\":\"%s\"}\n",
+              "\"cls2\":%d,\"cf2\":%.4f,\"snr\":%.1f,\"tg\":%d,\"mv\":\"%s\","
+              "\"sr\":%.1f,\"sc\":%.3f}\n",
         (long long)m.t_ms,m.ch,m.freq,m.bw_khz,m.cls,m.conf,
-        m.cls2,m.conf2,m.snr_db,(int)m.trig,mv);
+        m.cls2,m.conf2,m.snr_db,(int)m.trig,mv,
+        m.sym_rate_hz,m.sym_conf);
     fclose(f);
 }
 bool store_read_today(std::string& out){
@@ -187,6 +192,8 @@ void store_parse_jsonl(const char* data, size_t n, std::vector<AmcRecord>& out){
         m.conf2 = (float)jf(l,"\"cf2\":");
         m.snr_db= (float)jf(l,"\"snr\":");
         m.trig  = (uint8_t)jll(l,"\"tg\":");
+        m.sym_rate_hz = (float)jf(l,"\"sr\":");
+        m.sym_conf    = (float)jf(l,"\"sc\":");
         jstr(l,"\"mv\":\"",m.model,sizeof(m.model));
         if(m.t_ms) out.push_back(m);
     }
@@ -205,8 +212,15 @@ void host_emit(FFTViewer& v, AmcRecord m){
 // ── 수신 (JOIN/로컬) ───────────────────────────────────────────────────────
 static void on_data(FFTViewer& v, const char* station, const uint8_t* d, size_t n){
     (void)v;
-    if(n < sizeof(AmcWire)) return;
-    AmcRecord m; amc_from_wire(*reinterpret_cast<const AmcWire*>(d), m);
+    // 길이 게이트는 **구버전 프리픽스**를 기준으로 잡는다. 예전처럼
+    // n < sizeof(AmcWire) 로 막으면, 심볼율 필드가 붙기 전 바이너리로 도는 기지의
+    // 레코드가 통째로 거부되어 신 JOIN 에서 그 기지의 AMC 행이 조용히 사라진다
+    // (혼용 배포 중 흔한 조합이다). 반대 방향은 원래 안전했다 — 구 JOIN 은
+    // 길어진 레코드의 앞부분만 읽고 꼬리를 무시한다.
+    if(n < AMC_WIRE_BASE_LEN) return;
+    AmcWire w{};
+    memcpy(&w, d, std::min(n, sizeof(AmcWire)));   // 없는 꼬리는 0 = 미측정
+    AmcRecord m; amc_from_wire(w, m);
     bewe_mod_stat_bump("amc", station, m.ch, m.t_ms);
     station_disp(station, m.station, sizeof(m.station));
     append_log(m);

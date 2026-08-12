@@ -8,6 +8,7 @@
 // 여기 있는 건 그 결과를 나르는 그릇뿐이다.
 #include <cstdint>
 #include <cstring>
+#include <cstddef>   // offsetof
 
 // 클래스 순서는 BEAE/amc/amc_ai/synth.py 의 CLASSES 와 **반드시** 같아야 한다.
 // 그쪽 주석에 못이 박혀 있다: 추가는 안전, 재배열은 학습된 체크포인트를 조용히
@@ -22,6 +23,16 @@ static constexpr int AMC_NCLASS = (int)(sizeof(AMC_CLASSES)/sizeof(AMC_CLASSES[0
 
 inline const char* amc_class_name(int i){
     return (i >= 0 && i < AMC_NCLASS) ? AMC_CLASSES[i] : "?";
+}
+
+// 심볼 경계가 없어 심볼율이 정의되지 않는 변조. 인덱스가 아니라 이름으로 판정한다
+// — 위 주석대로 클래스는 append-only 라 인덱스가 밀리진 않지만, 이름으로 쓰면
+// 목록이 바뀌어도 이 판정이 조용히 어긋나지 않는다.
+// OFDM 은 심볼율이 있긴 하나 부반송파 구조라 이 추정기가 재는 값과 다르다 —
+// 틀린 숫자를 보여주느니 비워 둔다.
+inline bool amc_class_continuous(int i){
+    const char* n = amc_class_name(i);
+    return !strcmp(n,"AM") || !strcmp(n,"FM") || !strcmp(n,"OFDM");
 }
 
 // 트리거 종류. 지금은 스퀄치 하나뿐이지만 필드는 남겨 둔다 — 레코드/아카이브
@@ -48,6 +59,12 @@ struct AmcRecord {
     // 전 클래스 확률 (0~1). 상위 2개만으론 막대그래프를 못 그린다 — STATUS 패널이
     // 12개를 다 보여줘야 운용자가 "얼마나 아슬아슬한 판정인지"를 눈으로 안다.
     float    p[AMC_NCLASS] = {};
+    // 심볼율 (src/symrate.hpp). 0 = 미측정 — 잡음이라 선이 안 섰거나, 애초에
+    // 심볼 경계가 없는 변조(AM/FM/OFDM)라 호출을 건너뛴 경우다. 둘을 구분하지
+    // 않는다: 어느 쪽이든 운용자에게는 "값 없음" 이고, 구분하려면 사유 코드를
+    // 하나 더 실어야 하는데 표시에 쓰이지 않는다.
+    float    sym_rate_hz = 0.f;
+    float    sym_conf    = 0.f;   // 0..1
     // 표시 전용. wire 로 안 나간다 — station 은 MpData 봉투가 운반하고 수신측이 채운다.
     char     station[16] = {};
 };
@@ -66,8 +83,19 @@ struct AmcWire {
     // 전 클래스 확률을 permille(0~1000) 로. float 12개(48B) 대신 u16 12개(24B) —
     // 표시용이라 0.1% 해상도면 충분하고, 레코드가 커지면 Central .dat 가 그만큼 부푼다.
     uint16_t p_permille[AMC_NCLASS];
+    // ── 여기부터 말미 추가분 ────────────────────────────────────────────────
+    // 새 필드는 **반드시 이 아래에** 붙인다. 수신측(amc_module.cpp on_data)이
+    // offsetof 로 길이를 게이트해 구버전 레코드도 받아들이기 때문이다.
+    // 저장소 관례이기도 하다 — net_protocol.hpp 의 PktDfConfig·HEARTBEAT 가
+    // 같은 규칙을 쓴다.
+    float    sym_rate_hz;
+    float    sym_conf;
 };
 #pragma pack(pop)
+
+// 이 아래 두 오프셋은 수신측 길이 게이트의 기준점이다. 구버전 HOST 가 보내는
+// 레코드는 sym_rate_hz 앞에서 끝난다.
+static constexpr size_t AMC_WIRE_BASE_LEN = offsetof(AmcWire, sym_rate_hz);
 
 inline void amc_to_wire(const AmcRecord& r, AmcWire& w){
     w = AmcWire{};
@@ -75,6 +103,8 @@ inline void amc_to_wire(const AmcRecord& r, AmcWire& w){
     w.ch = r.ch; w.cls = r.cls; w.cls2 = r.cls2;
     w.conf = r.conf; w.conf2 = r.conf2; w.snr_db = r.snr_db;
     w.trig = r.trig;
+    w.sym_rate_hz = r.sym_rate_hz;
+    w.sym_conf    = r.sym_conf;
     memcpy(w.model, r.model, sizeof(w.model));
     for(int i=0;i<AMC_NCLASS;i++){
         float v = r.p[i]*1000.f + 0.5f;
@@ -88,6 +118,8 @@ inline void amc_from_wire(const AmcWire& w, AmcRecord& r){
     r.ch = w.ch; r.cls = w.cls; r.cls2 = w.cls2;
     r.conf = w.conf; r.conf2 = w.conf2; r.snr_db = w.snr_db;
     r.trig = w.trig;
+    r.sym_rate_hz = w.sym_rate_hz;
+    r.sym_conf    = w.sym_conf;
     memcpy(r.model, w.model, sizeof(r.model));
     r.model[sizeof(r.model)-1] = 0;
     for(int i=0;i<AMC_NCLASS;i++) r.p[i] = w.p_permille[i]/1000.f;

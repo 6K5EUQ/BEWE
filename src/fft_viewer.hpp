@@ -609,6 +609,8 @@ public:
         int    auto_pulse_count = 0; // 검출된 펄스 수
     };
     void eid_auto_analyze_tag(EidTag& tag);
+    // 심볼율을 자동 추정해 baud 선·baseline 을 채운다. 실패 시 아무것도 안 바꾸고 false.
+    bool eid_auto_baud();
 
     // 성상도 재생 상태
     double eid_const_pos = 0;       // 현재 재생 위치 (샘플 인덱스)
@@ -652,6 +654,15 @@ public:
     int    eid_bits_scroll = 0;      // 스크롤 위치 (줄 단위)
     float  eid_bits_zoom = 1.0f;    // 줌 배율 (1.0 = 기본, Ctrl+휠로 조절)
     float  eid_bits_hscroll = 0.0f; // 수평 스크롤 (픽셀 단위)
+    // 프레임 구조 자동 추출 결과 (src/frame_analyze.hpp). 표시 전용 — 디스크에도
+    // 라이브러리에도 안 남는다. SA 자동측정치를 .info/Library 에서 의도적으로
+    // 제외하는 기존 방침(net_protocol.hpp 의 sighting 주석)과 같은 취급이다.
+    bool   eid_frm_valid = false;
+    int    eid_frm_pre_len = 0, eid_frm_pre_unit = 0;
+    uint32_t eid_frm_pre_pat = 0;
+    int    eid_frm_period = 0, eid_frm_sync_off = 0, eid_frm_sync_len = 0;
+    uint64_t eid_frm_sync_bits = 0;
+    int    eid_frm_payload = 0, eid_frm_frames = 0;
 
     // 스펙트로그램 통합 뷰 히스토리
     struct SaViewEntry { float x0,x1,y0,y1; bool had_bpf; };

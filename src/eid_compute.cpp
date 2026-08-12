@@ -1,5 +1,6 @@
 #include "fft_viewer.hpp"
 #include "sigmf.hpp"
+#include "symrate.hpp"
 #include <cstdio>
 #include <cmath>
 #include <cstring>
@@ -177,6 +178,62 @@ void FFTViewer::eid_auto_analyze_tag(EidTag& tag){
     uint32_t sr = eid_sample_rate > 0 ? eid_sample_rate : 1;
     tag.auto_pri_us = median_interval / sr * 1e6f;
     tag.auto_prf_hz = (float)sr / median_interval;
+}
+
+// ── 심볼율 자동 추정 → baud 선 + baseline 자동 배치 ──────────────────────────
+// Bits 뷰는 원래 운용자가 baud 선 두 개(B 키)와 baseline(우클릭)을 손으로 찍어야만
+// 켜졌다. 그 수동 전제 때문에 프레임 구조 분석을 붙일 자리가 없었다 — 자동 분석을
+// 하려면 사람이 먼저 눈대중으로 심볼폭을 재야 하는 모순이었다.
+//
+// 여기서 src/symrate.hpp 로 심볼율을 재고, 그 결과로 두 값을 채운다:
+//   · baud 선 간격 = eid_sample_rate / 심볼율
+//   · baseline     = 선택된 소스의 중앙값 (0/1 을 가르는 임계)
+//
+// 실패(미검출)하면 아무것도 건드리지 않고 false 를 돌려준다 — 잘못된 간격으로
+// 채워 두면 운용자가 그걸 참으로 알고 읽는다.
+bool FFTViewer::eid_auto_baud(){
+    if(!eid_data_ready.load()) return false;
+    if(eid_ch_i.empty()) return false;
+    const uint32_t sr = eid_sample_rate > 0 ? eid_sample_rate : 1;
+
+    // 추정기는 인터리브 복소를 받는다. IQ 파일이 아니면(모노) Q=0 으로 채운다 —
+    // 그래도 |x|² 경로는 그대로 동작한다.
+    const size_t n_all = eid_ch_i.size();
+    const size_t N = std::min<size_t>(n_all, 65536);   // 앞부분이면 충분하다
+    if(N < 512) return false;
+    std::vector<float> iq(N*2);
+    const bool has_q = (eid_ch_q.size() >= N);
+    for(size_t i=0;i<N;i++){
+        iq[2*i]   = eid_ch_i[i];
+        iq[2*i+1] = has_q ? eid_ch_q[i] : 0.f;
+    }
+
+    symrate::Result r = symrate::estimate(iq.data(), (int)N, (double)sr);
+    if(!(r.rate_hz > 0.f)) return false;
+
+    double interval = (double)sr / (double)r.rate_hz;
+    if(!(interval >= 2.0) || interval > (double)n_all) return false;
+
+    // baseline 은 현재 선택된 소스의 중앙값. 평균이 아니라 중앙값인 이유는
+    // 0/1 비율이 한쪽으로 치우친 열에서도 임계가 가운데 남기 때문이다.
+    const std::vector<float>* src = nullptr;
+    switch(eid_baseline_imode){
+        case 0: src = eid_envelope.empty()  ? nullptr : &eid_envelope;  break;
+        case 1: src = eid_ch_i.empty()      ? nullptr : &eid_ch_i;      break;
+        case 2: src = eid_phase.empty()     ? nullptr : &eid_phase;     break;
+        case 3: src = eid_inst_freq.empty() ? nullptr : &eid_inst_freq; break;
+        default: break;
+    }
+    if(!src) return false;
+    std::vector<float> tmp(src->begin(), src->begin()+(ptrdiff_t)std::min(src->size(), N));
+    std::nth_element(tmp.begin(), tmp.begin()+(ptrdiff_t)(tmp.size()/2), tmp.end());
+    eid_baseline_val    = tmp[tmp.size()/2];
+    eid_baseline_active = true;
+
+    eid_baud_s0   = 0.0;
+    eid_baud_s1   = interval;
+    eid_baud_mode = true;
+    return true;
 }
 
 // ── ch_i/ch_q 로부터 envelope/phase/inst_freq 재계산 ─────────────────────────
