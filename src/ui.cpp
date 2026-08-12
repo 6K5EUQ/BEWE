@@ -6462,10 +6462,20 @@ void run_streaming_viewer(){
             // 0=빨강(연결/HB 끊김 또는 HOST SDR 에러) 1=초록(정상) 2=노랑(HOST 가 /rx stop 등으로 중단)
             bool sdr_on = false;
             int  sdr_led = 0;
+            double hb_age = 1e9;   // 마지막 하트비트 이후 초 (LINK 도 같이 쓴다)
             if(v.net_cli){
                 double lht = v.net_cli->last_heartbeat_time.load();
-                bool hb_ok = (lht > 0.0) && (glfwGetTime() - lht) < 5.0;
+                // last_heartbeat_time 은 steady_clock 이다. 예전엔 여기만 glfwGetTime()
+                // 으로 뺐는데, 그쪽은 GLFW 초기화 기준이라 차가 큰 음수가 나와
+                // hb_ok 가 항상 참이었다 — 즉 이 램프의 stall 검사가 한 번도 동작한
+                // 적이 없다. HOST 가 멈춰 하트비트가 끊겨도 마지막으로 받은
+                // remote_sdr_state 를 계속 초록으로 그려서, 정작 제대로 빨강이 된
+                // LINK 와 모순되는 화면이 나왔다 (2026-08-12 DGS-2).
+                double now_sc = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
                 bool connected = v.net_cli->is_connected();
+                if(lht > 0.0) hb_age = now_sc - lht;
+                bool hb_ok = (lht > 0.0) ? (hb_age < 5.0) : connected;
                 uint8_t rst = v.net_cli->remote_sdr_state.load();
                 sdr_on = connected && hb_ok && rst == 0;
                 sdr_led = (!connected || !hb_ok) ? 0 : (rst == 0 ? 1 : rst == 2 ? 2 : 0);
@@ -6477,16 +6487,20 @@ void run_streaming_viewer(){
                 bool connected = v.net_cli->is_connected();
                 int  hs        = v.net_cli->host_state.load();
                 double lht2    = v.net_cli->last_heartbeat_time.load();
-                // steady_clock 기반으로 비교 (glfwGetTime과 시계 불일치 방지)
-                double now_sc  = std::chrono::duration<double>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count();
-                bool hb_ok     = (lht2 > 0.0) ? (now_sc - lht2) < 5.0 : connected;
-                // 초록=전부 정상, 노랑=통신은 되는데 일부가 멈춤, 빨강=통신 불가.
-                // host_state 1(chassis 리셋)·2(스펙트럼 정지)는 하트비트가 계속
-                // 오는 상태다 — 링크는 살아 있고 RX 만 멈춘 것이므로 노랑이다.
-                if(!connected || !hb_ok) link_state = 0;
-                else if(hs==1 || hs==2)  link_state = 2;
-                else                     link_state = 1;
+                bool hb_ok     = (lht2 > 0.0) ? (hb_age < 5.0) : connected;
+                // LINK 은 오직 "HOST 에게서 정보가 오고 있는가" 다. RX 가 멈췄는지
+                // 스펙트럼이 정지됐는지는 SDR·FFT 램프가 말한다 — 그걸 LINK 로
+                // 옮겨 칠하면 링크가 멀쩡한데 노랑이 떠서 운용자가 통신을 의심한다.
+                //
+                // 노랑은 "의도적이고 임시적인 네트워크 차단" 하나뿐이다. HOST 는
+                // /chassis 2 reset 을 걸기 직전에 host_state=2 를 한 번 뿌리고
+                // 약 1초 침묵한 뒤 0 으로 돌아온다. 스펙트럼 정지도 같은 값 2 를
+                // 쓰지만 그쪽은 하트비트가 1 Hz 로 계속 오므로, 마지막 하트비트가
+                // 오래됐는지로 둘을 가른다 (와이어 포맷을 안 바꾸고 구분하는 방법).
+                const bool net_cut_announced = (hs == 2) && (hb_age > 1.5);
+                if(!connected || !hb_ok)   link_state = 0;
+                else if(net_cut_announced) link_state = 2;
+                else                       link_state = 1;
             }
 
             // ── DF LED: 방탐 가용 상태 ───────────────────────────────────

@@ -179,7 +179,9 @@ public:
     std::atomic<uint64_t> remote_host_disk_total{0};
     std::atomic<uint64_t> remote_central_disk_free{0};
     std::atomic<uint64_t> remote_central_disk_total{0};
-    std::atomic<double>   last_heartbeat_time{0.0};  // glfwGetTime() at last HB
+    // steady_clock 의 epoch 기준 초. glfwGetTime() 과 비교하면 안 된다 — 그쪽은
+    // GLFW 초기화 시점부터 세므로 두 값의 차가 부팅시각만큼 어긋난다.
+    std::atomic<double>   last_heartbeat_time{0.0};  // steady_clock at last HB
     std::mutex            remote_antenna_mtx;
     char                  remote_antenna[32] = {};    // HOST의 안테나 (HB 수신 시 갱신)
     char                  remote_sdr_kind[16] = {};   // HOST의 SDR 모델명 (HB 수신 시 갱신)
