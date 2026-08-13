@@ -124,6 +124,12 @@ public:
 
     // ── FFT / waterfall data ──────────────────────────────────────────────
     FFTHeader            header;
+    // 오토스케일이 양자화 창(header.power_min/max)을 한 번이라도 잡았나.
+    // initialize() 가 재접속마다 창을 기본값(-100/0)으로 되돌리면 HIST 가 그때마다
+    // 갈린다 — 2초 뒤 오토스케일이 같은 값으로 되돌아오며 또 갈린다. 이 플래그가
+    // 서 있으면 initialize() 는 창을 건드리지 않는다 (FFTHeader 는 POD 라 첫
+    // 기동 시 값이 불확정이므로 pmax>pmin 같은 추측 대신 플래그로 판별한다).
+    bool                 quant_window_valid = false;
     std::vector<float>   fft_data;
     GLuint               waterfall_texture=0;
     std::vector<uint32_t> wf_row_buf;

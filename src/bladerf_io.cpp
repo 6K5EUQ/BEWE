@@ -249,7 +249,11 @@ bool FFTViewer::initialize_bladerf(float cf_mhz, float sr_msps){
     header.center_frequency=(uint64_t)(cf_mhz*1e6);
     live_cf_hz.store((uint64_t)(cf_mhz*1e6), std::memory_order_release);
     time_average=hw.compute_time_average(fft_input_size);
-    header.time_average=time_average; header.power_min=-100; header.power_max=0; header.num_ffts=0;
+    header.time_average=time_average; header.num_ffts=0;
+    // 양자화 창은 재접속에서 살린다. 기본값으로 되돌리면 HIST 가 한 번 갈리고,
+    // 2초 뒤 오토스케일이 같은 값을 다시 잡으며 또 갈린다 (실측 2026-08-13 DGS-2:
+    // USB 타임아웃 65회 -> 파일 108조각). 첫 기동에서만 기본값을 넣는다.
+    if(!quant_window_valid){ header.power_min=-100; header.power_max=0; }
     fft_data.resize((size_t)FFT_HISTORY_ROWS*fft_size);
     current_spectrum.resize(fft_size,-100.0f);
 
@@ -671,6 +675,8 @@ void FFTViewer::commit_fft_row(const std::vector<float>& pacc, int fcnt){
              autoscale_db_window(noise,peak,lo_db,display_power_min,display_power_max);
              header.power_min=display_power_min;
              header.power_max=display_power_max;
+             // 이제 진짜 창이 잡혔다 — 재접속이 이걸 기본값으로 되돌리지 않게 한다.
+             quant_window_valid = true;
              bewe_log_push(0,"[autoscale]%s noise=%.1f peak=%.1f lo=%.1f → pmin=%.1f pmax=%.1f\n",
                  deadline?" (deadline)":"", noise, peak, lo_db,
                  display_power_min, display_power_max);
