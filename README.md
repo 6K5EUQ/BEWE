@@ -94,6 +94,10 @@ When the same signal is received simultaneously across active collection sites, 
 
 - **Multi-site Line of Bearing (LOB)** — each active site projects a bearing toward the emitter; intersecting LOBs localize the source in real time
 - **On-globe emitter fix** — the estimated source position and its error ellipse are rendered live on the 3D globe alongside the collection nodes
+- **Site-measured array calibration** — bearings are solved against the array response measured at the site, not an idealized model, so mounting tolerance and nearby structure are absorbed rather than left as bias
+- **Arbitrary array geometry** — element positions are laid out to fit the site; the platform recommends the array dimensions matching the tuned frequency
+- **Continuous and burst measurement** — a burst emitter is measured from held frames, so a short transmission still yields a bearing
+- **Per-frequency fixes** — bearings are grouped by frequency and solved separately, keeping simultaneous emitters on one band from collapsing into a single fix
 
 ![Multi-site LOBs converging on an emitter](assets/df1.png)
 ![Emitter fix with error ellipse](assets/df2.png)
@@ -119,11 +123,23 @@ Beyond raw collection, BEWE decodes the **content** of structured digital transm
 | Module | Signal | Decoded |
 |---|---|---|
 | **ACARS** | VHF aircraft datalink (~131 MHz) | Aircraft registration · flight · type · airline · country · message label/text · uplink/downlink direction |
+| **ADS-B** | Mode S extended squitter (1090 MHz) | ICAO 24-bit address · callsign · barometric altitude · position · category — CRC-verified, rendered on the map overlay |
 | **AIS** | Maritime VHF (161.975 / 162.025 MHz) | Vessel MMSI · position · course · type · name — rendered on a 2D map overlay |
 | **WiFi (802.11)** | 2.4 / 5 GHz beacons | SSID · primary channel · security (Open/WPA/WPA2) · PHY generation (11b/g/n/ac/ax) · BSSID — decoded from both 6 Mbps OFDM and 1 Mbps DSSS beacons |
+| **Bluetooth LE** | BLE advertising and data channels (2.4 GHz) | Advertiser MAC · device name · manufacturer company ID · iBeacon fields; connection following recovers access address, CRC init, and the 37-bit channel map |
 | **DMR** | Digital Mobile Radio (4FSK, 12.5 kHz · UHF/VHF) | Color code · timeslot · source/destination ID (talkgroup) · call type (group/individual) · LC/CSBK opcode — Tier II conventional, FEC-verified (Golay Slot Type · BPTC(196,96) · CRC) from the 4FSK burst (signalling/metadata; AMBE voice not decoded) |
+| **AMC** | Any demodulator channel | Modulation class with confidence — BPSK · QPSK · 8PSK · 16QAM · 64QAM · 2FSK · 4FSK · GMSK · MSK · AM · FM · OFDM. Classified on the collecting station; a squelch opening triggers one inference |
+| **STT** | Intercepted voice traffic | Speech transcribed to text per utterance, attributed to the station and channel that heard it |
 
 Each station presents its decoded inventory — aircraft overhead, vessels in the littoral, access points in the operational area — as a continuously updated, cross-station fused picture.
+
+### On-Station Machine Learning
+
+Classification runs where the signal is collected, not in a rear analysis cell. Each model is a separately provisioned subsystem: a station without it keeps every other capability, and gaining it requires no change to the collection software.
+
+- **Modulation classification (AMC)** — a squelch opening submits the burst to a neural classifier on the station; the class and its probabilities appear on the channel row. Inference is bounded so a slow or failed model degrades to no classification rather than stalling collection.
+- **Emitter fingerprinting** — a transmitter is recognized from its own RF characteristics and the result is shown beside the identity the message claims, so a disagreement between the two is visible to the analyst. Unfamiliar transmitters are reported as unknown rather than forced onto the nearest match.
+- **Speech transcription** — intercepted voice becomes searchable text alongside the audio recording.
 
 ### Electronic Intelligence (ELINT) and Missile Signal Analysis
 
@@ -155,6 +171,15 @@ Chinese, Russian, and DPRK ISR satellites — every overhead pass automatically 
 - **Distributed Doppler fingerprinting** — Doppler curves compared across receive sites to disambiguate satellite mission (comms / ISR / GNSS jamming)
 
 ![3D Globe satellite view](assets/globe_sat_soi.png)
+
+#### Identifying the Satellite Behind a Recorded Signal
+
+An archived recording holds every overhead pass it caught, but not their names. Scanning one resolves the falling S-curve of each pass into a ranked list of candidate satellites.
+
+- **Automatic track extraction** — the scan finds the Doppler curves in the recording and separates satellite passes from ground traffic, which drifts by orders of magnitude less. Continuous and burst transmitters are searched in one run, since beacon satellites transmit too intermittently for a continuous-signal search to hold their track.
+- **Ranked candidates against the catalog** — each track is fitted and matched to the orbital catalog, returning catalog number, orbit height and inclination, maximum elevation, approach bearing, and a fit grade relative to the measurement noise of that observation.
+- **Orbital elements for the date of the recording** — the Central Server keeps a dated archive of orbital elements and serves the set matching the recording. Propagating today's elements backward degrades rapidly, so a recording is always matched against elements from its own date, with the age of those elements shown alongside the result.
+- **Selectable detection sensitivity** — loose, normal, and strict thresholds trade weak-signal recall against false tracks; the selected track is outlined on the waterfall with its observed curve and fitted model.
 
 ### Persistent SIGINT Archive
 
