@@ -129,7 +129,6 @@ Beyond raw collection, BEWE decodes the **content** of structured digital transm
 | **Bluetooth LE** | BLE advertising and data channels (2.4 GHz) | Advertiser MAC · device name · manufacturer company ID · iBeacon fields; connection following recovers access address, CRC init, and the 37-bit channel map |
 | **DMR** | Digital Mobile Radio (4FSK, 12.5 kHz · UHF/VHF) | Color code · timeslot · source/destination ID (talkgroup) · call type (group/individual) · LC/CSBK opcode — Tier II conventional, FEC-verified (Golay Slot Type · BPTC(196,96) · CRC) from the 4FSK burst (signalling/metadata; AMBE voice not decoded) |
 | **AMC** | Any demodulator channel | Modulation class with confidence — BPSK · QPSK · 8PSK · 16QAM · 64QAM · 2FSK · 4FSK · GMSK · MSK · AM · FM · OFDM. Classified on the collecting station; a squelch opening triggers one inference |
-| **STT** | Intercepted voice traffic | Speech transcribed to text per utterance, attributed to the station and channel that heard it |
 
 Each station presents its decoded inventory — aircraft overhead, vessels in the littoral, access points in the operational area — as a continuously updated, cross-station fused picture.
 
@@ -139,7 +138,6 @@ Classification runs where the signal is collected, not in a rear analysis cell. 
 
 - **Modulation classification (AMC)** — a squelch opening submits the burst to a neural classifier on the station; the class and its probabilities appear on the channel row. Inference is bounded so a slow or failed model degrades to no classification rather than stalling collection.
 - **Emitter fingerprinting** — a transmitter is recognized from its own RF characteristics and the result is shown beside the identity the message claims, so a disagreement between the two is visible to the analyst. Unfamiliar transmitters are reported as unknown rather than forced onto the nearest match.
-- **Speech transcription** — intercepted voice becomes searchable text alongside the audio recording.
 
 ### Electronic Intelligence (ELINT) and Missile Signal Analysis
 

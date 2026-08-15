@@ -289,18 +289,10 @@ static void draw_targets(FFTViewer& v){
             //    Holding 은 CF 범위 밖이라 복조 정지 → decode_on 이어도 RUN 아님 ──
             bool run_live = (r.running>=0 && !r.hold);
             ImGui::TableSetColumnIndex(5);
-            // STT: 모델 로드 중이면 READY(노랑), 준비완료면 RUN(초록). stt_ready 는 HOST 로컬
-            // 채널 상태 → 원격 JOIN 행에선 조회 불가(항상 RUN 표시). 내가 HOST(my_station="")일 때만.
-            bool is_local = (bewe_mod_my_station()[0]==0);
-            bool stt_dec = run_live && strcmp(mods[r.running].id,"stt")==0;
-            bool stt_not_ready = false;
-            if(stt_dec && is_local && r.ch>=0 && r.ch<MAX_CHANNELS && !v.channels[r.ch].stt_ready.load())
-                stt_not_ready = true;
             // detect 채널은 idle 대신 탐색/검출 상태를 보여준다 (decode 가 실제로 도는 RUN 은 그대로 우선).
             //   SCAN(노랑)   = armed, 대역을 훑는 중 — 아직 신호 없음
             //   LOCKED(초록) = 신호를 잡아 필터가 그 폭으로 좁혀진 상태
-            if(stt_not_ready){ ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f,0.85f,0.30f,1.f)); cell_ctr("READY");  ImGui::PopStyleColor(); }
-            else if(run_live){ ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f,0.95f,0.45f,1.f)); cell_ctr("RUN");    ImGui::PopStyleColor(); }
+            if(run_live)     { ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f,0.95f,0.45f,1.f)); cell_ctr("RUN");    ImGui::PopStyleColor(); }
             else if(r.det==2){ ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f,0.95f,0.45f,1.f)); cell_ctr("LOCKED"); ImGui::PopStyleColor(); }
             else if(r.det==1){ ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f,0.85f,0.30f,1.f)); cell_ctr("SCAN");   ImGui::PopStyleColor(); }
             else             { ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f,0.5f,0.56f,1.f));   cell_ctr("idle");   ImGui::PopStyleColor(); }

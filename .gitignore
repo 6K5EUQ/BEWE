@@ -108,10 +108,6 @@ BEAE/ais/data/ai_model/
 BEAE/ais/data/ai_model_proto/
 # GUARD 런타임 출력 — 일자별 alert JSONL(실선박 MMSI·좌표)·데몬 로그. 공개 리포라 추적 금지.
 BEAE/ais/data/guard/
-# BEAE STT POC (venv + 러닝로그 — 코드만 추적)
-BEAE/stt/.venv/
-BEAE/stt/**/__pycache__/
-BEAE/stt/*.log
 # BEAE AMC (자동변조인식) — AIS 와 동일 정책: 코드만 추적, 데이터/모델 로컬 전용
 BEAE/amc/.venv/
 BEAE/amc/**/__pycache__/
