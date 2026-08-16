@@ -20,11 +20,15 @@ downloads/
 DataBase/
 
 # Auto-fetched TLE catalogs (regenerated from celestrak.org on startup).
-# SOI_tle.txt is operator-defined and IS tracked.
 assets/tle/starlink_tle.txt
 assets/tle/etc_tle.txt
 assets/tle/SOT_tle.txt
 assets/tle/leo_tle.txt
+# 관심위성 원소 캐시. 런타임이 24h 마다 덮어쓰므로 추적하면 모든 머신이 영구
+# 수정 상태가 되어 git pull --ff-only 를 막는다 (2026-08-15 에 작업 PC 와 DGS-1
+# 배포가 실제로 이것 때문에 막혔다). 목록 정본은 sat_view.cpp 의 kSoiDefault 이고,
+# 파일이 없으면 거기서 받아 온다.
+assets/tle/SOI_tle.txt
 # 스캔할 때마다 현재 카탈로그를 자기 에폭 날짜로 스냅샷해 쌓는다 (머신별 누적 데이터).
 # 과거 녹화를 그 시점 원소로 분석하려면 필요하다 — SGP4 오차는 에폭으로부터 |dt| 에만
 # 의존해 방향 대칭이라, 최신 TLE 를 과거로 되돌려도 묵은 TLE 를 앞으로 미는 것과 같다.

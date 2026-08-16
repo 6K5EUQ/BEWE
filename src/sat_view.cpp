@@ -198,6 +198,25 @@ void sat_tle_fetch(bool force) {
     if (!leo_fresh)      fetch_single  ("active",         "leo_tle.txt");
 }
 
+// 관심위성 목록. **여기가 목록의 정본이다** — SOI_tle.txt 는 그 원소를 담아 두는
+// 캐시일 뿐이다. 예전에는 파일이 곧 목록이라 git 이 추적해야 했는데, 같은 파일을
+// 런타임이 24시간마다 덮어쓰는 바람에 모든 머신에서 영구 수정 상태가 되어
+// `git pull --ff-only` 를 막았다 (2026-08-15 실측: 작업 PC 와 DGS-1 이 이것 때문에
+// 배포에서 밀렸다). 목록을 코드로 옮기고 파일을 untrack 해 그 충돌을 없앤다.
+// band_plan.json 이 쓰는 규약과 같다 — 기본값은 코드에, 파일은 없으면 만든다.
+// 이름은 주석으로만 둔다 — 받아 오는 데 필요한 건 NORAD 번호뿐이고, 이름은
+// Celestrak 응답의 0행에 실려 온다.
+static const int kSoiDefault[] = {
+    25544,   // ISS (ZARYA)
+    58400,   // MALLIGYONG-1
+    58463,   // KORSAT-7
+    59452,   // KORSAT-1
+    62377,   // KORSAT-2
+    63630,   // KORSAT-3
+    39227,   // ARIRANG-5 (KOMPSAT-5)
+    40536,   // KOMPSAT-3A
+};
+
 // Refresh SOI_tle.txt every 24h via per-satellite CATNR queries (parallel).
 // NORAD updates LEO 1–3×/day, so 24h granularity is the practical sweet spot.
 void sat_tle_refresh_soi(bool force) {
@@ -210,15 +229,21 @@ void sat_tle_refresh_soi(bool force) {
         fprintf(stderr, "[sat_tle] SOI <24h old, skipping refresh\n");
         return;
     }
+    // 캐시가 없거나 깨졌으면 코드의 기본 목록으로 받아 온다 — 예전엔 여기서
+    // 포기해(skip refresh) 파일이 없는 머신에서는 기능이 통째로 죽었다.
+    std::vector<int> catnr;
     std::vector<TleElem> existing;
-    if (!tle_load(soi_path, existing) || existing.empty()) {
-        fprintf(stderr, "[sat_tle] SOI missing/empty, skip refresh\n");
-        return;
+    if (tle_load(soi_path, existing) && !existing.empty()) {
+        for (auto& e : existing) catnr.push_back(e.catalog_num);
+    } else {
+        for (int n : kSoiDefault) catnr.push_back(n);
+        fprintf(stderr, "[sat_tle] SOI cache missing - seeding %zu sats from defaults\n",
+                catnr.size());
     }
     // Build a single shell command: parallel curl -Z, then cat & mv.
     std::string cmd = "curl --max-time 30 -fsS -A 'Mozilla/5.0' -Z";
     std::vector<std::string> tmp;
-    for (size_t i = 0; i < existing.size(); i++) {
+    for (size_t i = 0; i < catnr.size(); i++) {
         char buf[64];
         snprintf(buf, sizeof buf, "%s/.soi_%zu.tmp", dir.c_str(), i);
         tmp.emplace_back(buf);
@@ -226,7 +251,7 @@ void sat_tle_refresh_soi(bool force) {
         snprintf(part, sizeof part,
             " -o '%s' 'https://celestrak.org/NORAD/elements/"
             "gp.php?CATNR=%d&FORMAT=tle'",
-            tmp.back().c_str(), existing[i].catalog_num);
+            tmp.back().c_str(), catnr[i]);
         cmd += part;
     }
     std::string out_tmp = soi_path + ".new";
@@ -237,11 +262,11 @@ void sat_tle_refresh_soi(bool force) {
     for (auto& t : tmp) cmd += " '" + t + "'";
     cmd += " '" + out_tmp + "'";
     fprintf(stderr, "[sat_tle] refreshing SOI list (%zu sats) ...\n",
-            existing.size());
+            catnr.size());
     int rc = system(cmd.c_str());
     if (rc == 0)
         fprintf(stderr, "[sat_tle] update complete: SOI_tle.txt (%zu sats)\n",
-                existing.size());
+                catnr.size());
     else
         fprintf(stderr, "[sat_tle] update FAILED: SOI_tle.txt (rc=%d)\n", rc);
 }
