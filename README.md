@@ -53,6 +53,21 @@ BEWE does not replace existing SIGINT assets. **It densely fills the low-altitud
 
 ---
 
+## Sovereign, Persistent ISR — What BEWE Is Built For
+
+Allied intelligence sharing is a policy decision, not a guarantee — when it is restricted or delayed, ROK forces must watch the front on their own assets. Manned SIGINT aircraft are few, expensive, and cannot be on station everywhere at once, and additional airframes are years away. Systems procured to a paper specification frequently arrive too complex for the soldier who actually has to run them.
+
+BEWE is designed against those realities:
+
+| Reality | BEWE Design Answer |
+|---|---|
+| Allied feeds can be cut off or delayed | Wholly domestic collection chain — nodes, fusion server, and archive under national control |
+| Manned platforms: few, costly, not always-on | Unattended COTS ground nodes running 24/7; dozens fielded for the cost of one airborne platform |
+| Operator is a conscript, not an RF engineer | Nodes run headless with no on-site operator; the analyst works from one JOIN screen — waterfall, click, listen |
+| Acquisition measured in years | Already fielded on live stations today — a system to trial and scale, not a roadmap item |
+
+---
+
 ## Platform Overview
 
 Forward collection nodes (HOST) · analyst command and control (JOIN) · SIGINT fusion server (Central) — three tiers operating as a single platform.
