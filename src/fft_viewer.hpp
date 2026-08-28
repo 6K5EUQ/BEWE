@@ -778,6 +778,10 @@ public:
     uint8_t     my_op_index   = 0;
 
     // ── Globe / Station Discovery ─────────────────────────────────────────
+    // 폴링 응답 하나를 놓쳤다고 마커가 사라지면 안 된다 — LTE 처럼 지터 큰 회선에서
+    // 깜빡임으로 보인다. 재연결 최악값(backoff 2s + 수신 타임아웃 5s)까지 덮도록
+    // 폴링 주기(3s)보다 넉넉히 잡는다.
+    static constexpr double STATION_GRACE_SEC = 10.0;
     struct DiscoveredStation {
         std::string name;
         std::string station_id;    // relay 모드: 룸 ID; LAN 모드: ""
@@ -787,7 +791,7 @@ public:
         std::string ip;
         uint8_t     user_count = 0;
         uint8_t     host_tier  = 1;
-        double      last_seen  = 0.0; // glfwGetTime()
+        double      last_seen  = 0.0; // 만료 시각 = 마지막 응답 + STATION_GRACE_SEC
     };
     std::vector<DiscoveredStation> discovered_stations;
     std::mutex                     discovered_stations_mtx;

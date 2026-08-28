@@ -2376,8 +2376,10 @@ void run_streaming_viewer(){
     // Relay 클라이언트: Relay 주소가 설정돼 있으면 인터넷 스테이션 폴링
     CentralClient central_cli;
     if(s_central_host[0] != '\0'){
-        // 자식 세션(join/host)은 geo 캐시 갱신용이라 5s 로 충분 — parent globe 만
-        // 700ms 유지 (last_seen grace 1s 커플링, 기지 마커 깜빡임 방지)
+        // 기지 위치·구성은 거의 안 바뀐다 — 빠른 폴링에 실익이 없고, LTE 처럼
+        // 지터 큰 회선에서는 응답 하나만 늦어도 마커가 사라졌다 살아나며 깜빡였다.
+        // 그래서 parent globe 도 3s 로 늦추고, grace(STATION_GRACE_SEC)를 10s 로
+        // 넉넉히 잡아 재연결 공백(backoff 2s + 수신 타임아웃 5s)까지 덮는다.
         central_cli.start_polling(s_central_host, s_central_port,
             [&](const std::vector<CentralClient::Station>& stations){
                 std::lock_guard<std::mutex> lk(v.discovered_stations_mtx);
@@ -2396,7 +2398,7 @@ void run_streaming_viewer(){
                             s.lon        = rs.lon;
                             s.user_count = rs.user_count;
                             s.host_tier  = rs.host_tier ? rs.host_tier : 1;
-                            s.last_seen  = now + 1.0;
+                            s.last_seen  = now + FFTViewer::STATION_GRACE_SEC;
                             found = true; break;
                         }
                     }
@@ -2410,11 +2412,11 @@ void run_streaming_viewer(){
                         ns.ip         = "";
                         ns.user_count = rs.user_count;
                         ns.host_tier  = rs.host_tier ? rs.host_tier : 1;
-                        ns.last_seen  = now + 1.0;
+                        ns.last_seen  = now + FFTViewer::STATION_GRACE_SEC;
                         v.discovered_stations.push_back(ns);
                     }
                 }
-            }, g_session_args.mode_set ? 5000 : 700);
+            }, g_session_args.mode_set ? 5000 : 3000);
     }
 
     // Pop-up state machine
@@ -2616,8 +2618,7 @@ void run_streaming_viewer(){
         toggle_fullscreen();
         ImGuiIO& io = ImGui::GetIO();
 
-        // Purge stale stations: last_seen이 현재 시각보다 과거면 즉시 제거
-        // grace=1초 (persistent TCP 폴링이므로 1초 주기가 실효 보장됨)
+        // Purge stale stations: last_seen(= 마지막 응답 + grace)이 지나면 제거.
         {
             std::lock_guard<std::mutex> lk(v.discovered_stations_mtx);
             double now2 = glfwGetTime();
