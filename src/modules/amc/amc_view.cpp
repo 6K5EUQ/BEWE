@@ -2,7 +2,6 @@
 #include "amc_module.hpp"
 #include "module_api.hpp"
 #include "fft_viewer.hpp"
-#include "kst_time.hpp"
 #include <imgui.h>
 #include <cstdio>
 #include <cstring>
@@ -10,16 +9,10 @@
 #include <string>
 #include <vector>
 #include <algorithm>   // std::nth_element (심볼율 중앙값)
-#include <ctime>
 
 namespace amc_mod {
 
 namespace {
-void hms(int64_t ms, char* o){
-    time_t t=(time_t)(ms/1000); struct tm tv; KST::to_tm(t,tv);
-    strftime(o,12,"%H:%M:%S",&tv);
-}
-
 // 신뢰도 색. 낮은 값을 초록으로 칠하면 운용자가 확정으로 오해한다.
 // 0.8↑ 초록 / 0.5↑ 노랑 / 그 아래 회색.
 ImVec4 conf_col(float c){
@@ -56,7 +49,6 @@ void draw_panel(FFTViewer& v){
     struct Agg {
         float   p[AMC_NCLASS] = {};
         int     n = 0;
-        int64_t t_ms = 0;          // 가장 최근 측정 시각
         float   freq = 0, bw = 0;
         char    model[16] = {};
         // 심볼율은 확률처럼 평균내지 않고 **중앙값**을 쓴다. 물리적으로 하나뿐인
@@ -81,7 +73,7 @@ void draw_panel(FFTViewer& v){
             if(since && m.t_ms < since) continue;
             Agg& a = agg[m.ch];
             if(!has[m.ch]){                         // 이 채널의 최신 = 기준
-                has[m.ch]=true; a.freq=m.freq; a.bw=m.bw_khz; a.t_ms=m.t_ms;
+                has[m.ch]=true; a.freq=m.freq; a.bw=m.bw_khz;
                 memcpy(a.model, m.model, sizeof(a.model));
             } else {
                 if(a.n >= MAX_AGG) continue;
@@ -118,18 +110,17 @@ void draw_panel(FFTViewer& v){
         ImGui::PushID(ci);
         if(has[ci]){
             const Agg& a = agg[ci];
-            char ts[12]; hms(a.t_ms, ts);
-            // 헤더는 "어느 채널의 언제 측정인가"만. 판정 결과는 바로 아래 막대가
-            // 이미 말하고 있어서 같은 값을 두 번 쓰면 줄만 시끄러워진다.
+            // 헤더는 "어느 채널인가"만. 판정 결과는 바로 아래 막대가 이미 말하고
+            // 있어서 같은 값을 두 번 쓰면 줄만 시끄러워진다.
             ImGui::Text("[%2d] %9.4f MHz", v.freq_sorted_display_num(ci), cf);
             ImGui::SameLine();
             if(a.nsr > 0){
                 float sv[32];
                 memcpy(sv, a.sr, sizeof(float)*(size_t)a.nsr);
                 std::nth_element(sv, sv+a.nsr/2, sv+a.nsr);
-                ImGui::TextDisabled("%s  n=%d  %.0f Bd", ts, a.n, sv[a.nsr/2]);
+                ImGui::TextDisabled("n=%d  %.0f Bd", a.n, sv[a.nsr/2]);
             } else {
-                ImGui::TextDisabled("%s  n=%d", ts, a.n);
+                ImGui::TextDisabled("n=%d", a.n);
             }
 
             // 막대는 확률 내림차순 — 가장 유력한 후보가 항상 맨 위에 온다.
