@@ -42,7 +42,7 @@ def _report_closed(classes, va_y, probs, taus, log):
 
 
 def run_eval(cfg: Config, days: int, holdout_k: int = 0, baseline: bool = False,
-             crop: str = "preamble", log=print):
+             crop: str = "clean", log=print):
     bursts = load_bursts(cfg, days, crop)
     if holdout_k > 0:
         # hold out K mid-frequency eligible classes entirely, retrain, measure

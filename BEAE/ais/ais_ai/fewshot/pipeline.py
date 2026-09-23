@@ -13,11 +13,12 @@ import torch
 import torch.nn.functional as F
 
 from ..aicap import day_files, iter_file
-from ..dataset import resample_to_nominal
+from ..dataset import crop_bounds, resample_to_nominal
 from .model import ProtoEmbed, prototypical_loss
 from .residual import extract, N_CHANNELS, N_AUX
 
 EMB = ProtoEmbed.EMB
+CROP = "clean"   # payload-free window (see config.crop_clean_*)
 
 
 def proto_dir(cfg):
@@ -26,7 +27,7 @@ def proto_dir(cfg):
 
 # ── data ────────────────────────────────────────────────────────────────────
 def load_residual(cfg, days, log=print):
-    start, length = cfg.crop_preamble_start, cfg.crop_preamble_len
+    start, length = crop_bounds(cfg, CROP)
     per = {}
     for path in day_files(cfg.data_dir, days):
         for rec in iter_file(path):
@@ -67,7 +68,7 @@ def time_split(cfg, bursts):
         vaF.append(f[vm]); vaA.append(a[vm]); vaY.append(np.full(vm.sum(), y))
     z = lambda shape: np.zeros((0, *shape), np.float32)
     cat = lambda l, shape: np.concatenate(l) if l else z(shape)
-    L = cfg.crop_preamble_len
+    L = crop_bounds(cfg, CROP)[1]
     return {
         "classes": classes,
         "tr": (cat(trF, (N_CHANNELS, L)), cat(trA, (N_AUX,)),
@@ -235,7 +236,7 @@ def publish(cfg, model, result, days, log=print):
     mname, jname = f"embed_v{ver:04d}.pt", f"protos_v{ver:04d}.json"
     torch.save({k: v.cpu() for k, v in model.state_dict().items()}, os.path.join(d, mname))
     meta = {**result, "version": ver, "days": days, "emb": EMB,
-            "crop": "preamble", "n_channels": N_CHANNELS, "n_aux": N_AUX,
+            "crop": CROP, "n_channels": N_CHANNELS, "n_aux": N_AUX,
             "trained_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     json.dump(meta, open(os.path.join(d, jname), "w"))
     tmp = os.path.join(d, "current.json.tmp")

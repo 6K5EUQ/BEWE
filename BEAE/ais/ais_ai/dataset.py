@@ -1,8 +1,9 @@
 """Dataset assembly: crop, normalize, time-split, class selection.
 
 Leakage rules (do not weaken):
-- default crop excludes the AIS payload (payload bits 8-37 spell the MMSI —
-  a payload-seeing model "demodulates" the label instead of fingerprinting).
+- default crop ("clean") ends before the AIS payload (payload bits 8-37 spell the
+  MMSI — a payload-seeing model "demodulates" the label instead of fingerprinting).
+  The legacy "preamble" crop overran the payload by ~18 bits; inference only.
 - split is by TIME per class with a guard gap; adjacent bursts are
   near-duplicates so a random split reports fantasy accuracy.
 """
@@ -13,6 +14,8 @@ from .config import Config
 
 
 def crop_bounds(cfg: Config, crop: str):
+    if crop == "clean":
+        return cfg.crop_clean_start, cfg.crop_clean_len
     if crop == "preamble":
         return cfg.crop_preamble_start, cfg.crop_preamble_len
     if crop == "payload":

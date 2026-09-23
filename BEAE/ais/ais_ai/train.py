@@ -64,7 +64,7 @@ def _logits_all(model, x: torch.Tensor, batch: int, device) -> torch.Tensor:
     return torch.cat(outs) if outs else torch.zeros(0)
 
 
-def train(cfg: Config, days: int, crop: str = "preamble", log=print):
+def train(cfg: Config, days: int, crop: str = "clean", log=print):
     log(f"loading aicap window: {days} days, crop={crop}")
     bursts = load_bursts(cfg, days, crop)
     model, meta, _ = _fit(cfg, bursts, crop, log)

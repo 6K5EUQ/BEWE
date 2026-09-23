@@ -21,8 +21,16 @@ class Config:
     ai_pre: int = 640          # gate index inside capture
     ai_cap: int = 896          # total capture length
 
-    # crop "preamble" (default, MMSI-leak-free): [gate-248, gate+72) = 320 samples
-    #   48 pre-roll tail + ~200 ramp/preamble/flag + 72 margin
+    # The gate fires ~19 samples AFTER the first payload bit (FIR/DPLL delay):
+    # measured payload start = sample 621 (median, p1 619) on 1,804 real bursts.
+    # crop "clean" (default): [gate-248, gate-32) = 216 samples — pre-roll tail +
+    #   ramp-up + training sequence + start flag only; ends ~2.6 bits before the
+    #   payload so GMSK ISI from payload bits cannot reach the window.
+    crop_clean_start: int = 640 - 248
+    crop_clean_len: int = 216
+    # crop "preamble" (legacy, models v1-v7 only): [gate-248, gate+72) = 320 samples.
+    #   LEAKS ~18 payload bits (message type, repeat, MMSI top bits) — kept only so
+    #   older models still infer on the window they were trained on. Do not train on it.
     crop_preamble_start: int = 640 - 248
     crop_preamble_len: int = 320
     # crop "payload" (ablation ONLY — includes MMSI bits, never deploy):

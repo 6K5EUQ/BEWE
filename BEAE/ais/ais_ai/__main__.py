@@ -13,13 +13,13 @@ def main():
 
     tp = sub.add_parser("train", help="full retrain from aicap window, publish for hot-swap")
     tp.add_argument("--days", type=int, default=14)
-    tp.add_argument("--crop", choices=["preamble", "payload"], default="preamble",
-                    help="payload crop is ablation-only (contains MMSI bits) - never deploy")
+    tp.add_argument("--crop", choices=["clean", "preamble", "payload"], default="clean",
+                    help="preamble/payload crops contain payload bits - ablation only, never deploy")
     tp.add_argument("--min-class", type=int, default=None)
 
     ep = sub.add_parser("eval", help="train in-memory + full report (no publish)")
     ep.add_argument("--days", type=int, default=14)
-    ep.add_argument("--crop", choices=["preamble", "payload"], default="preamble")
+    ep.add_argument("--crop", choices=["clean", "preamble", "payload"], default="clean")
     ep.add_argument("--holdout-k", type=int, default=0, help="hold out K classes for open-set test")
     ep.add_argument("--baseline-jsonl", action="store_true", help="also run hand-feature baseline")
     ep.add_argument("--min-class", type=int, default=None)
@@ -40,8 +40,8 @@ def main():
         from .daemon import run
         run(cfg)
     elif a.cmd == "train":
-        if a.crop == "payload":
-            print("WARNING: payload crop contains the MMSI bits - ablation only, do not deploy",
+        if a.crop != "clean":
+            print(f"WARNING: {a.crop} crop contains payload bits - ablation only, do not deploy",
                   file=sys.stderr)
         from .train import train
         train(cfg, a.days, a.crop)
