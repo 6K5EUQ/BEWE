@@ -508,7 +508,10 @@ struct __attribute__((packed)) SchedSyncEntry {
     // can filter the list per mission. Empty for entries added outside a mission.
     uint16_t mission_year;
     char     mission_code[8];
-    uint8_t  _pad2[6];
+    // 0 = 채널 IQ 녹음 (bw_khz 폭). >0 = 녹음 동안 SDR SR 을 이 값으로 바꾸고
+    // CF=freq_mhz 로 맞춰 전대역 IQ 를 기록. 옛 _pad2 자리라 크기·구버전 호환 유지.
+    uint32_t sr_hz;
+    uint8_t  _pad2[2];
 }; // 104 bytes
 static_assert(sizeof(SchedSyncEntry) == 104, "SchedSyncEntry size");
 struct __attribute__((packed)) PktSchedSync {

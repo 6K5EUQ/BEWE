@@ -493,12 +493,14 @@ public:
         // filter the list. Empty year/code = added outside any mission.
         int     mission_year      = 0;
         char    mission_code[8]   = {};
+        uint32_t sr_hz            = 0;   // >0 = SDR SR 변경 전대역 녹음 (SchedSyncEntry::sr_hz)
     };
     static constexpr float SCHED_PRE_ARM_SEC = 5.0f;
     std::vector<SchedEntry> sched_entries;
     std::mutex              sched_mtx;
     int   sched_active_idx  = -1;
     float sched_saved_cf    = 0;
+    float sched_saved_sr_msps = 0;   // sr_hz 엔트리가 바꾼 SDR SR 복원용 (0 = 안 바꿈)
     void sched_tick();
     void sched_arm_entry(int idx);
     void sched_begin_rec(int idx);
@@ -1251,6 +1253,7 @@ public:
     void rec_worker();
     void start_rec();
     void stop_rec();
+    bool start_sched_fullband_rec();   // 예약(sr_hz>0) 전대역 녹음. rec_on 중이면 false
     void stop_audio_rec(int ch_idx);
     void start_iq_rec(int ch_idx);
     void stop_iq_rec(int ch_idx);

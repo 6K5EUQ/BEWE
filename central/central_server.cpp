@@ -3130,9 +3130,9 @@ void CentralServer::save_schedules_to_json(){
             char buf[512];
             snprintf(buf, sizeof(buf),
                 "{\"start_time\":%lld,\"duration_sec\":%.3f,\"freq_mhz\":%.6f,"
-                "\"bw_khz\":%.3f,\"status\":%u,\"op_index\":%u,\"operator_name\":\"",
+                "\"bw_khz\":%.3f,\"sr_hz\":%u,\"status\":%u,\"op_index\":%u,\"operator_name\":\"",
                 (long long)e->start_time, e->duration_sec, e->freq_mhz,
-                e->bw_khz, (unsigned)e->status, (unsigned)e->op_index);
+                e->bw_khz, (unsigned)e->sr_hz, (unsigned)e->status, (unsigned)e->op_index);
             out += buf;
             char nm[33]={}; memcpy(nm, e->operator_name, 32);
             json_escape(out, nm);
@@ -3207,6 +3207,8 @@ void CentralServer::load_schedules_from_json(){
                                 double v=0; js.read_number(v); e.freq_mhz=(float)v;
                             } else if(k3 == "bw_khz"){
                                 double v=0; js.read_number(v); e.bw_khz=(float)v;
+                            } else if(k3 == "sr_hz"){
+                                double v=0; js.read_number(v); e.sr_hz=(uint32_t)v;
                             } else if(k3 == "status"){
                                 double v=0; js.read_number(v); e.status=(uint8_t)v;
                             } else if(k3 == "op_index"){

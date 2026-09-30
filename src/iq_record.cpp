@@ -73,7 +73,12 @@ static std::string add_end_hms_to_path(const std::string& path, const struct tm&
 }
 
 // stop 시 src → dst rename + sidecar(.info 또는 .sigmf-meta) 도 함께 이동.
+// 예약 녹음(SCHED_) 은 파일명에 시작-종료가 이미 들어 있어 건드리지 않는다 — 붙이면
+// 종료시각이 두 번 찍히고, 업로드 쪽이 stop 전에 잡아 둔 경로도 무효가 된다.
 static std::string rename_with_end_hms(const std::string& old_path){
+    size_t slash = old_path.find_last_of('/');
+    if(old_path.compare(slash == std::string::npos ? 0 : slash + 1, 6, "SCHED_") == 0)
+        return old_path;
     time_t te = time(nullptr);
     struct tm te_tm; KST::to_tm(te, te_tm);
     std::string new_path = add_end_hms_to_path(old_path, te_tm);
@@ -241,6 +246,39 @@ static const char* dem_mode_name(Channel::DemodMode m){
     }
 }
 
+#ifdef BEWE_HOST_BUILD
+// 예약 녹음 저장 폴더. 무인 예약(위성 패스 등)은 미션 유무와 무관하게 돌아야 하므로
+// 활성 미션이 없으면 비미션 로컬 폴더(record/iq)에 둔다.
+static std::string sched_iq_dir(FFTViewer& v){
+    std::string d = v.active_iq_dir();
+    if(!d.empty()) return d;
+    mkdir(BEWEPaths::record_dir().c_str(), 0755);
+    mkdir(BEWEPaths::record_iq_dir().c_str(), 0755);
+    return BEWEPaths::record_iq_dir();
+}
+
+// SCHED 형식: SCHED_IQ_<station>_<MissCode><DD>_<MonDD>.<YYYY>_<HHMMSS>-<HHMMSS>_<F.F>MHz.sigmf-data
+// "IQ" 포함시켜 분류 헬퍼(is_iq_filename)가 IQ로 인식하도록.
+// 시간은 모두 KST 기준. date code는 HIST와 동일 ('A'=Jan…'L'=Dec).
+// pending_sched_meta 를 한 번 소비한다.
+static std::string sched_iq_path(FFTViewer& v, const std::string& dir, float cf_mhz){
+    std::string st = sanitize_station_fn(v.station_name.c_str());
+    struct tm su; KST::to_tm(v.pending_sched_meta.start_utc, su);
+    struct tm eu; KST::to_tm(v.pending_sched_meta.end_utc,   eu);
+    char fn[512];
+    snprintf(fn,sizeof(fn),
+             "%s/SCHED_IQ_%s_%c%02d_%s%d.%04d_%02d%02d%02d-%02d%02d%02d_%.1fMHz.sigmf-data",
+             dir.c_str(), st.c_str(),
+             LongWaterfall::mission_letter(su.tm_mon), su.tm_mday,
+             LongWaterfall::month_abbr3(su.tm_mon),    su.tm_mday, 1900+su.tm_year,
+             su.tm_hour, su.tm_min, su.tm_sec,
+             eu.tm_hour, eu.tm_min, eu.tm_sec,
+             cf_mhz);
+    v.pending_sched_meta.active = false;
+    return fn;
+}
+#endif
+
 // ── IQ 녹음 워커 ─────────────────────────────────────────────────────────
 // ── 아래 블록은 HOST 전용 레코더다 ─────────────────────────────────────────
 // 전대역 IQ(rec_worker/start_rec/stop_rec), 채널별 오디오(start/stop_audio_rec),
@@ -361,6 +399,40 @@ void FFTViewer::start_rec(){
                             (double)rec_cf_mhz, (se-ss)*1000.0, 0.0,
                             "", login_get_id(), station_name.c_str(),
                             time(nullptr), utc_offset_hours(), rec_sr);
+}
+
+// 예약 전대역 녹음 — 호출 시점에 SDR 이 이미 CF=목표, SR=요청값으로 맞춰져 있다.
+// start_rec 과 같은 rec_worker 를 쓰되 채널 대신 SDR 전대역을 decim 없이 기록한다
+// (rec_cf_mhz = SDR CF → 믹서 오프셋 0, rec_sr = SDR SR → decim 1).
+bool FFTViewer::start_sched_fullband_rec(){
+    if(rec_on.load()) return false;
+    if(rec_thr.joinable()) rec_thr.join();
+    rec_cf_mhz = (float)(header.center_frequency/1e6);
+    rec_sr     = header.sample_rate;
+    std::string fn = sched_iq_path(*this, sched_iq_dir(*this), rec_cf_mhz);
+    rec_filename=fn;
+    rec_frames.store(0);
+    rec_rp.store(ring_wp.load());
+    rec_ch=-1;
+    rec_stop.store(false); rec_on.store(true);
+    rec_t0=std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lk(rec_entries_mtx);
+        RecEntry e;
+        e.path=fn;
+        auto pos=fn.rfind('/');
+        e.filename = (pos==std::string::npos)?fn:fn.substr(pos+1);
+        e.finished=false; e.is_audio=false; e.is_region=false;
+        e.t_start=std::chrono::steady_clock::now();
+        rec_entries.push_back(e);
+    }
+    rec_thr=std::thread(&FFTViewer::rec_worker,this);
+    bewe_log("SCHED full-band REC start > %s  SR=%u\n",fn.c_str(),rec_sr);
+    write_default_info_file(fn, recorder_name(),
+                            (double)rec_cf_mhz, rec_sr/1000.0, 0.0,
+                            "", login_get_id(), station_name.c_str(),
+                            time(nullptr), utc_offset_hours(), rec_sr);
+    return true;
 }
 
 void FFTViewer::stop_rec(){
@@ -533,7 +605,7 @@ void FFTViewer::start_iq_rec(int ch_idx){
 
     time_t t=time(nullptr); struct tm tm2; KST::to_tm(t,tm2);
     char fn[512];
-    std::string rec_dir=active_iq_dir();
+    std::string rec_dir = pending_sched_meta.active ? sched_iq_dir(*this) : active_iq_dir();
     if(rec_dir.empty()){
         bewe_log_push(1, "[IQ REC ch%d] blocked - no active mission (Start a mission first)\n", ch_idx);
         MissionView::show_toast("No active mission - Start a mission first (M key)");
@@ -541,29 +613,7 @@ void FFTViewer::start_iq_rec(int ch_idx){
     }
     float cf_mhz=(ch.s+ch.e)/2.0f;
     if(pending_sched_meta.active){
-        // SCHED 형식: SCHED_IQ_<station>_<MissCode><DD>_<MonDD>.<YYYY>_<HHMMSS>-<HHMMSS>_<F.F>MHz.wav
-        // "IQ" 포함시켜 분류 헬퍼(is_iq_filename)가 IQ로 인식하도록.
-        // 시간은 모두 KST 기준. date code는 HIST와 동일 ('A'=Jan…'L'=Dec).
-        // station 이름은 파일시스템 안전 문자만 남김 (공백/괄호/슬래시 → '_').
-        std::string st = station_name;
-        for(auto& c : st){
-            unsigned char u = (unsigned char)c;
-            bool ok = (u>='0'&&u<='9') || (u>='A'&&u<='Z') || (u>='a'&&u<='z')
-                   || c=='-' || c=='_' || c=='.';
-            if(!ok) c = '_';
-        }
-        if(st.empty()) st = "host";
-        struct tm su; KST::to_tm(pending_sched_meta.start_utc, su);
-        struct tm eu; KST::to_tm(pending_sched_meta.end_utc,   eu);
-        snprintf(fn,sizeof(fn),
-                 "%s/SCHED_IQ_%s_%c%02d_%s%d.%04d_%02d%02d%02d-%02d%02d%02d_%.1fMHz.sigmf-data",
-                 rec_dir.c_str(), st.c_str(),
-                 LongWaterfall::mission_letter(su.tm_mon), su.tm_mday,
-                 LongWaterfall::month_abbr3(su.tm_mon),    su.tm_mday, 1900+su.tm_year,
-                 su.tm_hour, su.tm_min, su.tm_sec,
-                 eu.tm_hour, eu.tm_min, eu.tm_sec,
-                 cf_mhz);
-        pending_sched_meta.active = false;
+        snprintf(fn, sizeof(fn), "%s", sched_iq_path(*this, rec_dir, cf_mhz).c_str());
     } else {
         std::string base = build_iq_demod_filename(*this, "IQ", cf_mhz, tm2);
         snprintf(fn, sizeof(fn), "%s/%s", rec_dir.c_str(), base.c_str());

@@ -30,6 +30,7 @@ static PktSchedSync build_sched_sync_pkt(const std::vector<FFTViewer::SchedEntry
         strncpy(se.target,        e.target,        sizeof(se.target)-1);
         se.mission_year = (uint16_t)e.mission_year;
         memcpy(se.mission_code, e.mission_code, sizeof(se.mission_code));
+        se.sr_hz        = e.sr_hz;
     }
     return pkt;
 }
@@ -89,6 +90,18 @@ void FFTViewer::sched_tick(){
     }
 }
 
+// 예약이 바꾼 SDR 상태(SR·CF)를 예약 전으로 되돌린다.
+static void sched_restore_sdr(FFTViewer& v){
+    if(v.sched_saved_sr_msps > 0.f){
+        v.pending_sr_msps = v.sched_saved_sr_msps;
+        v.sr_change_req   = true;
+        bewe_log_push(0, "[SCHED] SR restored > %.3f MSPS\n", v.sched_saved_sr_msps);
+        v.sched_saved_sr_msps = 0.f;
+    }
+    v.set_frequency(v.sched_saved_cf, /*wait=*/true);
+    bewe_log_push(0, "[SCHED] Freq restored > %.3f MHz\n", v.sched_saved_cf);
+}
+
 // Pre-arm: start_time - SCHED_PRE_ARM_SEC 시점에 호출됨.
 // SDR 튠(DC 오프셋 적용), 채널 할당, demod 시작만 수행. IQ 기록은 아직.
 // 이 구간 동안 PLL lock / IIR 과도응답 / squelch 보정이 안정화됨.
@@ -102,6 +115,32 @@ void FFTViewer::sched_arm_entry(int idx){
     if(!sdr_ok){ e.status=SchedEntry::FAILED; broadcast_sched_list_locked(); bewe_log_push(0,"[SCHED] Failed: no SDR\n"); return; }
 
     sched_saved_cf = (float)(header.center_frequency / 1e6);
+    sched_saved_sr_msps = 0.f;
+
+    // 전대역 모드(sr_hz>0): SDR 을 CF=목표, SR=요청값으로 바꿔 두고 끝. 채널 없음.
+    // 캡처 스레드가 SR 변경을 소비하고 워밍업할 시간이 pre-arm 구간이다.
+    if(e.sr_hz > 0){
+        if(rec_on.load()){
+            e.status = SchedEntry::FAILED;
+            broadcast_sched_list_locked();
+            bewe_log_push(0, "[SCHED] Failed: full-band recorder busy\n");
+            return;
+        }
+        float want_msps = e.sr_hz / 1e6f;
+        float cur_msps  = header.sample_rate / 1e6f;
+        if(fabsf(want_msps - cur_msps) > 1e-6f){
+            sched_saved_sr_msps = cur_msps;
+            pending_sr_msps     = want_msps;
+            sr_change_req       = true;
+        }
+        set_frequency(e.freq_mhz, /*wait=*/true);
+        e.status = SchedEntry::ARMED;
+        sched_active_idx = idx;
+        broadcast_sched_list_locked();
+        bewe_log_push(0, "[SCHED] ARMED: full-band %.4f MHz SR=%.3f MSPS dur=%.0fs target='%s' (T-%.1fs)\n",
+                      e.freq_mhz, want_msps, e.duration_sec, e.target, SCHED_PRE_ARM_SEC);
+        return;
+    }
 
     // DC 오프셋: SDR CF를 target + offset 로 이동 → DC 스파이크가 채널 베이스밴드에서 -offset 위치로
     // 밀려 채널 LPF 바깥이 되어 제거됨.
@@ -168,6 +207,26 @@ void FFTViewer::broadcast_sched_list_locked(){
 // start_time 도달 시 호출 — ARM된 엔트리의 IQ 기록만 실제로 시작.
 void FFTViewer::sched_begin_rec(int idx){
     auto& e = sched_entries[idx];
+    if(e.sr_hz > 0){
+        pending_sched_meta.active    = true;
+        pending_sched_meta.start_utc = e.start_time;
+        pending_sched_meta.end_utc   = e.start_time + (time_t)e.duration_sec;
+        if(!start_sched_fullband_rec()){
+            pending_sched_meta.active = false;
+            bewe_log_push(0, "[SCHED] REC start failed: full-band recorder busy\n");
+            sched_restore_sdr(*this);
+            e.status = SchedEntry::FAILED;
+            sched_active_idx = -1;
+            broadcast_sched_list_locked();
+            return;
+        }
+        e.status      = SchedEntry::RECORDING;
+        e.rec_started = std::chrono::steady_clock::now();
+        broadcast_sched_list_locked();
+        bewe_log_push(0, "[SCHED] REC start: full-band %.4f MHz SR=%u (req %u) dur=%.0fs\n",
+                      header.center_frequency/1e6, header.sample_rate, e.sr_hz, e.duration_sec);
+        return;
+    }
     int slot = e.temp_ch_idx;
     if(slot < 0 || slot >= MAX_CHANNELS){
         e.status = SchedEntry::FAILED;
@@ -203,9 +262,12 @@ void FFTViewer::sched_stop_entry(int idx){
     auto& e = sched_entries[idx];
     int slot = e.temp_ch_idx;
 
-    // 녹음 경로와 메타정보 스냅샷 (stop 이후 채널 reset되기 전에 캡처)
+    // 녹음 경로와 메타정보 스냅샷 (stop 이후 채널 reset되기 전에 캡처).
+    // SCHED_ 파일은 stop 때 rename 되지 않으므로 이 경로가 최종 경로다.
     std::string iq_path;
-    if(slot >= 0 && slot < MAX_CHANNELS)
+    if(e.sr_hz > 0)
+        iq_path = rec_filename;
+    else if(slot >= 0 && slot < MAX_CHANNELS)
         iq_path = channels[slot].iq_rec_path;
     char entry_op[32] = {};
     strncpy(entry_op, e.operator_name, sizeof(entry_op)-1);
@@ -214,16 +276,18 @@ void FFTViewer::sched_stop_entry(int idx){
     float  entry_freq  = e.freq_mhz;
     float  entry_bw    = e.bw_khz;
 
-    // IQ-only worker stop & wav finalize (stop_iq_rec 안에서 worker join)
-    if(slot >= 0 && slot < MAX_CHANNELS)
-        stop_iq_rec(slot);
+    if(e.sr_hz > 0){
+        stop_rec();   // rec_worker join + .sigmf-meta Duration 갱신
+    } else {
+        // IQ-only worker stop & wav finalize (stop_iq_rec 안에서 worker join)
+        if(slot >= 0 && slot < MAX_CHANNELS)
+            stop_iq_rec(slot);
 
-    if(slot >= 0 && slot < MAX_CHANNELS)
-        channels[slot].reset_slot();
+        if(slot >= 0 && slot < MAX_CHANNELS)
+            channels[slot].reset_slot();
+    }
 
-    // Restore frequency
-    set_frequency(sched_saved_cf, /*wait=*/true);
-    bewe_log_push(0, "[SCHED] Freq restored > %.3f MHz\n", sched_saved_cf);
+    sched_restore_sdr(*this);
 
     e.status = SchedEntry::DONE;
     sched_active_idx = -1;
@@ -238,7 +302,20 @@ void FFTViewer::sched_stop_entry(int idx){
         std::thread([upload_fn, iq_path, entry_op, entry_start, entry_dur, entry_freq, entry_bw](){
             // stop_iq_rec()가 동기로 fclose+.info Duration 갱신까지 끝냈으므로 sleep 불필요.
 
-            // stop_iq_rec()가 이미 표준 Key:Value 형식 .info를 생성/갱신했음.
+            // sched 특유 메타 (예약자·시각·길이·폭)
+            char tbuf[64] = {};
+            struct tm tm_kst; KST::to_tm(entry_start, tm_kst);
+            strftime(tbuf, sizeof(tbuf), "%Y-%m-%dT%H:%M:%S", &tm_kst);
+            char note_body[192];
+            snprintf(note_body, sizeof(note_body),
+                "Scheduled by %s @ %s, dur=%.0fs, BW=%.1fkHz",
+                entry_op[0] ? entry_op : "?", tbuf, entry_dur, entry_bw);
+            // SigMF 사이드카는 JSON 이라 아래 Key:Value 줄 교체를 하면 깨진다 —
+            // 노트를 meta 에 먼저 기록하고 그 파일을 그대로 보낸다.
+            bool sigmf = SigMF::is_sigmf_data(iq_path);
+            if(sigmf) SigMF::update_note(iq_path, note_body);
+
+            // stop_iq_rec()가 이미 표준 형식 사이드카를 생성/갱신했음.
             // 그 내용을 그대로 read해서 업로드 (free-form 텍스트 대신 표준 포맷 보장)
             std::string info_str;
             std::string ipath = SigMF::sidecar_path(iq_path);
@@ -250,14 +327,9 @@ void FFTViewer::sched_stop_entry(int idx){
                 info_str = buf;
                 fclose(fi);
             }
-            // sched 특유 메타를 Notes에 추가 (info_str이 비었거나 Notes 라인 비어있으면 채움)
-            char tbuf[64] = {};
-            struct tm tm_kst; KST::to_tm(entry_start, tm_kst);
-            strftime(tbuf, sizeof(tbuf), "%Y-%m-%dT%H:%M:%S", &tm_kst);
+            if(sigmf){ upload_fn(iq_path, entry_op, info_str); return; }
             char sched_note[256];
-            snprintf(sched_note, sizeof(sched_note),
-                "Notes: Scheduled by %s @ %s, dur=%.0fs, BW=%.1fkHz\n",
-                entry_op[0] ? entry_op : "?", tbuf, entry_dur, entry_bw);
+            snprintf(sched_note, sizeof(sched_note), "Notes: %s\n", note_body);
             // Notes: 라인 교체 (없으면 끝에 append)
             std::string out;
             bool note_replaced = false;

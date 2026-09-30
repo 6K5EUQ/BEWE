@@ -21,6 +21,10 @@ df::MrcStatus kraken_mrc_status();
 #include <zstd.h>   // Central 릴레이 CHANNEL_SYNC 해제 (v13)
 #include "host_band_categories.hpp"
 #include "host_state.hpp"
+#include "sat_sched.hpp"
+#include "sat_tle.hpp"
+#include "kst_time.hpp"
+#include <sstream>
 #include "long_waterfall.hpp"
 
 #include <cstdio>
@@ -506,6 +510,24 @@ void FFTViewer::set_channel_detect(int ch_idx, bool on){
 // ── Signal handler ───────────────────────────────────────────────────────
 static std::atomic<bool> g_shutdown{false};
 static void sig_handler(int){ g_shutdown.store(true); }
+
+// Central 궤도원소 스냅샷 (leo_/all_YYYYMMDD.txt) — central_server.cpp db_subdir_for 와 같은 판정
+static bool is_tle_snapshot(const char* fn){
+    size_t n = strlen(fn);
+    return (strncmp(fn, "leo_", 4) == 0 || strncmp(fn, "all_", 4) == 0)
+        && n > 4 && strcmp(fn + n - 4, ".txt") == 0;
+}
+
+static std::string kst_str(time_t t){
+    struct tm k; KST::to_tm(t, k);
+    char b[32]; strftime(b, sizeof b, "%Y-%m-%d %H:%M:%S", &k);
+    return b;
+}
+
+static const char* sched_status_name(int s){
+    static const char* n[] = {"WAIT", "ARMED", "REC", "DONE", "FAIL"};
+    return (s >= 0 && s < 5) ? n[s] : "?";
+}
 // /powercycle full — 정상 종료(상태 저장 포함)를 마친 뒤 머신을 재부팅한다.
 // 종료 경로 한가운데서 재부팅하면 host_state 가 안 써진 채 날아갈 수 있어,
 // 모든 정리가 끝난 main() 맨 끝에서만 실행한다.
@@ -947,6 +969,7 @@ void run_cli_host(){
 
     // ── Restore saved host state — 재시작 시 직전 상태 그대로 (cf/sr 먼저) ──
     HostState::Snapshot saved_state = HostState::load(station_str);
+    SatSched::load(station_str);
     float init_sr = 0.f;
     // DF 설정은 initialize() 보다 먼저 넣어야 한다 — Kraken 백엔드가 기동할 때
     // 이 설정으로 엔진을 띄우기 때문. 채널 복원(apply_channels)보다 이르다.
@@ -1960,6 +1983,17 @@ void run_cli_host(){
         }
     };
 
+    // 궤도원소 스냅샷은 Central 이 정본 — JOIN 과 같은 DB_DOWNLOAD_REQ 로 당겨 온다.
+    TleCache::set_requester([&, srv](const std::string& fn)->bool{
+        if(!srv->cb.on_relay_broadcast) return false;
+        PktDbDownloadReq req{};
+        strncpy(req.filename, fn.c_str(), sizeof(req.filename)-1);
+        strncpy(req.operator_name, login_get_id(), sizeof(req.operator_name)-1);
+        auto pkt = make_packet(PacketType::DB_DOWNLOAD_REQ, &req, sizeof(req));
+        srv->cb.on_relay_broadcast(pkt.data(), pkt.size(), true);
+        return true;
+    });
+
     // ── Start server ─────────────────────────────────────────────────────
     if(!srv->start(0)){
         bewe_log_push(0,"[BEWE CLI] Server start failed\n");
@@ -2051,6 +2085,7 @@ void run_cli_host(){
                     if(len < 9 + sizeof(PktDbDownloadInfo)) return;
                     const auto* di = reinterpret_cast<const PktDbDownloadInfo*>(pkt + 9);
                     char fn[129]={}; strncpy(fn, di->filename, 128);
+                    if(is_tle_snapshot(fn)) return;   // 궤도원소엔 사이드카가 없다
                     bool is_iq = (is_iq_filename(fn));
                     std::string dir = is_iq ? BEWEPaths::record_iq_dir() : BEWEPaths::record_audio_dir();
                     mkdir(dir.c_str(), 0755);
@@ -2075,6 +2110,10 @@ void run_cli_host(){
                     if(d->is_first){
                         bool is_iq = (is_iq_filename(d->filename));
                         std::string dir = is_iq ? BEWEPaths::record_iq_dir() : BEWEPaths::record_audio_dir();
+                        if(is_tle_snapshot(d->filename)){
+                            mkdir((BEWEPaths::assets_dir() + "/tle").c_str(), 0755);
+                            dir = TleCache::dir();
+                        }
                         mkdir(dir.c_str(), 0755);
                         host_db_dl_path = dir + "/" + d->filename;
                         if(host_db_dl_fp) fclose(host_db_dl_fp);
@@ -2087,6 +2126,7 @@ void run_cli_host(){
                         fclose(host_db_dl_fp);
                         host_db_dl_fp = nullptr;
                         bewe_log_push(0,"[DB] Download done: %s\n", host_db_dl_path.c_str());
+                        if(is_tle_snapshot(d->filename)) SatSched::refresh();
                         host_db_dl_path.clear();
                     }
                 });
@@ -2115,6 +2155,7 @@ void run_cli_host(){
                         ne.duration_sec = se.duration_sec;
                         ne.freq_mhz     = se.freq_mhz;
                         ne.bw_khz       = se.bw_khz;
+                        ne.sr_hz        = se.sr_hz;
                         ne.op_index     = se.op_index;
                         strncpy(ne.operator_name, se.operator_name, sizeof(ne.operator_name)-1);
                         strncpy(ne.target,        se.target,        sizeof(ne.target)-1);
@@ -2699,6 +2740,7 @@ void run_cli_host(){
                     for(auto& e : v.sched_entries)
                         before_hash = before_hash*131 + (uint32_t)e.status;
                 }
+                SatSched::tick(v);
                 v.sched_tick();
                 uint32_t after_hash = 0;
                 {
@@ -3724,6 +3766,145 @@ void run_cli_host(){
                     bewe_log_push(0,"  Unknown /notch subcommand. Try: /notch help\n");
                 }
                 fflush(stdout);
+            } else if(line.rfind("/tle", 0) == 0){
+                // /tle update | status | pass <NORAD>
+                char sub[16] = {}; int norad = 0;
+                sscanf(line.c_str() + 4, "%15s %d", sub, &norad);
+                if(strcmp(sub, "update") == 0){
+                    if(!srv || !srv->cb.on_relay_broadcast){
+                        bewe_log_push(0,"  No Central connection - cannot fetch TLE\n");
+                    } else {
+                        int n = TleCache::request_recent("leo", 1) + TleCache::request_recent("all", 1);
+                        bewe_log_push(0,"[CMD:CLI] /tle update: %d snapshot(s) requested from Central\n", n);
+                        if(n == 0) SatSched::refresh();
+                    }
+                } else if(strcmp(sub, "status") == 0){
+                    std::string l = TleCache::newest("leo"), a = TleCache::newest("all");
+                    bewe_log_push(0,"  leo: %s\n  all: %s\n", l.empty() ? "-" : l.c_str(), a.empty() ? "-" : a.c_str());
+                } else if(strcmp(sub, "pass") == 0 && norad > 0){
+                    std::string name, src, err; double age = 0;
+                    std::vector<SatSched::Pass> ps;
+                    time_t now = time(nullptr);
+                    if(!SatSched::find_elem(norad, name, src, age, err) ||
+                       !SatSched::predict(norad, v.station_lat, -v.station_lon, now, now + 86400, ps, err)){
+                        bewe_log_push(0,"  %d: %s\n", norad, err.c_str());
+                    } else {
+                        bewe_log_push(0,"  %d %s  (epoch age %.1f d, %s)\n", norad, name.c_str(), age, src.c_str());
+                        for(const auto& p : ps)
+                            bewe_log_push(0,"    AOS %s  LOS %s KST  %4ds  max %.1f\xC2\xB0\n",
+                                          kst_str(p.aos).c_str(), kst_str(p.los).c_str() + 11,
+                                          (int)(p.los - p.aos), p.max_el);
+                    }
+                } else {
+                    bewe_log_push(0,"  Usage: /tle update | /tle status | /tle pass <NORAD>\n");
+                }
+                fflush(stdout);
+            } else if(line.rfind("/sched", 0) == 0){
+                // /sched add sat <NORAD> <CF_Hz> <SR_Hz>
+                // /sched add <CF_Hz> <SR_Hz> <YYYY-MM-DD> <HH:MM:SS> <dur_s>   (KST)
+                // /sched list | /sched del <n> | /sched del sat <NORAD>
+                std::istringstream is(line.substr(6));
+                std::string sub; is >> sub;
+                if(sub == "add"){
+                    std::string a; is >> a;
+                    if(a == "sat"){
+                        SatSched::Rule r; double sr = 0;
+                        is >> r.norad >> r.cf_hz >> sr;
+                        r.sr_hz = (uint32_t)sr;
+                        std::string err, name, src; double age = 0;
+                        if(!is || !SatSched::add_rule(r, err)){
+                            bewe_log_push(0,"  %s. Usage: /sched add sat <NORAD> <CF_Hz> <SR_Hz>\n",
+                                          err.empty() ? "Bad args" : err.c_str());
+                        } else {
+                            bewe_log_push(0,"[CMD:CLI] SAT rule %d  %.4f MHz  SR=%.3f MSPS\n",
+                                          r.norad, r.cf_hz/1e6, r.sr_hz/1e6);
+                            if(!SatSched::find_elem(r.norad, name, src, age, err))
+                                bewe_log_push(0,"  warn: %s\n", err.c_str());
+                            else
+                                bewe_log_push(0,"  %s (epoch age %.1f d)\n", name.c_str(), age);
+                        }
+                    } else {
+                        double cf = atof(a.c_str()), sr = 0, dur = 0;
+                        std::string ds, ts; is >> sr >> ds >> ts >> dur;
+                        struct tm k{};
+                        bool ok = is && sscanf(ds.c_str(), "%d-%d-%d", &k.tm_year, &k.tm_mon, &k.tm_mday) == 3
+                                     && sscanf(ts.c_str(), "%d:%d:%d", &k.tm_hour, &k.tm_min, &k.tm_sec) >= 2;
+                        k.tm_year -= 1900; k.tm_mon -= 1;
+                        time_t start = timegm(&k) - KST::OFFSET_SEC;
+                        const char* why = nullptr;
+                        if(!ok || cf < 1e5 || cf > 6e9 || sr < 1e5 || sr > 61.44e6 || dur <= 0)
+                            why = "Bad args";
+                        else if(start + (time_t)dur < time(nullptr)) why = "past time";
+                        if(!why){
+                            std::lock_guard<std::mutex> lk(v.sched_mtx);
+                            if(v.sched_has_overlap(start, (float)dur))                     why = "overlap";
+                            else if((int)v.sched_entries.size() >= MAX_SCHED_ENTRIES)    why = "list full";
+                            else {
+                                FFTViewer::SchedEntry e;
+                                e.start_time   = start;
+                                e.duration_sec = (float)dur;
+                                e.freq_mhz     = (float)(cf / 1e6);
+                                e.sr_hz        = (uint32_t)sr;
+                                e.bw_khz       = (float)(sr / 1000.0);
+                                e.status       = FFTViewer::SchedEntry::WAITING;
+                                strncpy(e.operator_name, login_get_id(), sizeof(e.operator_name)-1);
+                                {
+                                    std::lock_guard<std::mutex> mlk(v.mission_mtx);
+                                    if(v.mission_state == Mission::State::ACTIVE && v.mission_code[0]){
+                                        e.mission_year = v.mission_year;
+                                        memcpy(e.mission_code, v.mission_code, sizeof(e.mission_code));
+                                    }
+                                }
+                                v.sched_entries.push_back(e);
+                            }
+                        }
+                        if(why){
+                            bewe_log_push(0,"  SCHED add denied: %s. Usage: /sched add <CF_Hz> <SR_Hz> <YYYY-MM-DD> <HH:MM:SS> <dur_s>\n", why);
+                        } else {
+                            bewe_log_push(0,"[CMD:CLI] SCHED added: %.4f MHz SR=%.3f MSPS %s KST dur=%.0fs\n",
+                                          cf/1e6, sr/1e6, kst_str(start).c_str(), dur);
+                            v.broadcast_sched_list();
+                        }
+                    }
+                } else if(sub == "list"){
+                    for(const auto& r : SatSched::rules())
+                        bewe_log_push(0,"  rule SAT %d  %.4f MHz  SR=%.3f MSPS\n", r.norad, r.cf_hz/1e6, r.sr_hz/1e6);
+                    std::lock_guard<std::mutex> lk(v.sched_mtx);
+                    for(int i = 0; i < (int)v.sched_entries.size(); i++){
+                        const auto& e = v.sched_entries[i];
+                        bewe_log_push(0,"  [%d] %-5s %s KST %5.0fs  %.4f MHz  %s=%.3f  %s\n",
+                                      i, sched_status_name(e.status), kst_str(e.start_time).c_str(),
+                                      e.duration_sec, e.freq_mhz,
+                                      e.sr_hz ? "SR(MSPS)" : "BW(kHz)",
+                                      e.sr_hz ? e.sr_hz/1e6 : e.bw_khz, e.target);
+                    }
+                    if(v.sched_entries.empty()) bewe_log_push(0,"  (no entries)\n");
+                } else if(sub == "del"){
+                    std::string a; is >> a;
+                    if(a == "sat"){
+                        int n = 0; is >> n;
+                        if(SatSched::del_rule(n)) bewe_log_push(0,"[CMD:CLI] SAT rule %d removed\n", n);
+                        else                      bewe_log_push(0,"  No SAT rule %d\n", n);
+                    } else {
+                        int idx = a.empty() ? -1 : atoi(a.c_str());
+                        const char* why = nullptr;
+                        {
+                            std::lock_guard<std::mutex> lk(v.sched_mtx);
+                            if(idx < 0 || idx >= (int)v.sched_entries.size()) why = "no such entry";
+                            else if(idx == v.sched_active_idx)                  why = "in progress";
+                            else {
+                                v.sched_entries.erase(v.sched_entries.begin() + idx);
+                                if(v.sched_active_idx > idx) v.sched_active_idx--;
+                            }
+                        }
+                        if(why) bewe_log_push(0,"  SCHED del denied: %s\n", why);
+                        else  { bewe_log_push(0,"[CMD:CLI] SCHED [%d] removed\n", idx); v.broadcast_sched_list(); }
+                    }
+                } else {
+                    bewe_log_push(0,"  Usage: /sched add sat <NORAD> <CF_Hz> <SR_Hz> | /sched add <CF_Hz> <SR_Hz> <YYYY-MM-DD> <HH:MM:SS> <dur_s>\n"
+                                    "         /sched list | /sched del <n> | /sched del sat <NORAD>\n");
+                }
+                fflush(stdout);
             } else if(line == "/tm" || line.rfind("/tm ", 0) == 0){
                 // /tm save <ch> [sec_ago] — TM 롤링 IQ 버퍼에서 과거 구간을 잘라 녹음.
                 // GUI 는 스페이스바로 뷰를 얼리고 R 을 누르지만 CLI 엔 뷰가 없다.
@@ -3791,6 +3972,10 @@ void run_cli_host(){
                 bewe_log_push(0,"  /notch list      - List notches\n");
                 bewe_log_push(0,"  /notch del <n>   - Delete notch n\n");
                 bewe_log_push(0,"  /tm save <ch> [sec_ago] - Save TM rolling IQ for a channel\n");
+                bewe_log_push(0,"  /sched add <CF_Hz> <SR_Hz> <YYYY-MM-DD> <HH:MM:SS> <dur_s> - Schedule full-band IQ (KST)\n");
+                bewe_log_push(0,"  /sched add sat <NORAD> <CF_Hz> <SR_Hz> - Record every pass (AOS~LOS)\n");
+                bewe_log_push(0,"  /sched list | del <n> | del sat <NORAD>\n");
+                bewe_log_push(0,"  /tle update | status | pass <NORAD> - Orbital elements from Central\n");
                 bewe_log_push(0,"  /mission start   - Begin a new mission\n");
                 bewe_log_push(0,"  /mission end     - End active mission\n");
                 bewe_log_push(0,"  /mission status  - Show current mission state\n");

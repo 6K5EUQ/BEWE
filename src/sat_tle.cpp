@@ -43,8 +43,67 @@ static double tle_exp_field(const char* line, int start, int width) {
     return sign * atof(mant) * pow(10.0, (double)exp);
 }
 
-bool tle_load(const std::string& path, std::vector<TleElem>& out) {
-    out.clear();
+// 3줄(이름/1/2) 하나를 SGP4 레코드로. 실패(SGP4 초기화 오류) 시 false.
+static bool tle_parse3(const char* l0, const char* l1, const char* l2, TleElem& e) {
+    // ── name ──────────────────────────────────────────────────────────
+    {
+        std::string nm(l0);
+        while (!nm.empty() && (nm.back()=='\n'||nm.back()=='\r'||
+                               nm.back()==' ' ||nm.back()=='\t'))
+            nm.pop_back();
+        e.name = nm;
+    }
+
+    e.catalog_num = pfi(l1, 2, 5);
+
+    // ── epoch → Julian date ──────────────────────────────────────────
+    int    ep_yy  = pfi(l1, 18, 2);
+    double ep_doy = pf (l1, 20, 12);
+    int    year   = (ep_yy < 57) ? 2000 + ep_yy : 1900 + ep_yy;
+    int    mon, day, hr, minute; double sec;
+    MathTimeLib::days2mdhms(year, ep_doy, mon, day, hr, minute, sec);
+    double jd, jdF;
+    MathTimeLib::jday(year, mon, day, hr, minute, sec, jd, jdF);
+    double epoch_days = (jd + jdF) - 2433281.5;  // days since 1949-12-31 00:00 UT
+
+    // ── TLE fields. xpdotp converts rev/day ↔ rad/min ───────────────
+    const double xpdotp = 1440.0 / (2.0 * M_PI);
+    double bstar   = tle_exp_field(l1, 53, 8);
+    double ndot    = pf(l1, 33, 10) / (xpdotp * 1440.0);
+    double nddot   = tle_exp_field(l1, 44, 8) / (xpdotp * 1440.0 * 1440.0);
+    double inclo   = pf(l2,  8, 8) * M_PI / 180.0;
+    double nodeo   = pf(l2, 17, 8) * M_PI / 180.0;
+    double ecco    = pf(l2, 26, 7) * 1e-7;
+    double argpo   = pf(l2, 34, 8) * M_PI / 180.0;
+    double mo      = pf(l2, 43, 8) * M_PI / 180.0;
+    double no_koz  = pf(l2, 52, 11) / xpdotp;     // rev/day → rad/min
+
+    // satnum: 5-char string (left-padded with zeros)
+    char satn[10];
+    snprintf(satn, sizeof satn, "%05d", e.catalog_num);
+
+    // sgp4init does NOT populate jdsatepoch — caller must set it.
+    memset(&e.satrec, 0, sizeof(e.satrec));
+    e.satrec.jdsatepoch  = jd;
+    e.satrec.jdsatepochF = jdF;
+    e.satrec.classification = 'U';
+
+    SGP4Funcs::sgp4init(wgs72, 'i', satn, epoch_days,
+                        bstar, ndot, nddot, ecco, argpo,
+                        inclo, mo, no_koz, nodeo, e.satrec);
+
+    // semi_major for LEO detection (µ=398600.4418, n_rad/s)
+    if (no_koz > 0.0) {
+        double n_rps = no_koz / 60.0;
+        e.semi_major_km = pow(398600.4418 / (n_rps * n_rps), 1.0/3.0);
+    }
+
+    return e.satrec.error == 0;
+}
+
+// 파일을 3줄씩 훑으며 fn 에 넘긴다. fn 이 false 를 돌려주면 중단.
+template<class F>
+static bool tle_scan(const std::string& path, F fn) {
     FILE* fp = fopen(path.c_str(), "r");
     if (!fp) return false;
 
@@ -56,66 +115,29 @@ bool tle_load(const std::string& path, std::vector<TleElem>& out) {
         if (!fgets(l2, sizeof l2, fp)) break;
         if (l1[0] != '1' || l2[0] != '2') continue;
         if ((int)strlen(l1) < 69 || (int)strlen(l2) < 69) continue;
-
-        // ── name ──────────────────────────────────────────────────────────
-        TleElem e;
-        {
-            std::string nm(l0);
-            while (!nm.empty() && (nm.back()=='\n'||nm.back()=='\r'||
-                                   nm.back()==' ' ||nm.back()=='\t'))
-                nm.pop_back();
-            e.name = nm;
-        }
-
-        e.catalog_num = pfi(l1, 2, 5);
-
-        // ── epoch → Julian date ──────────────────────────────────────────
-        int    ep_yy  = pfi(l1, 18, 2);
-        double ep_doy = pf (l1, 20, 12);
-        int    year   = (ep_yy < 57) ? 2000 + ep_yy : 1900 + ep_yy;
-        int    mon, day, hr, minute; double sec;
-        MathTimeLib::days2mdhms(year, ep_doy, mon, day, hr, minute, sec);
-        double jd, jdF;
-        MathTimeLib::jday(year, mon, day, hr, minute, sec, jd, jdF);
-        double epoch_days = (jd + jdF) - 2433281.5;  // days since 1949-12-31 00:00 UT
-
-        // ── TLE fields. xpdotp converts rev/day ↔ rad/min ───────────────
-        const double xpdotp = 1440.0 / (2.0 * M_PI);
-        double bstar   = tle_exp_field(l1, 53, 8);
-        double ndot    = pf(l1, 33, 10) / (xpdotp * 1440.0);
-        double nddot   = tle_exp_field(l1, 44, 8) / (xpdotp * 1440.0 * 1440.0);
-        double inclo   = pf(l2,  8, 8) * M_PI / 180.0;
-        double nodeo   = pf(l2, 17, 8) * M_PI / 180.0;
-        double ecco    = pf(l2, 26, 7) * 1e-7;
-        double argpo   = pf(l2, 34, 8) * M_PI / 180.0;
-        double mo      = pf(l2, 43, 8) * M_PI / 180.0;
-        double no_koz  = pf(l2, 52, 11) / xpdotp;     // rev/day → rad/min
-
-        // satnum: 5-char string (left-padded with zeros)
-        char satn[10];
-        snprintf(satn, sizeof satn, "%05d", e.catalog_num);
-
-        // sgp4init does NOT populate jdsatepoch — caller must set it.
-        memset(&e.satrec, 0, sizeof(e.satrec));
-        e.satrec.jdsatepoch  = jd;
-        e.satrec.jdsatepochF = jdF;
-        e.satrec.classification = 'U';
-
-        SGP4Funcs::sgp4init(wgs72, 'i', satn, epoch_days,
-                            bstar, ndot, nddot, ecco, argpo,
-                            inclo, mo, no_koz, nodeo, e.satrec);
-
-        // semi_major for LEO detection (µ=398600.4418, n_rad/s)
-        if (no_koz > 0.0) {
-            double n_rps = no_koz / 60.0;
-            e.semi_major_km = pow(398600.4418 / (n_rps * n_rps), 1.0/3.0);
-        }
-
-        if (e.satrec.error == 0)
-            out.push_back(std::move(e));
+        if (!fn(l0, l1, l2)) break;
     }
     fclose(fp);
     return true;
+}
+
+bool tle_load(const std::string& path, std::vector<TleElem>& out) {
+    out.clear();
+    return tle_scan(path, [&](const char* l0, const char* l1, const char* l2) {
+        TleElem e;
+        if (tle_parse3(l0, l1, l2, e)) out.push_back(std::move(e));
+        return true;
+    });
+}
+
+bool tle_find(const std::string& path, int catalog_num, TleElem& out) {
+    bool found = false;
+    tle_scan(path, [&](const char* l0, const char* l1, const char* l2) {
+        if (pfi(l1, 2, 5) != catalog_num) return true;
+        found = tle_parse3(l0, l1, l2, out);
+        return false;
+    });
+    return found;
 }
 
 void tle_propagate(const TleElem& e, time_t now_utc,

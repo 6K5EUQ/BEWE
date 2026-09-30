@@ -15,6 +15,8 @@ struct TleElem {
 };
 
 bool tle_load(const std::string& path, std::vector<TleElem>& out);
+// 파일에서 NORAD 번호 하나만 찾아 초기화 (전체 로드 없이). 없으면 false.
+bool tle_find(const std::string& path, int catalog_num, TleElem& out);
 
 // ── Central 이 궤도원소 정본이다 ────────────────────────────────────────────
 // 기지마다 받으면 space-track 요청 제한(계정당)을 서로 잡아먹고 카탈로그가 기지별로

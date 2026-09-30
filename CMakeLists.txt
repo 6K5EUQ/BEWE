@@ -77,6 +77,11 @@ if(CLI)
         ${MBELIB_SRCS}
         src/iq_record.cpp
         src/sched_record.cpp
+        src/sat_sched.cpp
+        src/sat_tle.cpp
+        src/SGP4.cpp
+        src/MathTimeLib.cpp
+        src/doppler/sat_geom.cpp
         src/mission.cpp
         src/mission_push.cpp
         src/hist_check.cpp
