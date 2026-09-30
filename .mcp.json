@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "bewe": {
-      "command": "python3",
-      "args": ["tools/mcp/bewe_mcp.py"]
+      "command": "sh",
+      "args": ["-c", "exec python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/tools/mcp/bewe_mcp.py\""]
     }
   }
 }

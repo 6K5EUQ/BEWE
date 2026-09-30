@@ -22,7 +22,8 @@ CFG = os.environ.get("BEWE_MCP_STATIONS",
                      os.path.expanduser("~/.config/bewe-mcp/stations.json"))
 SECRETS = os.path.expanduser("~/.claude/secrets.local")
 PROTOCOL = "2024-11-05"
-HEARTBEAT = re.compile(r"\[HOST\] room='[^']*' uptime=")
+# Periodic stats lines (station every ~3 s, Central per room) — hidden by default.
+HEARTBEAT = re.compile(r"\[HOST\] room='[^']*' uptime=|\[Central\] \[STATS\] room=")
 
 # Commands that take a station (or its machine) down, drop the SDR or end a
 # mission. They need confirm=true so a guess never runs them.
@@ -155,7 +156,9 @@ def t_stations(check=True):
 
 
 def log_size(st):
-    rc, out, _ = run(st, f"stat -c %s {q(st['log'])} 2>/dev/null || echo 0", timeout=15)
+    rc, out, err = run(st, f"stat -c %s {q(st['log'])} 2>/dev/null || echo 0", timeout=15)
+    if rc in (124, 255):
+        raise RuntimeError(f"station unreachable: {(err or out).strip()[-200:]}")
     try:
         return int(out.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -193,7 +196,7 @@ def t_log(name, lines=60, grep="", heartbeat=False):
     n = max(1, min(int(lines), 2000))
     cmd = f"tail -n 20000 {q(st['log'])}"
     if not heartbeat:
-        cmd += " | grep -av \"\\[HOST\\] room='[^']*' uptime=\""
+        cmd += " | grep -avE \"\\[HOST\\] room='[^']*' uptime=|\\[Central\\] \\[STATS\\] room=\""
     if grep:
         cmd += f" | grep -aiE {q(grep)}"
     cmd += f" | tail -n {n}"
