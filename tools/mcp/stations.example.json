@@ -1,0 +1,13 @@
+{
+  "stations": [
+    {"name": "CENTRAL", "role": "central", "ssh": "root@<tailscale-ip>",
+     "repo": "/home/central/BEWE", "unit": "bewe-central.service",
+     "log": "/var/log/bewe-central.log", "sudo": "none"},
+    {"name": "DGS-1", "role": "host", "ssh": "<user>@<tailscale-ip>",
+     "fifo": "/run/bewe-dgs-1.cmd", "log": "/var/log/bewe-dgs-1.log",
+     "unit": "bewe-station.service", "sudo": "nopass"},
+    {"name": "DGS-2", "role": "host", "ssh": "<user>@<tailscale-ip>",
+     "fifo": "/run/bewe-dgs-2.cmd", "log": "/var/log/bewe-dgs-2.log",
+     "unit": "bewe-station.service", "sudo": "env:DGS2_SUDO"}
+  ]
+}
