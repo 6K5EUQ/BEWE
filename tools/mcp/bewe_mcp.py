@@ -211,6 +211,8 @@ def t_restart(name, confirm=False, wait=20):
     unit = st.get("unit", "bewe-central.service" if st.get("role") == "central" else "bewe-station.service")
     pw = sudo_password(st)
     spec = st.get("sudo", "nopass")
+    # 재시작 전 로그 끝 — 복귀 판정은 이 뒤에 새로 찍힌 줄만 본다 (옛 프로세스 줄 오인 방지)
+    before = log_size(st) if st.get("role") != "central" else 0
     if spec == "none":
         rc, out, err = run(st, f"systemctl restart {q(unit)}", timeout=60)
     elif pw is None:
@@ -223,16 +225,15 @@ def t_restart(name, confirm=False, wait=20):
         time.sleep(3)
         _, out, _ = run(st, f"systemctl is-active {q(unit)}")
         return f"{unit}: {out.strip()}"
-    # wait for the room to reopen on Central
+    # wait for the new process to reopen its room on Central
     deadline = time.time() + max(5, min(int(wait), 120))
-    start = int(time.time())
     while time.time() < deadline:
         time.sleep(3)
-        _, out, _ = run(st, f"systemctl show {q(unit)} -p ActiveState --value; "
-                            f"tail -n 200 {q(st['log'])} | grep -a \"room=\" | tail -1", timeout=15)
-        if "active" in out and "room=" in out:
-            return f"{unit} restarted; {out.strip().splitlines()[-1]}"
-    return f"{unit} restarted (room line not seen within {wait}s - check bewe_log)"
+        _, out, _ = run(st, f"tail -c +{before + 1} {q(st['log'])} | grep -a \"room '.*' opened\" | tail -1",
+                        timeout=15)
+        if out.strip():
+            return f"{unit} restarted; {out.strip()}"
+    return f"{unit} restarted, but no 'room opened' within {wait}s - check bewe_log"
 
 
 def t_status(name):
