@@ -289,6 +289,9 @@ void FFTViewer::sched_stop_entry(int idx){
     float  entry_bw    = e.bw_khz;
     // 위성 채널 녹음은 재절단 뒤에 올린다 — 먼저 push 하면 Central ACK 시 로컬본이 지워져 자를 게 없다
     const bool sat_trim = (e.sr_hz == 0) && SatSched::norad_of(e.target) > 0;
+    // 재절단의 위성/지상 판별에 녹음 때 따라간 도플러를 그대로 쓴다 (아래에서 채널 것은 비운다)
+    std::function<double(double)> trim_dop;
+    if(sat_trim && slot >= 0 && slot < MAX_CHANNELS) trim_dop = iq_doppler_fn[slot];
 
     if(e.sr_hz > 0){
         stop_rec();   // rec_worker join + .sigmf-meta Duration 갱신
@@ -313,10 +316,10 @@ void FFTViewer::sched_stop_entry(int idx){
     // 자동 DB 업로드 (별도 스레드) — 파일 finalize 대기 후 전송
     if(!iq_path.empty() && (sched_db_upload_fn || sat_trim)){
         auto upload_fn = sched_db_upload_fn;
-        std::thread([upload_fn, iq_path, entry_op, entry_start, entry_dur, entry_freq, entry_bw, sat_trim](){
+        std::thread([upload_fn, iq_path, entry_op, entry_start, entry_dur, entry_freq, entry_bw, sat_trim, trim_dop](){
             if(sat_trim){
                 // 수백 MB 를 훑는 일이라 이 스레드에서. 실패해도 1차 파일은 그대로 남는다.
-                SatTrim::Result tr = SatTrim::trim(iq_path);
+                SatTrim::Result tr = SatTrim::trim(iq_path, trim_dop);
                 if(tr.trimmed)
                     bewe_log_push(0, "[SCHED] Trimmed: occupied %.2f kHz (centre %+.2f kHz, %d s with signal) -> SR %u\n",
                                   tr.occ_bw_hz/1e3, tr.center_off_hz/1e3, tr.signal_rows, tr.sr_out);

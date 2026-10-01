@@ -20,7 +20,7 @@ static float median_of(std::vector<float> v){
     return v[m];
 }
 
-Result trim(const std::string& path){
+Result trim(const std::string& path, const std::function<double(double)>& dop_fn){
     Result R;
     SigMF::Meta meta;
     if(!SigMF::read_meta(path, meta) || meta.sample_rate == 0){ R.why = "no meta"; return R; }
@@ -37,10 +37,12 @@ Result trim(const std::string& path){
     if(map == MAP_FAILED){ R.why = "mmap failed"; return R; }
     const int16_t* x = (const int16_t*)map;
 
-    // ── 1) 1초 행 PSD — bin ~50 Hz ──────────────────────────────────────────
-    int N = 1024;
-    while(N < 16384 && (double)sr / N > 50.0) N <<= 1;
-    const int AVG = 16;
+    // ── 1) 1초 행 PSD — bin ~250 Hz, 그 1초의 샘플을 전부 평균 ─────────────
+    // bin 을 30 Hz 로 잘게 쪼개면 약한 패스에서 신호 덩어리 안에 잡음 골이 생겨
+    // 점유 구간이 반토막 난다 (DGS-2 22:40 실측 2.75 kHz vs 실제 5.4 kHz).
+    int N = 256;
+    while(N < 16384 && (double)sr / N > 250.0) N <<= 1;
+    const int AVG = std::max(1, (int)(sr / N));
     const size_t rows = n / sr;
     std::vector<float> win(N);
     for(int i = 0; i < N; i++) win[i] = 0.5f - 0.5f*cosf(2.f*(float)M_PI*i/(N-1));
@@ -91,17 +93,25 @@ Result trim(const std::string& path){
         }
     }
 
-    // ── 2) 신호 행: 5bin 평활 최대 > +3 dB ───────────────────────────────────
+    // ── 2) 신호 행: 9bin(~2 kHz) 평활 최대 > +1 dB. 그 행의 피크 bin 도 기억한다 ─
+    // 1초를 통째로 평균하므로 bin 잡음편차가 ~0.3 dB, 9bin 평활 후 ~0.1 dB 다 —
+    // 1 dB 는 약 10σ. +3 dB 로 두면 약한 패스(DGS-2 22:40)가 4행만 남아 버려진다.
     std::vector<double> mean(N, 0.0);
+    std::vector<int> row_peak;
+    std::vector<size_t> row_idx;
     for(size_t r = 0; r < rows; r++){
         const float* row = &P[r*(size_t)N];
-        float best = 0;
-        for(int i = N/4 + 2; i < 3*N/4 - 2; i++){
-            float s5 = (row[i-2]+row[i-1]+row[i]+row[i+1]+row[i+2]) * 0.2f;
-            best = std::max(best, s5);
+        float best = 0; int bi = 0;
+        for(int i = N/4 + 4; i < 3*N/4 - 4; i++){
+            float s9 = 0;
+            for(int j = -4; j <= 4; j++) s9 += row[i+j];
+            s9 *= (1.0f/9.0f);
+            if(s9 > best){ best = s9; bi = i; }
         }
-        if(best > 1.9953f){                           // 10^(3/10)
+        if(best > 1.2589f){                           // 10^(1/10)
             for(int i = 0; i < N; i++) mean[i] += row[i];
+            row_peak.push_back(bi);
+            row_idx.push_back(r);
             R.signal_rows++;
         }
     }
@@ -135,6 +145,46 @@ Result trim(const std::string& path){
     R.occ_bw_hz     = (b - a + 1) * bin_hz;
     R.center_off_hz = ((a + b) * 0.5 - N/2) * bin_hz;
     if(b - a + 1 < 3){ munmap(map, (size_t)st.st_size); R.why = "occupied band too narrow"; return R; }
+
+    // 위성인가: 도플러를 따라가는 프레임에선 위성은 같은 bin 에 머물고 지상 신호는
+    // 패스 동안 수십 kHz 를 휩쓴다. 신호 행 대부분의 피크가 이 구간에 있어야 한다.
+    // (없으면 DGS-2 08:04 처럼 스퓨리어스 한 줄을 위성으로 잡아 120 Hz 로 잘라 버린다)
+    int inside = 0;
+    std::vector<double> trk, raw, dops;           // 구간 안 행: 추적/원래 프레임 피크(Hz), 도플러
+    for(size_t q = 0; q < row_peak.size(); q++){
+        int pk = row_peak[q];
+        if(pk < a - 2 || pk > b + 2) continue;
+        inside++;
+        if(dop_fn){
+            double t = (double)meta.start_unix + row_idx[q] + 0.5;
+            double d = dop_fn(t);
+            trk.push_back((pk - N/2) * bin_hz);
+            raw.push_back((pk - N/2) * bin_hz + d);
+            dops.push_back(d);
+        }
+    }
+    if(inside < 10 || inside * 10 < (int)row_peak.size() * 6){
+        munmap(map, (size_t)st.st_size);
+        char w[96]; snprintf(w, sizeof w, "not a steady signal (%d/%d rows in band)", inside, (int)row_peak.size());
+        R.why = w; return R;
+    }
+    if(dop_fn){
+        auto sd = [](const std::vector<double>& v){
+            double m = 0, s = 0;
+            for(double x : v) m += x;
+            m /= v.size();
+            for(double x : v) s += (x-m)*(x-m);
+            return sqrt(s / v.size());
+        };
+        double dspan = *std::max_element(dops.begin(), dops.end()) - *std::min_element(dops.begin(), dops.end());
+        double s_trk = sd(trk), s_raw = sd(raw);
+        if(dspan < 1000.0 || s_trk >= 0.5 * s_raw){
+            munmap(map, (size_t)st.st_size);
+            char w[128]; snprintf(w, sizeof w, "not Doppler-locked (span %.0f Hz, spread tracked %.0f / raw %.0f Hz)",
+                                  dspan, s_trk, s_raw);
+            R.why = w; return R;
+        }
+    }
 
     // ── 4) 재절단: 중심을 0 으로 옮기고 BW x1.25 로 LPF + 정수 decim ─────────
     const double bw_rec    = R.occ_bw_hz * 1.25;
