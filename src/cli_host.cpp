@@ -3800,7 +3800,7 @@ void run_cli_host(){
                 }
                 fflush(stdout);
             } else if(line.rfind("/sched", 0) == 0){
-                // /sched add sat <NORAD> <CF_Hz> <SR_Hz>
+                // /sched add sat <NORAD> <CF_Hz> [capture_Hz]   (narrowband, Doppler-tracked)
                 // /sched add <CF_Hz> <SR_Hz> <YYYY-MM-DD> <HH:MM:SS> <dur_s>   (KST)
                 // /sched list | /sched del <n> | /sched del sat <NORAD>
                 std::istringstream is(line.substr(6));
@@ -3808,16 +3808,18 @@ void run_cli_host(){
                 if(sub == "add"){
                     std::string a; is >> a;
                     if(a == "sat"){
-                        SatSched::Rule r; double sr = 0;
-                        is >> r.norad >> r.cf_hz >> sr;
-                        r.sr_hz = (uint32_t)sr;
+                        SatSched::Rule r; double cap = SatSched::DEFAULT_CAP_HZ;
+                        is >> r.norad >> r.cf_hz;
+                        bool ok = (bool)is;
+                        if(ok && !(is >> cap)) cap = SatSched::DEFAULT_CAP_HZ;   // 생략 가능
+                        r.cap_hz = (uint32_t)cap;
                         std::string err, name, src; double age = 0;
-                        if(!is || !SatSched::add_rule(r, err)){
-                            bewe_log_push(0,"  %s. Usage: /sched add sat <NORAD> <CF_Hz> <SR_Hz>\n",
+                        if(!ok || !SatSched::add_rule(r, err)){
+                            bewe_log_push(0,"  %s. Usage: /sched add sat <NORAD> <CF_Hz> [capture_Hz]\n",
                                           err.empty() ? "Bad args" : err.c_str());
                         } else {
-                            bewe_log_push(0,"[CMD:CLI] SAT rule %d  %.4f MHz  SR=%.3f MSPS\n",
-                                          r.norad, r.cf_hz/1e6, r.sr_hz/1e6);
+                            bewe_log_push(0,"[CMD:CLI] SAT rule %d  %.4f MHz  capture %.0f kHz (Doppler-tracked, trimmed after pass)\n",
+                                          r.norad, r.cf_hz/1e6, r.cap_hz/1e3);
                             if(!SatSched::find_elem(r.norad, name, src, age, err))
                                 bewe_log_push(0,"  warn: %s\n", err.c_str());
                             else
@@ -3868,7 +3870,7 @@ void run_cli_host(){
                     }
                 } else if(sub == "list"){
                     for(const auto& r : SatSched::rules())
-                        bewe_log_push(0,"  rule SAT %d  %.4f MHz  SR=%.3f MSPS\n", r.norad, r.cf_hz/1e6, r.sr_hz/1e6);
+                        bewe_log_push(0,"  rule SAT %d  %.4f MHz  capture %.0f kHz\n", r.norad, r.cf_hz/1e6, r.cap_hz/1e3);
                     std::lock_guard<std::mutex> lk(v.sched_mtx);
                     for(int i = 0; i < (int)v.sched_entries.size(); i++){
                         const auto& e = v.sched_entries[i];
@@ -3901,7 +3903,7 @@ void run_cli_host(){
                         else  { bewe_log_push(0,"[CMD:CLI] SCHED [%d] removed\n", idx); v.broadcast_sched_list(); }
                     }
                 } else {
-                    bewe_log_push(0,"  Usage: /sched add sat <NORAD> <CF_Hz> <SR_Hz> | /sched add <CF_Hz> <SR_Hz> <YYYY-MM-DD> <HH:MM:SS> <dur_s>\n"
+                    bewe_log_push(0,"  Usage: /sched add sat <NORAD> <CF_Hz> [capture_Hz] | /sched add <CF_Hz> <SR_Hz> <YYYY-MM-DD> <HH:MM:SS> <dur_s>\n"
                                     "         /sched list | /sched del <n> | /sched del sat <NORAD>\n");
                 }
                 fflush(stdout);
@@ -3973,7 +3975,7 @@ void run_cli_host(){
                 bewe_log_push(0,"  /notch del <n>   - Delete notch n\n");
                 bewe_log_push(0,"  /tm save <ch> [sec_ago] - Save TM rolling IQ for a channel\n");
                 bewe_log_push(0,"  /sched add <CF_Hz> <SR_Hz> <YYYY-MM-DD> <HH:MM:SS> <dur_s> - Schedule full-band IQ (KST)\n");
-                bewe_log_push(0,"  /sched add sat <NORAD> <CF_Hz> <SR_Hz> - Record every pass (AOS~LOS)\n");
+                bewe_log_push(0,"  /sched add sat <NORAD> <CF_Hz> [capture_Hz] - Record every pass, Doppler-tracked narrowband\n");
                 bewe_log_push(0,"  /sched list | del <n> | del sat <NORAD>\n");
                 bewe_log_push(0,"  /tle update | status | pass <NORAD> - Orbital elements from Central\n");
                 bewe_log_push(0,"  /mission start   - Begin a new mission\n");

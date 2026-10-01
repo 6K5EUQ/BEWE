@@ -507,7 +507,16 @@ void FFTViewer::iq_only_worker(int ch_idx){
     uint64_t init_cf = live_cf_hz.load(std::memory_order_acquire);
     float ch_cf_mhz = (ch.s + ch.e) * 0.5f;
     float bw_hz = fabsf(ch.e - ch.s) * 1e6f;
-    float off_hz = (ch_cf_mhz - (float)(init_cf / 1e6f)) * 1e6f;
+    // 도플러 추적 (위성 예약): 관측 주파수 = 채널 중심 + 예측 편이. 50ms 마다 갱신,
+    // 위상은 유지한다 (retune). 최악 도플러율 ~200 Hz/s 라 갱신당 10 Hz 계단이다.
+    const std::function<double(double)> dop_fn = iq_doppler_fn[ch_idx];
+    auto wall_now = [](){
+        return std::chrono::duration<double>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    };
+    double dop_hz = dop_fn ? dop_fn(wall_now()) : 0.0;
+    auto dop_last = std::chrono::steady_clock::now();
+    float off_hz = (float)(((double)ch_cf_mhz - init_cf / 1e6) * 1e6 + dop_hz);
 
     // 적극 decim: target sr ≈ BW × 1.25 (Nyquist + 25% margin), ceil로 BW에 가깝게
     float target_sr = bw_hz * 1.25f;
@@ -535,9 +544,15 @@ void FFTViewer::iq_only_worker(int ch_idx){
         // CF 변경 감지
         uint64_t cur_cf = live_cf_hz.load(std::memory_order_acquire);
         if(cur_cf != prev_cf){
-            off_hz = (ch_cf_mhz - (float)(cur_cf / 1e6f)) * 1e6f;
+            off_hz = (float)(((double)ch_cf_mhz - cur_cf / 1e6) * 1e6 + dop_hz);
             osc.set_freq((double)off_hz, (double)msr);
             prev_cf = cur_cf;
+        }
+        if(dop_fn && std::chrono::steady_clock::now() - dop_last >= std::chrono::milliseconds(50)){
+            dop_last = std::chrono::steady_clock::now();
+            dop_hz = dop_fn(wall_now());
+            off_hz = (float)(((double)ch_cf_mhz - cur_cf / 1e6) * 1e6 + dop_hz);
+            osc.retune((double)off_hz, (double)msr);
         }
         size_t wp = ring_wp.load(std::memory_order_acquire);
         size_t rp = ch.iq_only_rp.load(std::memory_order_relaxed);
@@ -665,7 +680,7 @@ void FFTViewer::start_iq_rec(int ch_idx){
                             utc_offset_hours(), actual_inter);
 }
 
-void FFTViewer::stop_iq_rec(int ch_idx){
+void FFTViewer::stop_iq_rec(int ch_idx, bool push){
     if(ch_idx<0||ch_idx>=MAX_CHANNELS) return;
     Channel& ch=channels[ch_idx];
     if(!ch.iq_rec_on.load()) return;
@@ -715,7 +730,7 @@ void FFTViewer::stop_iq_rec(int ch_idx){
     }
     ch.iq_rec_path = new_path;
 #ifdef BEWE_HOST_BUILD
-    MissionPush::enqueue(ch.iq_rec_path, MFS_IQ);
+    if(push) MissionPush::enqueue(ch.iq_rec_path, MFS_IQ);
 #endif
     ch.iq_rec_path.clear();
 }

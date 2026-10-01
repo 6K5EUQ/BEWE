@@ -4,6 +4,9 @@
 #include "login.hpp"
 #include "kst_time.hpp"
 #include "sigmf.hpp"
+#include "sat_sched.hpp"
+#include "sat_trim.hpp"
+#include "mission_push.hpp"
 #include <ctime>
 #include <chrono>
 #include <thread>
@@ -188,13 +191,22 @@ void FFTViewer::sched_arm_entry(int idx){
     // squelch 무시하고 전 구간 녹음 (예약 녹음 의도).
     channels[slot].iq_rec_force_all.store(true);
 
+    // 위성 예약: 채널 믹서가 TLE 도플러를 따라가게 한다 (패스 동안 수신 주파수가 ±수십 kHz 움직임)
+    if(int norad = SatSched::norad_of(e.target)){
+        iq_doppler_fn[slot] = SatSched::doppler_fn(norad, station_lat, -station_lon,
+                                                   (double)e.freq_mhz * 1e6);
+        if(!iq_doppler_fn[slot])
+            bewe_log_push(0, "[SCHED] Warn: no TLE for %d - recording without Doppler tracking\n", norad);
+    }
+
     e.status = SchedEntry::ARMED;
     sched_active_idx = idx;
 
     if(net_srv) net_srv->broadcast_channel_sync(channels, MAX_CHANNELS);
     broadcast_sched_list_locked();
-    bewe_log_push(0, "[SCHED] ARMED: CH%d %.3f MHz BW=%.0f kHz dur=%.0fs (T-%.1fs)\n",
-                  slot, e.freq_mhz, e.bw_khz, e.duration_sec, SCHED_PRE_ARM_SEC);
+    bewe_log_push(0, "[SCHED] ARMED: CH%d %.3f MHz BW=%.0f kHz dur=%.0fs%s (T-%.1fs)\n",
+                  slot, e.freq_mhz, e.bw_khz, e.duration_sec,
+                  iq_doppler_fn[slot] ? " Doppler-tracked" : "", SCHED_PRE_ARM_SEC);
 }
 
 // sched_mtx를 이미 잡은 상태에서 호출 가능한 브로드캐스트 (내부 잠금 없음)
@@ -275,16 +287,18 @@ void FFTViewer::sched_stop_entry(int idx){
     float  entry_dur   = e.duration_sec;
     float  entry_freq  = e.freq_mhz;
     float  entry_bw    = e.bw_khz;
+    // 위성 채널 녹음은 재절단 뒤에 올린다 — 먼저 push 하면 Central ACK 시 로컬본이 지워져 자를 게 없다
+    const bool sat_trim = (e.sr_hz == 0) && SatSched::norad_of(e.target) > 0;
 
     if(e.sr_hz > 0){
         stop_rec();   // rec_worker join + .sigmf-meta Duration 갱신
     } else {
         // IQ-only worker stop & wav finalize (stop_iq_rec 안에서 worker join)
-        if(slot >= 0 && slot < MAX_CHANNELS)
-            stop_iq_rec(slot);
-
-        if(slot >= 0 && slot < MAX_CHANNELS)
+        if(slot >= 0 && slot < MAX_CHANNELS){
+            stop_iq_rec(slot, /*push=*/!sat_trim);
+            iq_doppler_fn[slot] = nullptr;
             channels[slot].reset_slot();
+        }
     }
 
     sched_restore_sdr(*this);
@@ -297,9 +311,20 @@ void FFTViewer::sched_stop_entry(int idx){
     bewe_log_push(0, "[SCHED] Recording complete: entry %d\n", idx);
 
     // 자동 DB 업로드 (별도 스레드) — 파일 finalize 대기 후 전송
-    if(!iq_path.empty() && sched_db_upload_fn){
+    if(!iq_path.empty() && (sched_db_upload_fn || sat_trim)){
         auto upload_fn = sched_db_upload_fn;
-        std::thread([upload_fn, iq_path, entry_op, entry_start, entry_dur, entry_freq, entry_bw](){
+        std::thread([upload_fn, iq_path, entry_op, entry_start, entry_dur, entry_freq, entry_bw, sat_trim](){
+            if(sat_trim){
+                // 수백 MB 를 훑는 일이라 이 스레드에서. 실패해도 1차 파일은 그대로 남는다.
+                SatTrim::Result tr = SatTrim::trim(iq_path);
+                if(tr.trimmed)
+                    bewe_log_push(0, "[SCHED] Trimmed: occupied %.2f kHz (centre %+.2f kHz, %d s with signal) -> SR %u\n",
+                                  tr.occ_bw_hz/1e3, tr.center_off_hz/1e3, tr.signal_rows, tr.sr_out);
+                else
+                    bewe_log_push(0, "[SCHED] Not trimmed (%s) - keeping capture-width file\n", tr.why.c_str());
+                MissionPush::enqueue(iq_path, MFS_IQ);
+                if(!upload_fn) return;
+            }
             // stop_iq_rec()가 동기로 fclose+.info Duration 갱신까지 끝냈으므로 sleep 불필요.
 
             // sched 특유 메타 (예약자·시각·길이·폭)
@@ -313,7 +338,12 @@ void FFTViewer::sched_stop_entry(int idx){
             // SigMF 사이드카는 JSON 이라 아래 Key:Value 줄 교체를 하면 깨진다 —
             // 노트를 meta 에 먼저 기록하고 그 파일을 그대로 보낸다.
             bool sigmf = SigMF::is_sigmf_data(iq_path);
-            if(sigmf) SigMF::update_note(iq_path, note_body);
+            if(sigmf){
+                // 재절단이 남긴 노트(도플러 보정·점유폭)를 지우지 않게 뒤에 잇는다
+                std::string prev = SigMF::read_note(iq_path);
+                SigMF::update_note(iq_path, prev.empty() ? std::string(note_body)
+                                                         : std::string(note_body) + "; " + prev);
+            }
 
             // stop_iq_rec()가 이미 표준 형식 사이드카를 생성/갱신했음.
             // 그 내용을 그대로 read해서 업로드 (free-form 텍스트 대신 표준 포맷 보장)

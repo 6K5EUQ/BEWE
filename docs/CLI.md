@@ -85,20 +85,38 @@ Recording locations:
 
 ### Scheduled recording
 
-Scheduled recordings switch the SDR to the requested CF and SR 5 s before the
-start, record the **whole band** at that SR (no decimation, file SR = SR), then
-restore the previous CF and SR. The whole station is affected while it runs:
-waterfall, other channels and HIST follow the retune.
+Two kinds. Both retune the SDR 5 s before the start and restore it afterwards;
+the whole station follows the retune while they run (waterfall, other channels,
+HIST).
+
+**Full-band** (`/sched add <CF_Hz> <SR_Hz> ...`): the SDR SR is switched to the
+requested SR and the whole band is recorded without decimation. Large: 2 MSPS is
+8 MB/s.
+
+**Satellite** (`/sched add sat ...`): narrowband, Doppler-tracked.
+1. The SDR SR is left alone. The SDR CF is moved off the satellite by at least
+   the capture width, so the signal sits clear of the DC spike.
+2. A channel follows the TLE-predicted Doppler (updated every 50 ms, phase
+   continuous) and records `capture_Hz` around the rest frequency (default 200 kHz).
+3. After LOS the station measures the occupied bandwidth over the whole pass
+   and rewrites the file at that width x1.25, centred on the signal. The
+   `.sigmf-meta` gets the new SR, the measured centre frequency and the note
+   `Doppler-corrected; occupied N kHz`.
+4. If the signal never shows (fewer than 5 seconds above the floor) the
+   capture-width file is kept as recorded.
+
+Measured on a 58400 pass at 465 MHz (DGS-2): 5.5 kHz occupied, 682 MB capture
+trimmed to 24 MB, against 5.45 GB for the same pass recorded full-band.
 
 | Command | Effect |
 |---|---|
-| `/sched add <CF_Hz> <SR_Hz> <YYYY-MM-DD> <HH:MM:SS> <dur_s>` | One-off recording, start time in KST |
-| `/sched add sat <NORAD> <CF_Hz> <SR_Hz>` | Standing rule: record **every** pass of that satellite, AOS to LOS at 0 deg elevation. Passes for the next 24 h are expanded into entries and refreshed every 10 min. Persisted across restarts |
+| `/sched add <CF_Hz> <SR_Hz> <YYYY-MM-DD> <HH:MM:SS> <dur_s>` | One-off full-band recording, start time in KST |
+| `/sched add sat <NORAD> <CF_Hz> [capture_Hz]` | Standing rule: record **every** pass of that satellite, AOS to LOS at 0 deg elevation. Passes for the next 24 h are expanded into entries and refreshed every 10 min. Persisted across restarts. Changing a rule (same NORAD) re-plans its waiting entries |
 | `/sched list` | Rules, then entries `[n] WAIT/ARMED/REC/DONE/FAIL` |
 | `/sched del <n>` | Remove entry n (not the one in progress) |
 | `/sched del sat <NORAD>` | Remove the rule and its waiting entries |
 
-- Files: `SCHED_IQ_<station>_<code>_<date>_<HHMMSS>-<HHMMSS>_<F.F>MHz.sigmf-data` + `.sigmf-meta`, in the mission `iq/` folder if a mission is ACTIVE, otherwise `record/iq/`. Uploaded to the Central DB when finished.
+- Files: `SCHED_IQ_<station>_<code>_<date>_<HHMMSS>-<HHMMSS>_<F.F>MHz.sigmf-data` + `.sigmf-meta`, in the mission `iq/` folder if a mission is ACTIVE, otherwise `record/iq/`. Uploaded to the Central DB when finished (satellite files after the trim).
 - Overlapping entries are refused (the pre-arm 5 s counts). Two satellites passing at once: the later one is skipped and logged.
 - Max 32 entries per station. Finished satellite entries are dropped an hour after they end.
 - Log tags: `[SCHED]` (arm/start/stop/restore), `[SAT]` (pass expansion), `[SCHED-DB]` (upload).
@@ -108,7 +126,7 @@ Example:
 ```
 /tle update
 /tle pass 58400
-/sched add sat 58400 465000000 1000000
+/sched add sat 58400 465000000
 /sched list
 ```
 

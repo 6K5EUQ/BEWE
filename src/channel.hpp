@@ -19,6 +19,12 @@ struct Oscillator {
         double w=-2.0*M_PI*freq_hz/sr;
         dre=(float)cos(w); dim=(float)sin(w); re=1; im=0; cnt=0;
     }
+    // 위상을 유지한 채 주파수만 바꾼다 — 도플러 추적처럼 자주 갱신할 때 set_freq 를
+    // 쓰면 갱신마다 위상이 0 으로 튀어 코히어런트 복조가 깨진다.
+    void retune(double freq_hz,double sr){
+        double w=-2.0*M_PI*freq_hz/sr;
+        dre=(float)cos(w); dim=(float)sin(w);
+    }
     inline void mix(float si,float sq,float& mi,float& mq){
         mi=si*re-sq*im; mq=si*im+sq*re;
         float nr=re*dre-im*dim, ni=re*dim+im*dre; re=nr; im=ni;

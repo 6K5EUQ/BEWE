@@ -1256,7 +1256,11 @@ public:
     bool start_sched_fullband_rec();   // 예약(sr_hz>0) 전대역 녹음. rec_on 중이면 false
     void stop_audio_rec(int ch_idx);
     void start_iq_rec(int ch_idx);
-    void stop_iq_rec(int ch_idx);
+    // push=false: Central 미션 push 를 호출자가 나중에 한다 (위성 녹음은 재절단 후 올린다)
+    void stop_iq_rec(int ch_idx, bool push=true);
+    // 채널 IQ 녹음 도플러 추적: t_unix → 관측 주파수 편이(Hz). 비어 있으면 추적 안 함.
+    // start_iq_rec 전에 세우고 stop 후 비운다. iq_only_worker 가 시작 시 복사해 쓴다.
+    std::function<double(double)> iq_doppler_fn[MAX_CHANNELS];
     void iq_only_worker(int ch_idx);  // demod 우회 IQ-only 녹음 worker
 
     void start_join_audio_rec(int ch_idx); // JOIN 모드 로컬 오디오 녹음

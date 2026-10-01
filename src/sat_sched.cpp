@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <array>
+#include <cmath>
 
 namespace SatSched {
 
@@ -29,7 +31,7 @@ static void save_locked(){
     FILE* f = fopen(tmp.c_str(), "w");
     if(!f) return;
     for(const auto& r : g_rules)
-        fprintf(f, "%d %.0f %u\n", r.norad, r.cf_hz, r.sr_hz);
+        fprintf(f, "%d %.0f %u\n", r.norad, r.cf_hz, r.cap_hz);
     fclose(f);
     rename(tmp.c_str(), g_path.c_str());
 }
@@ -43,8 +45,11 @@ void load(const std::string& station){
     FILE* f = fopen(g_path.c_str(), "r");
     if(!f) return;
     Rule r;
-    while(fscanf(f, "%d %lf %u", &r.norad, &r.cf_hz, &r.sr_hz) == 3)
-        if(r.norad > 0 && r.cf_hz > 0 && r.sr_hz > 0) g_rules.push_back(r);
+    while(fscanf(f, "%d %lf %u", &r.norad, &r.cf_hz, &r.cap_hz) == 3){
+        // v15.30.0 규칙 파일의 셋째 값은 전대역 SR(수 MHz)이었다 — 캡처 폭으로 못 쓴다
+        if(r.cap_hz < 20000 || r.cap_hz > 1000000) r.cap_hz = DEFAULT_CAP_HZ;
+        if(r.norad > 0 && r.cf_hz > 0) g_rules.push_back(r);
+    }
     fclose(f);
     bewe_log_push(0, "[SAT] %d rule(s) restored\n", (int)g_rules.size());
     g_force = true;
@@ -53,7 +58,7 @@ void load(const std::string& station){
 bool add_rule(const Rule& r, std::string& err){
     if(r.norad <= 0 || r.norad > 99999){ err = "invalid NORAD"; return false; }
     if(r.cf_hz < 1e5 || r.cf_hz > 6e9){ err = "invalid CF (Hz)"; return false; }
-    if(r.sr_hz < 100000 || r.sr_hz > 61440000){ err = "invalid SR (Hz, 0.1~61.44 MSPS)"; return false; }
+    if(r.cap_hz < 20000 || r.cap_hz > 1000000){ err = "invalid capture width (Hz, 20000~1000000)"; return false; }
     std::lock_guard<std::mutex> lk(g_mtx);
     auto it = std::find_if(g_rules.begin(), g_rules.end(),
                            [&](const Rule& x){ return x.norad == r.norad; });
@@ -105,6 +110,28 @@ bool find_elem(int norad, std::string& name, std::string& src_file, double& epoc
     epoch_age_days = SatGeom::jd_from_unix((double)time(nullptr))
                    - (e.satrec.jdsatepoch + e.satrec.jdsatepochF);
     return true;
+}
+
+int norad_of(const char* target){
+    return (target && strncmp(target, "SAT ", 4) == 0) ? atoi(target + 4) : 0;
+}
+
+std::function<double(double)> doppler_fn(int norad, double lat, double lon_e, double cf_hz){
+    TleElem e; std::string src;
+    if(norad <= 0 || !find_tle(norad, e, src)) return {};
+    double site[3];
+    SatGeom::site_ecef(lat, lon_e, 0.0, site);
+    std::array<double,3> s{site[0], site[1], site[2]};
+    elsetrec rec = e.satrec;
+    return [rec, s, lat, lon_e, cf_hz](double t) -> double {
+        elsetrec x = rec;
+        double rt[3], vt[3], jd, re[3], ve[3];
+        if(!SatGeom::prop_teme(x, t, rt, vt, jd)) return 0.0;
+        SatGeom::teme_to_ecef(rt, vt, jd, re, ve);
+        SatGeom::LookAngle la;
+        SatGeom::ecef_look(re, ve, s.data(), lat, lon_e, la);
+        return -cf_hz * la.range_rate_km_s / SatGeom::C_KM_S;   // + 멀어짐 → 주파수 하강
+    };
 }
 
 // ── 패스 예측 ──────────────────────────────────────────────────────────────
@@ -196,7 +223,8 @@ void tick(FFTViewer& v){
 
     bool changed = false;
     {
-        // 치우기: 규칙이 사라진 대기 엔트리 + 끝난 지 1시간 넘은 위성 엔트리.
+        // 치우기: 규칙이 사라졌거나 규칙과 값이 달라진 대기 엔트리(다시 채운다) +
+        // 끝난 지 1시간 넘은 위성 엔트리.
         // 활성 엔트리 인덱스가 밀리지 않게 새로 짠다 (Central 복원 경로와 같은 방식).
         std::lock_guard<std::mutex> lk(v.sched_mtx);
         std::vector<FFTViewer::SchedEntry> keep;
@@ -206,7 +234,11 @@ void tick(FFTViewer& v){
             if(i == v.sched_active_idx){ new_active = (int)keep.size(); keep.push_back(e); continue; }
             if(strncmp(e.target, "SAT ", 4) == 0){
                 int n = atoi(e.target + 4);
-                bool has_rule = std::any_of(rs.begin(), rs.end(), [&](const Rule& r){ return r.norad == n; });
+                bool has_rule = std::any_of(rs.begin(), rs.end(), [&](const Rule& r){
+                    return r.norad == n && e.sr_hz == 0
+                        && fabsf(e.freq_mhz - (float)(r.cf_hz/1e6)) < 1e-4f
+                        && fabsf(e.bw_khz - r.cap_hz/1000.0f) < 0.01f;
+                });
                 bool ended = (e.status == FFTViewer::SchedEntry::DONE || e.status == FFTViewer::SchedEntry::FAILED)
                            && e.start_time + (time_t)e.duration_sec < now - 3600;
                 if((!has_rule && e.status == FFTViewer::SchedEntry::WAITING) || ended){ changed = true; continue; }
@@ -250,8 +282,7 @@ void tick(FFTViewer& v){
             e.start_time   = start;
             e.duration_sec = dur;
             e.freq_mhz     = (float)(r.cf_hz / 1e6);
-            e.sr_hz        = r.sr_hz;
-            e.bw_khz       = r.sr_hz / 1000.0f;   // sr_hz 를 모르는 구 Central 복원 시 폴백 폭
+            e.bw_khz       = r.cap_hz / 1000.0f;   // 채널 예약 (sr_hz=0) — 협대역 캡처
             e.status       = FFTViewer::SchedEntry::WAITING;
             strncpy(e.operator_name, "SAT", sizeof(e.operator_name)-1);
             strncpy(e.target, tgt.c_str(), sizeof(e.target)-1);

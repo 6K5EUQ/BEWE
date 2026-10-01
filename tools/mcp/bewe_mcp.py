@@ -262,7 +262,7 @@ TOOLS = [
     {"name": "bewe_cmd", "fn": t_cmd,
      "description": "Run one CLI command on a HOST station (writes it to the station FIFO) and "
                     "return the log lines it produced. Examples: '/status', '/ch list', "
-                    "'/sched add sat 58400 465000000 1000000', '/tle pass 58400'. Commands that "
+                    "'/sched add sat 58400 465000000', '/tle pass 58400'. Commands that "
                     "stop the SDR/process/machine or end a mission need confirm=true.",
      "schema": {"type": "object", "required": ["station", "command"], "properties": {
          "station": {"type": "string", "description": "e.g. DGS-2"},
