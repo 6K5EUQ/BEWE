@@ -93,47 +93,62 @@ Result trim(const std::string& path, const std::function<double(double)>& dop_fn
         }
     }
 
-    // ── 2) 신호 행: 9bin(~2 kHz) 평활 최대 > +1 dB. 그 행의 피크 bin 도 기억한다 ─
-    // 1초를 통째로 평균하므로 bin 잡음편차가 ~0.3 dB, 9bin 평활 후 ~0.1 dB 다 —
-    // 1 dB 는 약 10σ. +3 dB 로 두면 약한 패스(DGS-2 22:40)가 4행만 남아 버려진다.
+    // ── 2) 위성 대역 찾기: bin 별 "켜져 있던 행 수"(지속도) ─────────────────
+    // 도플러를 따라가는 프레임에서 위성은 같은 bin 에 수십 초 머물고, 지상 반송파는
+    // 대역을 가로질러 지나가 bin 마다 몇 행만 머문다. 그래서 행 단위로 먼저 고르면
+    // (예전 방식) 약한 패스에서 지나가는 반송파 행이 평균을 지배해 위성이 탈락했다
+    // (DGS-1 10/2 22:19: 34행 중 15행만 위성). 지속도로 대역부터 찾는다.
+    // 켜짐 = 9bin(~2 kHz) 평활이 +1 dB 초과 (1초 전부 평균이라 잡음편차 ~0.1 dB → ~10σ).
+    // 위성은 지정 정지주파수 근처 — 중심 ±N/10 (캡처폭의 ±1/8, 200 kHz 면 ±25 kHz) 만 본다.
+    const int pk_lo = N/2 - N/10, pk_hi = N/2 + N/10;
+    const float ON = 1.2589f;                         // 10^(1/10)
+    std::vector<int> cnt(N, 0);
+    for(size_t r = 0; r < rows; r++){
+        const float* row = &P[r*(size_t)N];
+        for(int i = pk_lo + 4; i < pk_hi - 4; i++){
+            float s9 = 0;
+            for(int j = -4; j <= 4; j++) s9 += row[i+j];
+            if(s9 * (1.0f/9.0f) > ON) cnt[i]++;
+        }
+    }
+    int k0 = pk_lo + 4;
+    for(int i = pk_lo + 4; i < pk_hi - 4; i++) if(cnt[i] > cnt[k0]) k0 = i;
+    if(cnt[k0] < 10){ munmap(map, (size_t)st.st_size); R.why = "no signal"; return R; }
+    int ba = k0, bb = k0;                             // 지속도 절반 이상인 연속 구간
+    const int half_cnt = std::max(5, cnt[k0] / 2);
+    while(ba > pk_lo + 4 && cnt[ba-1] >= half_cnt) ba--;
+    while(bb < pk_hi - 5 && cnt[bb+1] >= half_cnt) bb++;
+
+    // 신호 행 = 그 구간 평균이 +1 dB 를 넘는 행
     std::vector<double> mean(N, 0.0);
-    std::vector<int> row_peak;
     std::vector<size_t> row_idx;
     for(size_t r = 0; r < rows; r++){
         const float* row = &P[r*(size_t)N];
-        float best = 0; int bi = 0;
-        for(int i = N/4 + 4; i < 3*N/4 - 4; i++){
-            float s9 = 0;
-            for(int j = -4; j <= 4; j++) s9 += row[i+j];
-            s9 *= (1.0f/9.0f);
-            if(s9 > best){ best = s9; bi = i; }
-        }
-        if(best > 1.2589f){                           // 10^(1/10)
-            for(int i = 0; i < N; i++) mean[i] += row[i];
-            row_peak.push_back(bi);
-            row_idx.push_back(r);
-            R.signal_rows++;
-        }
+        double m = 0;
+        for(int i = ba; i <= bb; i++) m += row[i];
+        if(m / (bb - ba + 1) <= ON) continue;
+        for(int i = 0; i < N; i++) mean[i] += row[i];
+        row_idx.push_back(r);
     }
-    if(R.signal_rows < 5){ munmap(map, (size_t)st.st_size); R.why = "no signal"; return R; }
+    R.signal_rows = (int)row_idx.size();
+    if(R.signal_rows < 10){ munmap(map, (size_t)st.st_size); R.why = "no signal"; return R; }
 
-    // ── 3) 점유 대역: 안쪽 절반(채널 LPF 감쇠 밖)에서 바닥·편차 ──────────────
+    // ── 3) 점유 대역: 신호 행 평균 PSD, 안쪽 절반에서 바닥·편차 ───────────────
     std::vector<float> db(N);
     for(int i = 0; i < N; i++) db[i] = 10.f*log10f((float)(mean[i]/R.signal_rows) + 1e-30f);
     const int lo_i = N/4, hi_i = 3*N/4;
     std::vector<float> inner(db.begin()+lo_i, db.begin()+hi_i);
-    // 위성은 지정한 정지주파수 근처에 있다 — 피크는 중심 ±N/10 (캡처폭의 ±1/8, 200 kHz 면
-    // ±25 kHz) 에서만 찾는다. 그 밖의 강한 반송파를 위성으로 잡지 않게 (DGS-1 실측 +37 kHz).
-    const int pk_lo = N/2 - N/10, pk_hi = N/2 + N/10;
     const float floor_db = median_of(inner);
     std::vector<float> dev(inner.size());
     for(size_t i = 0; i < inner.size(); i++) dev[i] = fabsf(inner[i] - floor_db);
     const float sigma = 1.4826f * median_of(dev);
-    const float thr = floor_db + std::max(1.0f, 6.0f*sigma);
-    int k0 = pk_lo;
-    for(int i = pk_lo; i < pk_hi; i++) if(db[i] > db[k0]) k0 = i;
-    if(db[k0] <= thr){ munmap(map, (size_t)st.st_size); R.why = "peak below threshold"; return R; }
-    int a = k0, b = k0;
+    int kp = ba;                                      // 지속 구간 안의 최대에서 키운다
+    for(int i = ba; i <= bb; i++) if(db[i] > db[kp]) kp = i;
+    // 임계 = 바닥 + max(6σ, 피크 높이의 절반). 고정 1 dB 로 두면 약한 패스(바닥 위 ~1 dB 의
+    // 평평한 5 kHz 덩어리)에서 양끝 뿔만 넘어 1.6 kHz 로 잘렸다 (DGS-1 10/2 22:19).
+    const float thr = floor_db + std::max(6.0f*sigma, 0.5f*(db[kp] - floor_db));
+    if(db[kp] - floor_db <= 6.0f*sigma){ munmap(map, (size_t)st.st_size); R.why = "peak below threshold"; return R; }
+    int a = kp, b = kp;
     while(a > lo_i){
         if(db[a-1] > thr) a--;
         else if(a-2 >= lo_i && db[a-2] > thr) a -= 2;
@@ -149,34 +164,17 @@ Result trim(const std::string& path, const std::function<double(double)>& dop_fn
     R.center_off_hz = ((a + b) * 0.5 - N/2) * bin_hz;
     if(b - a + 1 < 3){ munmap(map, (size_t)st.st_size); R.why = "occupied band too narrow"; return R; }
 
-    // 위성인가: 도플러를 따라가는 프레임에선 위성은 같은 bin 에 머물고 지상 신호는
-    // 패스 동안 수십 kHz 를 휩쓴다. 신호 행 대부분의 피크가 이 구간에 있어야 한다.
-    // (없으면 DGS-2 08:04 처럼 스퓨리어스 한 줄을 위성으로 잡아 120 Hz 로 잘라 버린다)
-    int inside = 0;
-    std::vector<double> dops;                     // 구간 안 행의 도플러
-    for(size_t q = 0; q < row_peak.size(); q++){
-        int pk = row_peak[q];
-        if(pk < a - 2 || pk > b + 2) continue;
-        inside++;
-        if(dop_fn){
-            double t = (double)meta.start_unix + row_idx[q] + 0.5;
-            double d = dop_fn(t);
-            dops.push_back(d);
-        }
-    }
-    if(inside < 10 || inside * 10 < (int)row_peak.size() * 6){
-        munmap(map, (size_t)st.st_size);
-        char w[96]; snprintf(w, sizeof w, "not a steady signal (%d/%d rows in band)", inside, (int)row_peak.size());
-        R.why = w; return R;
-    }
     if(dop_fn){
-        // 신호가 보인 동안 도플러가 거의 안 변했으면(패스 끝 저고도) 고정 지상 반송파와
-        // 구별할 수 없다 — 자르지 않는다. 피크 흔들림 비교는 쓰지 않는다: 5 kHz 폭의
-        // 평평한 신호는 피크가 덩어리 안에서 무작위로 튀어 위성도 탈락했다 (DGS-1 10/2 09:14).
-        double dspan = *std::max_element(dops.begin(), dops.end()) - *std::min_element(dops.begin(), dops.end());
-        if(dspan < 500.0){
+        // 신호가 보인 동안 도플러가 거의 안 변했으면(패스 끝 저고도) 고정 지상 반송파도
+        // 추적 프레임에서 한 자리에 머문다 — 구별할 수 없으니 자르지 않는다.
+        double dmin = 1e30, dmax = -1e30;
+        for(size_t r : row_idx){
+            double d = dop_fn((double)meta.start_unix + r + 0.5);
+            dmin = std::min(dmin, d); dmax = std::max(dmax, d);
+        }
+        if(dmax - dmin < 500.0){
             munmap(map, (size_t)st.st_size);
-            char w[96]; snprintf(w, sizeof w, "Doppler barely changed while visible (%.0f Hz)", dspan);
+            char w[96]; snprintf(w, sizeof w, "Doppler barely changed while visible (%.0f Hz)", dmax - dmin);
             R.why = w; return R;
         }
     }
