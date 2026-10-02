@@ -85,6 +85,9 @@ static const char* db_subdir_for(const char* fn){
     //   all_YYYYMMDD.txt = 전 페이로드 + Starlink       (지구본, Starlink 포함 매칭)
     if((strncmp(fn, "leo_", 4) == 0 || strncmp(fn, "all_", 4) == 0)
        && n > 4 && strcmp(fn + n - 4, ".txt") == 0) return "tle";
+    // 위성 대표 프레임 (SATFRAME_<norad>.txt) — 기지들이 패스마다 같은 이름으로 덮어쓰고
+    // 다음 패스 기지가 받아 비교한다 (와이어 무변경, 기존 DB_SAVE/DB_DOWNLOAD 재사용).
+    if(strncmp(fn, "SATFRAME_", 9) == 0) return "satframe";
     return "iq";
 }
 
@@ -118,6 +121,7 @@ static void db_ensure_dirs(){
     mkdir((base + "/iq").c_str(), 0755);
     mkdir((base + "/audio").c_str(), 0755);
     mkdir((base + "/hist").c_str(), 0755);
+    mkdir((base + "/satframe").c_str(), 0755);
 }
 
 // 충돌 시 _2, _3 … 자동 부여. 반환: 실제 사용한 basename (입력과 다르면 rename 됨).
@@ -1010,7 +1014,10 @@ void CentralServer::dispatch_to_joins(std::shared_ptr<HostRoom> room,
             std::string db_base = db_base_dir();
             const char* sub = db_subdir_for(filename);
             std::string dst;
-            std::string final_name = db_unique_name(db_base, sub, filename, dst);
+            // 위성 대표 프레임은 "최신 1개" 를 같은 이름으로 덮어쓴다 (_2, _3 붙이면 못 찾는다)
+            std::string final_name = (strcmp(sub, "satframe") == 0)
+                ? (dst = db_base + "/" + sub + "/" + filename, std::string(filename))
+                : db_unique_name(db_base, sub, filename, dst);
             printf("[Central] DB_SAVE_META(HOST): '%s' by '%s' → %s/%s\n",
                    filename, op_name, sub, final_name.c_str());
             if(info[0]){ FILE* fi=fopen(SigMF::sidecar_path(dst).c_str(),"w");

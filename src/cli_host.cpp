@@ -23,6 +23,7 @@ df::MrcStatus kraken_mrc_status();
 #include "host_state.hpp"
 #include "sat_sched.hpp"
 #include "sat_tle.hpp"
+#include "sat_demod.hpp"
 #include "kst_time.hpp"
 #include <sstream>
 #include "long_waterfall.hpp"
@@ -2085,7 +2086,7 @@ void run_cli_host(){
                     if(len < 9 + sizeof(PktDbDownloadInfo)) return;
                     const auto* di = reinterpret_cast<const PktDbDownloadInfo*>(pkt + 9);
                     char fn[129]={}; strncpy(fn, di->filename, 128);
-                    if(is_tle_snapshot(fn)) return;   // 궤도원소엔 사이드카가 없다
+                    if(is_tle_snapshot(fn) || SatDemod::is_frame_file(fn)) return;   // 사이드카 없는 파일
                     bool is_iq = (is_iq_filename(fn));
                     std::string dir = is_iq ? BEWEPaths::record_iq_dir() : BEWEPaths::record_audio_dir();
                     mkdir(dir.c_str(), 0755);
@@ -2113,6 +2114,8 @@ void run_cli_host(){
                         if(is_tle_snapshot(d->filename)){
                             mkdir((BEWEPaths::assets_dir() + "/tle").c_str(), 0755);
                             dir = TleCache::dir();
+                        } else if(SatDemod::is_frame_file(d->filename)){
+                            dir = SatDemod::frame_dir();   // 위성 대표 프레임 (전 기지 공유본)
                         }
                         mkdir(dir.c_str(), 0755);
                         host_db_dl_path = dir + "/" + d->filename;

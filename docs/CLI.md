@@ -102,8 +102,17 @@ requested SR and the whole band is recorded without decimation. Large: 2 MSPS is
    and rewrites the file at that width x1.25, centred on the signal. The
    `.sigmf-meta` gets the new SR, the measured centre frequency and the note
    `Doppler-corrected; occupied N kHz`.
-4. If the signal never shows (fewer than 5 seconds above the floor) the
-   capture-width file is kept as recorded.
+4. If no satellite is identified (no steady signal near the rest frequency, or
+   it only shows where the Doppler barely changes) the capture-width file is
+   kept as recorded.
+5. When the trim succeeds the station demodulates it (2-FSK, symbol rate found
+   between 4700 and 5100 Bd), stacks the 1-second frames into one
+   representative frame with per-bit confidence, and compares it with the
+   latest frame of the same satellite from **any** station. The result goes to
+   the log (`[SAT] <norad> FSK ... vs previous [...]: N% match`) and to the
+   `.sigmf-meta` notes. The new frame then replaces the shared one on Central
+   (`DataBase/satframe/SATFRAME_<norad>.txt`); every station fetches it when it
+   arms the next pass. Local copies: `~/BEWE/sat_frames/`.
 
 Measured on a 58400 pass at 465 MHz (DGS-2): 5.5 kHz occupied, 682 MB capture
 trimmed to 24 MB, against 5.45 GB for the same pass recorded full-band.

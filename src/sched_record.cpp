@@ -3,9 +3,12 @@
 #include "bewe_paths.hpp"
 #include "login.hpp"
 #include "kst_time.hpp"
+#include <sys/stat.h>
 #include "sigmf.hpp"
 #include "sat_sched.hpp"
 #include "sat_trim.hpp"
+#include "sat_demod.hpp"
+#include "sat_tle.hpp"
 #include "mission_push.hpp"
 #include <ctime>
 #include <chrono>
@@ -198,6 +201,9 @@ void FFTViewer::sched_arm_entry(int idx){
                                                    (double)e.freq_mhz * 1e6);
         if(!iq_doppler_fn[slot])
             bewe_log_push(0, "[SCHED] Warn: no TLE for %d - recording without Doppler tracking\n", norad);
+        // 직전 대표 프레임(전 기지 공유)을 지금 받아 둔다 — 패스 끝 비교용. 없으면 무응답.
+        mkdir(SatDemod::frame_dir().c_str(), 0755);
+        TleCache::request(SatDemod::latest_name(norad));
     }
 
     e.status = SchedEntry::ARMED;
@@ -293,6 +299,8 @@ void FFTViewer::sched_stop_entry(int idx){
     // 재절단의 위성/지상 판별에 녹음 때 따라간 도플러를 그대로 쓴다 (아래에서 채널 것은 비운다)
     std::function<double(double)> trim_dop;
     if(sat_trim && slot >= 0 && slot < MAX_CHANNELS) trim_dop = iq_doppler_fn[slot];
+    const int    trim_norad = SatSched::norad_of(e.target);
+    const std::string trim_station = station_name;
 
     if(e.sr_hz > 0){
         stop_rec();   // rec_worker join + .sigmf-meta Duration 갱신
@@ -317,7 +325,9 @@ void FFTViewer::sched_stop_entry(int idx){
     // 자동 DB 업로드 (별도 스레드) — 파일 finalize 대기 후 전송
     if(!iq_path.empty() && (sched_db_upload_fn || sat_trim)){
         auto upload_fn = sched_db_upload_fn;
-        std::thread([upload_fn, iq_path, entry_op, entry_start, entry_dur, entry_freq, entry_bw, sat_trim, trim_dop](){
+        std::thread([upload_fn, iq_path, entry_op, entry_start, entry_dur, entry_freq, entry_bw, sat_trim, trim_dop,
+                     trim_norad, trim_station](){
+            std::string frame_upload;   // 이번 대표 프레임 (IQ 업로드 뒤 Central 로)
             // 녹음이 0 프레임이면 stop_iq_rec 가 파일을 지웠다 — 노트를 쓰면 빈 메타만 생긴다
             if(access(iq_path.c_str(), F_OK) != 0){
                 bewe_log_push(0, "[SCHED] No recording left (empty) - nothing to trim/upload\n");
@@ -331,6 +341,41 @@ void FFTViewer::sched_stop_entry(int idx){
                                   tr.occ_bw_hz/1e3, tr.center_off_hz/1e3, tr.signal_rows, tr.sr_out);
                 else
                     bewe_log_push(0, "[SCHED] Not trimmed (%s) - keeping capture-width file\n", tr.why.c_str());
+                // 위성으로 식별된 녹음만 복조 → 대표 프레임 → 직전 프레임(전 기지)과 비교
+                if(tr.trimmed){
+                    SatDemod::Result dm = SatDemod::run(iq_path);
+                    if(!dm.ok){
+                        bewe_log_push(0, "[SAT] %d demod skipped (%s)\n", trim_norad, dm.why.c_str());
+                    } else {
+                        const SatDemod::Frame& fr = dm.frame;
+                        const std::string latest = SatDemod::frame_dir() + "/" + SatDemod::latest_name(trim_norad);
+                        SatDemod::Frame prev; std::string prev_hdr;
+                        char note[256];
+                        int nl = snprintf(note, sizeof note, "FSK %.2f bd, %d s frames x %zu bits, %.0f%% stable",
+                                          fr.rate_bd, fr.n_frames, fr.bits.size(), 100*fr.stable_frac());
+                        if(SatDemod::load(latest, prev, &prev_hdr)){
+                            SatDemod::Compare cmp = SatDemod::compare(fr, prev);
+                            snprintf(note + nl, sizeof note - nl, "; vs previous [%s]: %.1f%% match (%d/%d bits differ, shift %d%s)",
+                                     prev_hdr.c_str(), 100*cmp.agree, cmp.n_diff, cmp.n_conf, cmp.shift,
+                                     cmp.polarity < 0 ? ", inverted" : "");
+                        } else {
+                            snprintf(note + nl, sizeof note - nl, "; no previous frame");
+                        }
+                        bewe_log_push(0, "[SAT] %d %s\n", trim_norad, note);
+                        std::string prev_note = SigMF::read_note(iq_path);
+                        SigMF::update_note(iq_path, prev_note.empty() ? std::string(note) : prev_note + "; " + note);
+                        // 헤더 = 이 프레임의 출처 (다음 비교 로그에 그대로 찍힌다)
+                        char hdr[96]; struct tm k; KST::to_tm(entry_start, k);
+                        int hl = snprintf(hdr, sizeof hdr, "%s ", trim_station.c_str());
+                        strftime(hdr + hl, sizeof hdr - hl, "%m-%d %H:%M KST", &k);
+                        mkdir(SatDemod::frame_dir().c_str(), 0755);
+                        SatDemod::save(latest, fr, hdr);
+                        char hist[64]; strftime(hist, sizeof hist, "%Y%m%d_%H%M%S", &k);
+                        SatDemod::save(SatDemod::frame_dir() + "/SATFRAME_" + std::to_string(trim_norad) + "_" +
+                                       trim_station + "_" + hist + ".hist", fr, hdr);
+                        frame_upload = latest;
+                    }
+                }
                 MissionPush::enqueue(iq_path, MFS_IQ);
                 if(!upload_fn) return;
             }
@@ -366,7 +411,11 @@ void FFTViewer::sched_stop_entry(int idx){
                 info_str = buf;
                 fclose(fi);
             }
-            if(sigmf){ upload_fn(iq_path, entry_op, info_str); return; }
+            if(sigmf){
+                upload_fn(iq_path, entry_op, info_str);
+                if(!frame_upload.empty()) upload_fn(frame_upload, entry_op, "");
+                return;
+            }
             char sched_note[256];
             snprintf(sched_note, sizeof(sched_note), "Notes: %s\n", note_body);
             // Notes: 라인 교체 (없으면 끝에 append)
@@ -389,6 +438,7 @@ void FFTViewer::sched_stop_entry(int idx){
             if(!note_replaced) out += sched_note;
             (void)entry_freq; // freq는 표준 .info의 Freq 필드에 이미 들어있음
             upload_fn(iq_path, entry_op, out);
+            if(!frame_upload.empty()) upload_fn(frame_upload, entry_op, "");
         }).detach();
     }
 }
