@@ -339,8 +339,14 @@ void FFTViewer::sched_stop_entry(int idx){
                 if(tr.trimmed)
                     bewe_log_push(0, "[SCHED] Trimmed: occupied %.2f kHz (centre %+.2f kHz, %d s with signal) -> SR %u\n",
                                   tr.occ_bw_hz/1e3, tr.center_off_hz/1e3, tr.signal_rows, tr.sr_out);
-                else
-                    bewe_log_push(0, "[SCHED] Not trimmed (%s) - keeping capture-width file\n", tr.why.c_str());
+                else {
+                    // 위성으로 식별 안 된 녹음은 남기지 않는다 — 로컬 삭제, 미션 push·DB 업로드도 안 함.
+                    // 저고도·무신호 패스가 200 kHz 그대로 0.3~0.7 GB 씩 기지와 Central 에 쌓였다.
+                    remove(iq_path.c_str());
+                    remove(SigMF::meta_path(iq_path).c_str());
+                    bewe_log_push(0, "[SCHED] Not identified (%s) - recording deleted, not uploaded\n", tr.why.c_str());
+                    return;
+                }
                 // 위성으로 식별된 녹음만 복조 → 대표 프레임 → 직전 프레임(전 기지)과 비교
                 if(tr.trimmed){
                     SatDemod::Result dm = SatDemod::run(iq_path);

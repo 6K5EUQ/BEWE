@@ -103,8 +103,8 @@ requested SR and the whole band is recorded without decimation. Large: 2 MSPS is
    `.sigmf-meta` gets the new SR, the measured centre frequency and the note
    `Doppler-corrected; occupied N kHz`.
 4. If no satellite is identified (no steady signal near the rest frequency, or
-   it only shows where the Doppler barely changes) the capture-width file is
-   kept as recorded.
+   it only shows where the Doppler barely changes) the recording is deleted and
+   neither pushed to the mission archive nor uploaded to the Central DB.
 5. When the trim succeeds the station demodulates it (2-FSK, symbol rate found
    between 4700 and 5100 Bd), stacks the 1-second frames into one
    representative frame with per-bit confidence, and compares it with the
@@ -125,7 +125,7 @@ trimmed to 24 MB, against 5.45 GB for the same pass recorded full-band.
 | `/sched del <n>` | Remove entry n (not the one in progress) |
 | `/sched del sat <NORAD>` | Remove the rule and its waiting entries |
 
-- Files: `SCHED_IQ_<station>_<code>_<date>_<HHMMSS>-<HHMMSS>_<F.F>MHz.sigmf-data` + `.sigmf-meta`, in the mission `iq/` folder if a mission is ACTIVE, otherwise `record/iq/`. Uploaded to the Central DB when finished (satellite files after the trim).
+- Files: `SCHED_IQ_<station>_<code>_<date>_<HHMMSS>-<HHMMSS>_<F.F>MHz.sigmf-data` + `.sigmf-meta`, in the mission `iq/` folder if a mission is ACTIVE, otherwise `record/iq/`. Uploaded to the Central DB when finished (satellite files after the trim; unidentified satellite passes are deleted instead).
 - Overlapping entries are refused (the pre-arm 5 s counts). Two satellites passing at once: the later one is skipped and logged.
 - Max 32 entries per station. Finished satellite entries are dropped an hour after they end.
 - Log tags: `[SCHED]` (arm/start/stop/restore), `[SAT]` (pass expansion), `[SCHED-DB]` (upload).
