@@ -11,6 +11,7 @@
 #include <chrono>
 #include <thread>
 #include <cstdio>
+#include <unistd.h>
 
 // ── sched 리스트를 SCHED_SYNC 패킷으로 변환 ──────────────────────────────
 // 호출자는 sched_mtx를 잡은 상태여야 함
@@ -317,6 +318,11 @@ void FFTViewer::sched_stop_entry(int idx){
     if(!iq_path.empty() && (sched_db_upload_fn || sat_trim)){
         auto upload_fn = sched_db_upload_fn;
         std::thread([upload_fn, iq_path, entry_op, entry_start, entry_dur, entry_freq, entry_bw, sat_trim, trim_dop](){
+            // 녹음이 0 프레임이면 stop_iq_rec 가 파일을 지웠다 — 노트를 쓰면 빈 메타만 생긴다
+            if(access(iq_path.c_str(), F_OK) != 0){
+                bewe_log_push(0, "[SCHED] No recording left (empty) - nothing to trim/upload\n");
+                return;
+            }
             if(sat_trim){
                 // 수백 MB 를 훑는 일이라 이 스레드에서. 실패해도 1차 파일은 그대로 남는다.
                 SatTrim::Result tr = SatTrim::trim(iq_path, trim_dop);

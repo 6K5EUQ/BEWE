@@ -535,7 +535,7 @@ void FFTViewer::capture_and_process(){
             bool need_ring=rec_on.load(std::memory_order_relaxed)
                           ||mod_wants_ring.load(std::memory_order_relaxed); // 광대역 모듈(WiFi)이 full-rate ring 요청
             if(!need_ring) for(int i=0;i<MAX_CHANNELS;i++){
-                if(channels[i].dem_run.load()){need_ring=true;break;}
+                if(channels[i].dem_run.load() || channels[i].iq_only_run.load()){need_ring=true;break;}
             }
             bool need_tm=!sc8_mode&&tm_iq_on.load(std::memory_order_relaxed)&&(warmup_cnt>=WARMUP_FFTS);
             if(need_ring||need_tm){

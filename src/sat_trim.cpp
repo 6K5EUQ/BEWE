@@ -122,13 +122,16 @@ Result trim(const std::string& path, const std::function<double(double)>& dop_fn
     for(int i = 0; i < N; i++) db[i] = 10.f*log10f((float)(mean[i]/R.signal_rows) + 1e-30f);
     const int lo_i = N/4, hi_i = 3*N/4;
     std::vector<float> inner(db.begin()+lo_i, db.begin()+hi_i);
+    // 위성은 지정한 정지주파수 근처에 있다 — 피크는 중심 ±N/10 (캡처폭의 ±1/8, 200 kHz 면
+    // ±25 kHz) 에서만 찾는다. 그 밖의 강한 반송파를 위성으로 잡지 않게 (DGS-1 실측 +37 kHz).
+    const int pk_lo = N/2 - N/10, pk_hi = N/2 + N/10;
     const float floor_db = median_of(inner);
     std::vector<float> dev(inner.size());
     for(size_t i = 0; i < inner.size(); i++) dev[i] = fabsf(inner[i] - floor_db);
     const float sigma = 1.4826f * median_of(dev);
     const float thr = floor_db + std::max(1.0f, 6.0f*sigma);
-    int k0 = lo_i;
-    for(int i = lo_i; i < hi_i; i++) if(db[i] > db[k0]) k0 = i;
+    int k0 = pk_lo;
+    for(int i = pk_lo; i < pk_hi; i++) if(db[i] > db[k0]) k0 = i;
     if(db[k0] <= thr){ munmap(map, (size_t)st.st_size); R.why = "peak below threshold"; return R; }
     int a = k0, b = k0;
     while(a > lo_i){
@@ -150,7 +153,7 @@ Result trim(const std::string& path, const std::function<double(double)>& dop_fn
     // 패스 동안 수십 kHz 를 휩쓴다. 신호 행 대부분의 피크가 이 구간에 있어야 한다.
     // (없으면 DGS-2 08:04 처럼 스퓨리어스 한 줄을 위성으로 잡아 120 Hz 로 잘라 버린다)
     int inside = 0;
-    std::vector<double> trk, raw, dops;           // 구간 안 행: 추적/원래 프레임 피크(Hz), 도플러
+    std::vector<double> dops;                     // 구간 안 행의 도플러
     for(size_t q = 0; q < row_peak.size(); q++){
         int pk = row_peak[q];
         if(pk < a - 2 || pk > b + 2) continue;
@@ -158,8 +161,6 @@ Result trim(const std::string& path, const std::function<double(double)>& dop_fn
         if(dop_fn){
             double t = (double)meta.start_unix + row_idx[q] + 0.5;
             double d = dop_fn(t);
-            trk.push_back((pk - N/2) * bin_hz);
-            raw.push_back((pk - N/2) * bin_hz + d);
             dops.push_back(d);
         }
     }
@@ -169,19 +170,13 @@ Result trim(const std::string& path, const std::function<double(double)>& dop_fn
         R.why = w; return R;
     }
     if(dop_fn){
-        auto sd = [](const std::vector<double>& v){
-            double m = 0, s = 0;
-            for(double x : v) m += x;
-            m /= v.size();
-            for(double x : v) s += (x-m)*(x-m);
-            return sqrt(s / v.size());
-        };
+        // 신호가 보인 동안 도플러가 거의 안 변했으면(패스 끝 저고도) 고정 지상 반송파와
+        // 구별할 수 없다 — 자르지 않는다. 피크 흔들림 비교는 쓰지 않는다: 5 kHz 폭의
+        // 평평한 신호는 피크가 덩어리 안에서 무작위로 튀어 위성도 탈락했다 (DGS-1 10/2 09:14).
         double dspan = *std::max_element(dops.begin(), dops.end()) - *std::min_element(dops.begin(), dops.end());
-        double s_trk = sd(trk), s_raw = sd(raw);
-        if(dspan < 1000.0 || s_trk >= 0.5 * s_raw){
+        if(dspan < 500.0){
             munmap(map, (size_t)st.st_size);
-            char w[128]; snprintf(w, sizeof w, "not Doppler-locked (span %.0f Hz, spread tracked %.0f / raw %.0f Hz)",
-                                  dspan, s_trk, s_raw);
+            char w[96]; snprintf(w, sizeof w, "Doppler barely changed while visible (%.0f Hz)", dspan);
             R.why = w; return R;
         }
     }
